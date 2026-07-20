@@ -92,6 +92,7 @@ class NoPEGQA(nnx.Module):
 
     def _project(self, hidden_states):
         qkv = self.qkv_proj(hidden_states)
+        qkv = jax.ad_checkpoint.checkpoint_name(qkv, "qkv_proj")
         q_end = self.num_query_heads
         k_end = q_end + self.num_kv_heads
         query = qkv[..., :q_end, :]
@@ -167,4 +168,5 @@ class NoPEGQA(nnx.Module):
             )
             if record_max_logits:
                 self.max_logits.value = self.attention_op.max_logits.value
-        return self.out_proj(output.astype(self.dtype))
+        output = self.out_proj(output.astype(self.dtype))
+        return jax.ad_checkpoint.checkpoint_name(output, "out_proj")
