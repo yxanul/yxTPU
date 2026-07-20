@@ -1,0 +1,133 @@
+"""Exhaustive semantic routing for AdamW and Muon."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+
+import optax
+from flax import nnx
+
+from yxtpu_pretrain.config import OptimizerConfig
+from yxtpu_pretrain.layers.roles import ADAMW_ROLES, MUON_ROLES, ParamRole
+
+Path = tuple[str | int, ...]
+
+
+@dataclass(frozen=True)
+class Route:
+    path: Path
+    role: ParamRole
+    optimizer: str
+    shape: tuple[int, ...]
+    reduction_axes: tuple[int, ...] = ()
+    output_axes: tuple[int, ...] = ()
+    batch_axes: tuple[int, ...] = ()
+
+
+def _actual_axis(original_axis: int, scan_axis: int | None) -> int:
+    if scan_axis is None or original_axis < scan_axis:
+        return original_axis
+    return original_axis + 1
+
+
+def classify_parameters(parameters) -> list[Route]:
+    """Classifies every trainable parameter and raises on the first gap."""
+    routes: list[Route] = []
+    for path, variable in nnx.to_flat_state(parameters):
+        metadata = variable.get_metadata()
+        raw_role = metadata.get("role")
+        if raw_role is None:
+            raise ValueError(f"trainable parameter {path} has no declared optimizer role")
+        try:
+            role = ParamRole(raw_role)
+        except ValueError as error:
+            raise ValueError(f"trainable parameter {path} has unknown role {raw_role!r}") from error
+        shape = tuple(variable.get_value().shape)
+        scan_axis = metadata.get("param_scan_axis")
+        if role in MUON_ROLES:
+            original_in = tuple(metadata.get("matrix_in_axes", ()))
+            original_out = tuple(metadata.get("matrix_out_axes", ()))
+            if not original_in or not original_out:
+                raise ValueError(f"Muon parameter {path} does not declare both matrix axis groups")
+            reduction = tuple(_actual_axis(axis, scan_axis) for axis in original_in)
+            output = tuple(_actual_axis(axis, scan_axis) for axis in original_out)
+            if set(reduction) & set(output):
+                raise ValueError(f"Muon parameter {path} has overlapping matrix axes")
+            covered = set(reduction) | set(output)
+            batch = tuple(axis for axis in range(len(shape)) if axis not in covered)
+            if scan_axis is not None and scan_axis not in batch:
+                raise ValueError(
+                    f"scanned parameter {path} must treat axis {scan_axis} as Muon batch"
+                )
+            routes.append(
+                Route(
+                    path=path,
+                    role=role,
+                    optimizer="muon",
+                    shape=shape,
+                    reduction_axes=reduction,
+                    output_axes=output,
+                    batch_axes=batch,
+                )
+            )
+        elif role in ADAMW_ROLES:
+            routes.append(Route(path=path, role=role, optimizer="adamw", shape=shape))
+        else:
+            raise ValueError(f"parameter {path} with role {role} is not routed")
+    if not routes:
+        raise ValueError("model has no trainable parameters")
+    return routes
+
+
+def _muon_dimension_tree(parameters, routes: list[Route]):
+    by_path = {route.path: route for route in routes}
+    values = []
+    for path, variable in nnx.to_flat_state(parameters):
+        route = by_path[path]
+        dimensions = (
+            optax.contrib.MuonDimensionNumbers(
+                reduction_axis=route.reduction_axes,
+                output_axis=route.output_axes,
+            )
+            if route.optimizer == "muon"
+            else None
+        )
+        values.append((path, variable.replace(value=dimensions)))
+    return nnx.from_flat_state(values)
+
+
+def build_optimizer(model: nnx.Module, config: OptimizerConfig):
+    """Builds an Optax transform and its audited route table."""
+    parameters = nnx.state(model, nnx.Param)
+    routes = classify_parameters(parameters)
+    clipping = optax.clip_by_global_norm(config.gradient_clip_norm)
+    if config.name == "adamw":
+        routes = [replace(route, optimizer="adamw") for route in routes]
+        transform = optax.chain(
+            clipping,
+            optax.adamw(
+                learning_rate=config.learning_rate,
+                b1=config.beta1,
+                b2=config.beta2,
+                eps=config.epsilon,
+                weight_decay=config.weight_decay,
+            ),
+        )
+    else:
+        dimensions = _muon_dimension_tree(parameters, routes)
+        transform = optax.chain(
+            clipping,
+            optax.contrib.muon(
+                learning_rate=config.learning_rate,
+                ns_steps=config.muon_ns_steps,
+                beta=config.muon_beta,
+                eps=config.muon_epsilon,
+                weight_decay=config.weight_decay,
+                adam_b1=config.beta1,
+                adam_b2=config.beta2,
+                adam_weight_decay=config.weight_decay,
+                adam_learning_rate=config.learning_rate,
+                muon_weight_dimension_numbers=dimensions,
+            ),
+        )
+    return transform, routes
