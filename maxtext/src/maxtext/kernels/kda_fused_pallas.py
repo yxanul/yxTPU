@@ -38,18 +38,35 @@ _SOLVE_BLOCK_SIZE = 16
 
 # Triangular solve algorithm. "doubling" forms the whole nilpotent series by
 # repeated squaring and is selected. "blocked" is the original row-serial
-# version, kept as a control.
+# version, kept as a control. "substitution" confines the series to 16-row
+# diagonal blocks and couples them with plain matmuls.
 #
-# "substitution" confines the series to 16-row diagonal blocks and couples them
-# with plain matmuls. It was written to answer two hypotheses and refuted both.
-# It should be about a fifth of doubling's arithmetic, because doubling applies
-# six full-width powers to the K+V-wide right-hand side; measured, it is 1.6%
-# faster (6.315 vs 6.418 ms), so this solve is bound by matmul latency on short
-# 16-row blocks and four serial block steps, not by FLOPs. It should also be
-# better conditioned, capping growth at ||L||^15 per block instead of ||L||^63
-# across the chunk; measured, one BF16 pass still reaches NaN, at step zero
-# rather than step two. Kept as a control, not selected.
+# Substitution is numerically the better algorithm and still loses on
+# throughput. Because A is strictly triangular its spectral radius is exactly
+# zero, so what matters is norm and power growth, not conditioning: at chunk 64
+# with correlated keys and beta near one, kappa_2(I + A) is only about 25 to 70
+# and max |(I + A)^-1| is 1, a benign problem, while doubling forms powers with
+# norms around 1e15 to 1e17. One BF16 pass then returns a 6 to 12 percent
+# relative residual where substitution returns 3e-4, a hundred to three hundred
+# times better. See benchmarks/diagnose_wy_conditioning.py.
+#
+# Measured on the model anyway: substitution with a row-serial base case costs
+# 8.617 ms against 6.437 for FP32-guarded doubling, and the faster variant
+# below, a 16x16 full-precision base case with BF16 inter-block coupling, is
+# 6.111 ms in the core yet 548,450 tok/s against 560,923 in the model. A core
+# gain that inverts at model level, as the shifted convolution also did.
+#
+# An earlier rejection of substitution was measured through a bug: both custom
+# VJP call sites hardcoded solve_method="doubling", so the forward never used
+# the selected method and the base case was itself a nilpotent series. Those
+# runs compared doubling-forward against doubling-forward.
 _SOLVE_METHOD = os.environ.get("KDA_SOLVE_METHOD", "doubling")
+
+# Base case for the substitution solve. "serial" forms no power of the
+# diagonal block at all and is the stable limit; "doubling" runs the same
+# nilpotent series on the 16x16 block, where the growth exponent is 15 rather
+# than 63 and full passes are cheap because the block is small.
+_SOLVE_BASE_CASE = os.environ.get("KDA_SOLVE_BASE_CASE", "serial")
 
 # Rows of the decayed pairwise matrix built per MXU matmul. Each row block
 # rescales both operands around a shared per-channel anchor, so the block size
@@ -126,6 +143,14 @@ _SOLVE_APPLY_MATMUL_PRECISION = _PRECISION_BY_NAME[
     os.environ.get("KDA_SOLVE_APPLY_MATMUL_PRECISION", "highest").lower()
 ]
 
+# Coupling between diagonal blocks in the substitution solve. These matmuls
+# carry the wide K+V right-hand side but form no power of anything, so their
+# error is introduced once rather than amplified, and they are the natural
+# place to spend one BF16 pass while the small base case keeps full passes.
+_SOLVE_COUPLING_MATMUL_PRECISION = _PRECISION_BY_NAME[
+    os.environ.get("KDA_SOLVE_COUPLING_MATMUL_PRECISION", "default").lower()
+]
+
 
 def _matmul(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Array:
   """Contracts the last axis of ``left`` with the leading matrix axis of
@@ -168,6 +193,11 @@ def _solve_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
 def _solve_apply_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Applies one power of the series to the running solution."""
   return _matmul(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
+
+
+def _solve_coupling_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Off-diagonal coupling between substitution blocks; forms no powers."""
+  return _matmul(left, right, precision=_SOLVE_COUPLING_MATMUL_PRECISION)
 
 
 def _transpose(values: jax.Array) -> jax.Array:
@@ -416,6 +446,48 @@ def _solve_unit_lower_triangular_doubling(
   return _nilpotent_series_solve(power, rhs)
 
 
+def _small_unit_lower_forward_substitution(
+    lower_block: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+  """Row-serial forward substitution on a small unit-lower diagonal block.
+
+  This is the stable base case. Each row is corrected only by rows already
+  solved, so no power of the block is ever formed and there is no growing
+  intermediate to lose precision to. It is serial in the block dimension,
+  which is why the block is kept small.
+  """
+  rows = rhs.shape[-2]
+  solved = []
+  for row in range(rows):
+    value = rhs[..., row : row + 1, :]
+    if row:
+      value = value - _solve_apply_matmul(
+          lower_block[..., row : row + 1, :row],
+          jnp.concatenate(solved, axis=-2),
+      )
+    solved.append(value)
+  return jnp.concatenate(solved, axis=-2)
+
+
+def _small_unit_upper_back_substitution(
+    upper_block: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+  """Row-serial back substitution on a small unit-upper diagonal block."""
+  rows = rhs.shape[-2]
+  solved = [None] * rows
+  for row in range(rows - 1, -1, -1):
+    value = rhs[..., row : row + 1, :]
+    if row < rows - 1:
+      value = value - _solve_apply_matmul(
+          upper_block[..., row : row + 1, row + 1 :],
+          jnp.concatenate(solved[row + 1 :], axis=-2),
+      )
+    solved[row] = value
+  return jnp.concatenate(solved, axis=-2)
+
+
 def _solve_unit_lower_triangular_substitution(
     system: jax.Array,
     rhs: jax.Array,
@@ -447,13 +519,15 @@ def _solve_unit_lower_triangular_substitution(
     end = start + block_size
     block_rhs = rhs[..., start:end, :]
     if block_index:
-      block_rhs = block_rhs - _solve_apply_matmul(
+      block_rhs = block_rhs - _solve_coupling_matmul(
           lower[..., start:end, :start],
           jnp.concatenate(solved_blocks, axis=-2),
       )
-    solved_blocks.append(
-        _nilpotent_series_solve(-lower[..., start:end, start:end], block_rhs)
-    )
+    diagonal = lower[..., start:end, start:end]
+    if _SOLVE_BASE_CASE == "serial":
+      solved_blocks.append(_small_unit_lower_forward_substitution(diagonal, block_rhs))
+    else:
+      solved_blocks.append(_nilpotent_series_solve(-diagonal, block_rhs))
   return jnp.concatenate(solved_blocks, axis=-2)
 
 
@@ -476,13 +550,15 @@ def _solve_transposed_unit_lower_triangular_substitution(
     end = start + block_size
     block_rhs = rhs[..., start:end, :]
     if block_index < num_blocks - 1:
-      block_rhs = block_rhs - _solve_apply_matmul(
+      block_rhs = block_rhs - _solve_coupling_matmul(
           upper[..., start:end, end:],
           jnp.concatenate(solved_blocks[block_index + 1 :], axis=-2),
       )
-    solved_blocks[block_index] = _nilpotent_series_solve(
-        -upper[..., start:end, start:end], block_rhs
-    )
+    diagonal = upper[..., start:end, start:end]
+    if _SOLVE_BASE_CASE == "serial":
+      solved_blocks[block_index] = _small_unit_upper_back_substitution(diagonal, block_rhs)
+    else:
+      solved_blocks[block_index] = _nilpotent_series_solve(-diagonal, block_rhs)
   return jnp.concatenate(solved_blocks, axis=-2)
 
 
@@ -1256,7 +1332,7 @@ def pallas_kda_fused(
       initial_state,
       chunk_size=64,
       use_qk_norm=True,
-      solve_method="doubling",
+      solve_method=_SOLVE_METHOD,
   )
   return output, final_state
 
@@ -1271,7 +1347,7 @@ def _pallas_kda_fused_fwd(query, key, value, log_decay, beta, initial_state):
       initial_state,
       chunk_size=64,
       use_qk_norm=True,
-      solve_method="doubling",
+      solve_method=_SOLVE_METHOD,
   )
   return (output, final_state), (
       query,
