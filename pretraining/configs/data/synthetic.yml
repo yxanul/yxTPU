@@ -1,0 +1,14 @@
+name: synthetic
+type: synthetic
+sequence_length: 2048
+per_device_batch_size: 8
+eval_interval: 0
+eval_steps: 0
+dataset_name: null
+dataset_path: null
+tokenizer: null
+split: train
+eval_split: validation
+shuffle_seed: 42
+reuse_example_batch: true
+

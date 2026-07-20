@@ -1,0 +1,12 @@
+name: v4-32
+accelerator: v4-32
+device_count: 32
+chips: 32
+hosts: 4
+mesh: {data: 32, fsdp: 1, tensor: 1, sequence: 1}
+libtpu_init_args:
+  - --xla_enable_async_all_gather=true
+multi_host: true
+performance_verified: false
+notes: Portable Spot profile; on-demand use always requires explicit approval.
+
