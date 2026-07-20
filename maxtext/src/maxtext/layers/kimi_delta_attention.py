@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import functools
+import os
 
 from flax import nnx
 import jax
@@ -40,6 +41,41 @@ from maxtext.utils.sharding import logical_to_mesh_axes
 
 
 _TRIANGULAR_SOLVE_BLOCK_SIZE = 16
+
+# Rewriting the short causal QKV mixer as shifted multiply-accumulates was
+# tried and is slower; this knob is off by default and kept as a control.
+#
+# The motivation was an XPlane profile of the 272.9M hybrid charging 62.080
+# ms/step (26.58%) to convolution fusion, nearly as much as both fused KDA
+# kernels together, for a depthwise convolution with one group per channel.
+# The rewrite is exactly equivalent, 2.4e-7 against the Flax causal
+# convolution, but measured 537,292 tok/s against 560,919, or 4.2% slower.
+#
+# The profile category was misread. A convolution fusion node is not only the
+# convolution: XLA fuses the surrounding elementwise work, here the SiLU and
+# the reshapes, into it. The depthwise lowering itself is not pathological,
+# and replacing it costs four full passes over a [batch, sequence, 3 * heads *
+# head_dim] tensor plus a pad, which is more memory traffic than the
+# convolution it removes.
+_USE_SHIFTED_QKV_CONV = os.environ.get("KDA_SHIFTED_QKV_CONV", "0") == "1"
+
+
+def _causal_depthwise_conv(inputs: Array, kernel: Array) -> Array:
+  """Applies a causal depthwise 1-D convolution as shifted multiply-adds.
+
+  ``inputs`` is ``[batch, sequence, channels]`` and ``kernel`` is the Flax
+  convolution parameter, shaped ``[width, 1, channels]``. Left-padding by
+  ``width - 1`` makes tap ``k`` a plain slice, so the whole convolution is a
+  sum of ``width`` elementwise products and no convolution op is emitted.
+  """
+  width = kernel.shape[0]
+  sequence_length = inputs.shape[1]
+  padded = jnp.pad(inputs, ((0, 0), (width - 1, 0), (0, 0)))
+  output = None
+  for tap in range(width):
+    term = padded[:, tap : tap + sequence_length] * kernel[tap, 0]
+    output = term if output is None else output + term
+  return output
 
 
 def _solve_unit_lower_triangular_blocked(system: Array, rhs: Array) -> Array:
@@ -1226,8 +1262,14 @@ class KimiDeltaAttention(nnx.Module):
     batch, sequence_length, _ = hidden_states.shape
     qkv = self.in_proj_qkv(hidden_states)
     qkv = qkv.transpose(0, 1, 3, 2, 4).reshape(batch, sequence_length, -1)
-    qkv = jnp.pad(qkv, ((0, 0), (self.config.gdn_conv_kernel_dim - 1, 0), (0, 0)))
-    qkv = self.conv1d(qkv)[:, -sequence_length:]
+    if _USE_SHIFTED_QKV_CONV:
+      qkv = _causal_depthwise_conv(
+          qkv,
+          self.conv1d.kernel.value.astype(qkv.dtype),
+      )
+    else:
+      qkv = jnp.pad(qkv, ((0, 0), (self.config.gdn_conv_kernel_dim - 1, 0), (0, 0)))
+      qkv = self.conv1d(qkv)[:, -sequence_length:]
     qkv = jax.nn.silu(qkv.astype(jnp.float32)).astype(self.config.dtype)
     qkv = qkv.reshape(batch, sequence_length, self.num_heads, 3, self.head_dim)
     query, key, value = (qkv[..., i, :] for i in range(3))

@@ -11,6 +11,7 @@ import time
 import jax
 import jax.numpy as jnp
 
+from maxtext.kernels.kda_fused_pallas import _SOLVE_METHOD
 from maxtext.kernels.kda_fused_pallas import pallas_kda_fused_forward
 from maxtext.kernels.kda_fused_pallas import pallas_kda_fused
 from maxtext.layers.kimi_delta_attention import _chunk_kda_impl
@@ -123,7 +124,7 @@ def _fused_forward(query, key, value, log_decay, beta, initial_state):
       log_decay,
       beta,
       initial_state,
-      solve_method="doubling",
+      solve_method=_SOLVE_METHOD,
   )
 
 

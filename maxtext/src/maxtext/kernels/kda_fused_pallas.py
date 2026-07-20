@@ -36,6 +36,21 @@ import jax.numpy as jnp
 
 _SOLVE_BLOCK_SIZE = 16
 
+# Triangular solve algorithm. "doubling" forms the whole nilpotent series by
+# repeated squaring and is selected. "blocked" is the original row-serial
+# version, kept as a control.
+#
+# "substitution" confines the series to 16-row diagonal blocks and couples them
+# with plain matmuls. It was written to answer two hypotheses and refuted both.
+# It should be about a fifth of doubling's arithmetic, because doubling applies
+# six full-width powers to the K+V-wide right-hand side; measured, it is 1.6%
+# faster (6.315 vs 6.418 ms), so this solve is bound by matmul latency on short
+# 16-row blocks and four serial block steps, not by FLOPs. It should also be
+# better conditioned, capping growth at ||L||^15 per block instead of ||L||^63
+# across the chunk; measured, one BF16 pass still reaches NaN, at step zero
+# rather than step two. Kept as a control, not selected.
+_SOLVE_METHOD = os.environ.get("KDA_SOLVE_METHOD", "doubling")
+
 # Rows of the decayed pairwise matrix built per MXU matmul. Each row block
 # rescales both operands around a shared per-channel anchor, so the block size
 # is bounded by how much channel decay may accumulate across it before the FP32
@@ -401,6 +416,76 @@ def _solve_unit_lower_triangular_doubling(
   return _nilpotent_series_solve(power, rhs)
 
 
+def _solve_unit_lower_triangular_substitution(
+    system: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+  """Blocked forward substitution for ``(I + tril(system, -1)) X = rhs``.
+
+  Global recursive doubling reaches ``P^(C-1)`` by squaring ``P`` log2(C)
+  times, so a relative error introduced early is multiplied by every later
+  stage. Substitution instead confines the series to a diagonal block, where
+  nilpotency caps growth at ``||L||^(block-1)`` rather than ``||L||^(C-1)``,
+  and carries the coupling between blocks in plain matmuls that do not feed
+  themselves.
+
+  It is also cheaper. Doubling applies six full-width powers to the whole
+  ``K + V`` right-hand side; substitution applies four narrow series per
+  16-row block plus one growing off-diagonal matmul each, which is roughly a
+  fifth of the arithmetic at chunk 64.
+  """
+  rows = rhs.shape[-2]
+  block_size = _SOLVE_BLOCK_SIZE
+  if rows % block_size:
+    raise ValueError(f"triangular dimension {rows} must be divisible by {block_size}")
+  lower = jnp.tril(system.astype(jnp.float32), k=-1)
+  rhs = rhs.astype(jnp.float32)
+
+  solved_blocks = []
+  for block_index in range(rows // block_size):
+    start = block_index * block_size
+    end = start + block_size
+    block_rhs = rhs[..., start:end, :]
+    if block_index:
+      block_rhs = block_rhs - _solve_apply_matmul(
+          lower[..., start:end, :start],
+          jnp.concatenate(solved_blocks, axis=-2),
+      )
+    solved_blocks.append(
+        _nilpotent_series_solve(-lower[..., start:end, start:end], block_rhs)
+    )
+  return jnp.concatenate(solved_blocks, axis=-2)
+
+
+def _solve_transposed_unit_lower_triangular_substitution(
+    system: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+  """Blocked back substitution for ``(I + tril(system, -1)).T X = rhs``."""
+  rows = rhs.shape[-2]
+  block_size = _SOLVE_BLOCK_SIZE
+  if rows % block_size:
+    raise ValueError(f"triangular dimension {rows} must be divisible by {block_size}")
+  upper = _transpose(jnp.tril(system.astype(jnp.float32), k=-1))
+  rhs = rhs.astype(jnp.float32)
+
+  num_blocks = rows // block_size
+  solved_blocks = [None] * num_blocks
+  for block_index in range(num_blocks - 1, -1, -1):
+    start = block_index * block_size
+    end = start + block_size
+    block_rhs = rhs[..., start:end, :]
+    if block_index < num_blocks - 1:
+      block_rhs = block_rhs - _solve_apply_matmul(
+          upper[..., start:end, end:],
+          jnp.concatenate(solved_blocks[block_index + 1 :], axis=-2),
+      )
+    solved_blocks[block_index] = _nilpotent_series_solve(
+        -upper[..., start:end, start:end], block_rhs
+    )
+  return jnp.concatenate(solved_blocks, axis=-2)
+
+
 def _nilpotent_series_solve(power: jax.Array, rhs: jax.Array) -> jax.Array:
   """Applies ``(I - power)^-1`` when ``power`` is strictly triangular."""
   rows = rhs.shape[-2]
@@ -502,6 +587,8 @@ def _kda_fused_forward_kernel(
     solved = _solve_unit_lower_triangular(system, combined_rhs)
   elif solve_method == "doubling":
     solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
+  elif solve_method == "substitution":
+    solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
   else:
     raise ValueError(f"unknown solve method: {solve_method}")
   u = solved[..., :value_dim]
@@ -602,10 +689,16 @@ def _kda_fused_backward_kernel(
       include_diagonal=True,
   )
   w_input = key_beta * cumulative_decay_exp
-  solved = _solve_unit_lower_triangular_doubling(
-      system,
-      jnp.concatenate((value_beta, w_input), axis=-1),
-  )
+  if _SOLVE_METHOD == "substitution":
+    solved = _solve_unit_lower_triangular_substitution(
+        system,
+        jnp.concatenate((value_beta, w_input), axis=-1),
+    )
+  else:
+    solved = _solve_unit_lower_triangular_doubling(
+        system,
+        jnp.concatenate((value_beta, w_input), axis=-1),
+    )
   u = solved[..., :value_dim]
   w = solved[..., value_dim : value_dim + key_dim]
 
@@ -665,10 +758,16 @@ def _kda_fused_backward_kernel(
     return
 
   solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
-  combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_doubling(
-      system,
-      solved_cotangent,
-  )
+  if _SOLVE_METHOD == "substitution":
+    combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
+        system,
+        solved_cotangent,
+    )
+  else:
+    combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_doubling(
+        system,
+        solved_cotangent,
+    )
   system_cotangent = -_matmul(combined_rhs_cotangent, _transpose(solved))
   system_cotangent = system_cotangent * jnp.tril(
       jnp.ones((chunk_size, chunk_size), dtype=jnp.float32),
@@ -781,7 +880,7 @@ def pallas_kda_fused_forward(
     *,
     chunk_size: int = 64,
     use_qk_norm: bool = True,
-    solve_method: str = "doubling",
+    solve_method: str = _SOLVE_METHOD,
     profile_stage: str = "full",
     streams_per_program: int = _DEFAULT_STREAMS_PER_PROGRAM,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -814,7 +913,7 @@ def pallas_kda_fused_forward(
         "the first production kernel is specialized to chunk=64 and K=V=128, "
         f"got chunk={chunk_size}, K={key_dim}, V={value_dim}"
     )
-  if solve_method not in ("blocked", "doubling"):
+  if solve_method not in ("blocked", "doubling", "substitution"):
     raise ValueError(f"solve_method must be blocked or doubling, got {solve_method}")
   if profile_stage not in ("preprocess", "pairwise", "solve", "full"):
     raise ValueError(f"unknown forward profile stage: {profile_stage}")

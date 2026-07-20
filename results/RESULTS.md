@@ -673,3 +673,46 @@ within a 16-row block instead of `||L||^63` across the chunk while keeping
 off-diagonal updates as plain matmuls. The earlier 16-row solve was slow for
 an unrelated reason, a row-by-row scalar loop, so a properly blocked version
 has not been tried.
+
+### Profile of the selected configuration, and two rejected follow-ups
+
+The 233.564 ms step of the selected 560,923 tok/s configuration divides as:
+
+| Component | ms/step | % of step |
+| --- | ---: | ---: |
+| Fused Pallas KDA kernels | 86.597 | 37.08% |
+| Convolution fusion | 62.080 | 26.58% |
+| Loop fusion | 41.591 | 17.81% |
+| Data formatting | 19.768 | 8.46% |
+| Splash Attention, four layers | 6.958 | 2.98% |
+
+Forward and backward of the fused kernel are 40.519 and 46.078 ms.
+
+**Blocked forward substitution, rejected.** Written to test two claims about
+the doubling solve and refuting both. It should cost about a fifth of the
+arithmetic, since doubling applies six full-width powers to the `K + V`-wide
+right-hand side; measured, it is 1.6% faster at 6.315 against 6.418 ms. The
+solve is therefore bound by matmul latency on 16-row blocks and four serial
+block steps, not by FLOPs. It should also be better conditioned, capping
+growth at `||L||^15` per block against `||L||^63` across the chunk; measured,
+one BF16 pass still reaches NaN, at step zero rather than step two.
+
+**Shifted QKV convolution, rejected.** The convolution-fusion line above
+suggested the depthwise mixer was mislowered, so it was rewritten as one pad
+and four slice-multiply-accumulates. The rewrite is exactly equivalent, 2.4e-7
+against the Flax causal convolution, and a perturbation test confirms nothing
+leaks backwards in time. It measured 537,292 tok/s against 560,919, 4.2%
+slower. The profile category was misread: a convolution fusion node also
+carries the SiLU and reshapes XLA fused into it, so it overstates the
+convolution, and four full passes over the QKV tensor plus a pad cost more
+traffic than the convolution they remove.
+
+Both are retained behind default-off switches with the measurements recorded
+at the switch, so neither hypothesis has to be re-derived.
+
+Artifacts:
+
+- `v6e8-kda-selected-profile-20260720/`
+- `v6e8-kda-substitution-bf16-20260720/`
+- `v6e8-kda-shiftedconv-1-20260720/`
+- `v6e8-kda-shiftedconv-0-20260720/`
