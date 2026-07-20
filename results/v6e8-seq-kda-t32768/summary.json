@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-seq-kda-t32768/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 0.6235114285714286,
+    "median": 0.623434,
+    "p90": 0.6239232
+  },
+  "tokens_per_second_per_device": {
+    "mean": 52553.98754594276,
+    "median": 52560.49557771953,
+    "p10": 52519.285041354284,
+    "p90": 52593.482209979586
+  },
+  "tokens_per_second_global": {
+    "mean": 420431.90036754205,
+    "median": 420483.9646217562,
+    "p10": 420154.28033083427,
+    "p90": 420747.8576798367
+  },
+  "tflops_per_second_per_device": {
+    "mean": 121.78441651032968,
+    "median": 121.79949770377617
+  },
+  "loss": {
+    "first": 8.375279426574707,
+    "last": 6.79335355758667
+  }
+}
