@@ -1,11 +1,19 @@
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 
 from yxtpu_pretrain.config import load_config
 from yxtpu_pretrain.legacy_parity import export_legacy_parameters, legacy_path_for
-from yxtpu_pretrain.model import HybridLanguageModel, count_parameters
+from yxtpu_pretrain.model import (
+    ACTIVATION_LOGICAL_AXES,
+    HybridLanguageModel,
+    count_parameters,
+)
+from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
+from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 
 def _tiny_config():
@@ -85,9 +93,32 @@ def test_tiny_model_forward_is_finite_and_masks_padding():
     tokens = jax.random.randint(jax.random.key(3), (1, 64), 0, config.model.vocab_size)
     segments = jnp.ones_like(tokens)
     segments = segments.at[:, -8:].set(0)
-    logits = model(tokens, decoder_segment_ids=segments)
+    with logical_mesh_context(mesh, make_leaf_config(config).logical_axis_rules):
+        logits = model(tokens, decoder_segment_ids=segments)
     assert logits.shape == (1, 64, config.model.vocab_size)
     assert jnp.all(jnp.isfinite(logits))
+
+
+def test_model_preserves_logical_data_sharding_across_layer_boundaries(monkeypatch):
+    config = _tiny_config()
+    mesh = create_mesh(config.hardware, allow_device_mismatch=True)
+    recorded_axes = []
+    original_constraint = nn.with_logical_constraint
+
+    def record_constraint(value, axes, *args, **kwargs):
+        recorded_axes.append(tuple(axes))
+        return original_constraint(value, axes, *args, **kwargs)
+
+    monkeypatch.setattr(nn, "with_logical_constraint", record_constraint)
+    model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(12))
+    tokens = jnp.ones((1, 64), dtype=jnp.int32)
+    rules = make_leaf_config(config).logical_axis_rules
+    with logical_mesh_context(mesh, rules):
+        assert tuple(nn_partitioning.get_axis_rules()) == tuple(rules)
+        logits = model(tokens)
+    assert logits.shape == (1, 64, config.model.vocab_size)
+    # Embedding and final norm plus four constraints around each of four layers.
+    assert recorded_axes.count(ACTIVATION_LOGICAL_AXES) >= 18
 
 
 def test_legacy_adapter_is_exhaustive_and_converts_qwen_norm_scale():
