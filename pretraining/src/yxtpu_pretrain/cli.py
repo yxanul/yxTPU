@@ -59,26 +59,36 @@ def _config_dump(args: argparse.Namespace) -> int:
 
 
 def _train(args: argparse.Namespace) -> int:
+    config = _resolve(args)
+    from yxtpu_pretrain.runtime.environment import apply_hardware_environment
+
+    apply_hardware_environment(config.hardware)
     from yxtpu_pretrain.train import run
 
-    return run(_resolve(args))
+    return run(config)
 
 
 def _benchmark(args: argparse.Namespace) -> int:
-    from yxtpu_pretrain.train import run
-
     config = _resolve(args)
     if not config.experiment.benchmark:
         raise ValueError("benchmark subcommand requires a benchmark experiment profile")
+    from yxtpu_pretrain.runtime.environment import apply_hardware_environment
+
+    apply_hardware_environment(config.hardware)
+    from yxtpu_pretrain.train import run
+
     return run(config, benchmark_only=True)
 
 
 def _profile(args: argparse.Namespace) -> int:
-    from yxtpu_pretrain.train import run
-
     config = _resolve(args)
     if not config.experiment.profile_steps:
         config.experiment.profile_steps = (3, 4)
+    from yxtpu_pretrain.runtime.environment import apply_hardware_environment
+
+    apply_hardware_environment(config.hardware)
+    from yxtpu_pretrain.train import run
+
     return run(config, profile=True)
 
 

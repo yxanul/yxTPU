@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
 from flax import nnx
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import nnx_scan
@@ -204,6 +205,7 @@ class HybridLanguageModel(nnx.Module):
             config=self.leaf_config,
             mesh=mesh,
             dtype=self.leaf_config.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
             rngs=rngs,
         )
         self.token_embedding.embedding = declare_parameter(
@@ -314,4 +316,3 @@ def count_parameters(model: nnx.Module) -> int:
 def attention_logit_intermediates(model: HybridLanguageModel):
     """Returns `[cycles,batch,query_heads]` maxima after a MuonClip forward."""
     return model.cycles.layer_3.mixer.max_logits.value
-

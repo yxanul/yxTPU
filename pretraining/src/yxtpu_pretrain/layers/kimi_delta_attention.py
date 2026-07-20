@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import functools
-import os
 
 import jax
 import jax.numpy as jnp
@@ -56,7 +55,7 @@ _TRIANGULAR_SOLVE_BLOCK_SIZE = 16
 # and replacing it costs four full passes over a [batch, sequence, 3 * heads *
 # head_dim] tensor plus a pad, which is more memory traffic than the
 # convolution it removes.
-_USE_SHIFTED_QKV_CONV = os.environ.get("KDA_SHIFTED_QKV_CONV", "0") == "1"
+_USE_SHIFTED_QKV_CONV = False
 
 
 def _causal_depthwise_conv(inputs: Array, kernel: Array) -> Array:
@@ -1327,7 +1326,11 @@ class KimiDeltaAttention(nnx.Module):
           chunk_kda,
           chunk_size=self.config.gdn_chunk_size,
           use_qk_norm=self.config.use_qk_norm_in_gdn,
-          compute_dtype=self.config.dtype,
+          compute_dtype=(
+              jnp.float32
+              if self.config.kda_precision == "full_fp32"
+              else self.config.dtype
+          ),
           use_pallas_blocked_solve=self.config.kda_use_pallas_blocked_solve,
           use_analytical_custom_vjp=self.config.kda_use_analytical_custom_vjp,
       )

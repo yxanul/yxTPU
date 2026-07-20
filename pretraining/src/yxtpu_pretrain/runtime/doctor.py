@@ -29,18 +29,49 @@ def _version(distribution: str) -> Check:
 def _maxtext_pin() -> Check:
     package_root = Path(__file__).resolve().parents[3]
     expected = (package_root / "MAXTEXT_PIN").read_text(encoding="utf-8").strip()
-    maxtext_root = package_root.parent / "maxtext"
+    repository_root = package_root.parent
     try:
-        actual = subprocess.run(
-            ["git", "-C", str(maxtext_root), "rev-parse", "HEAD"],
+        imported_at = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "log",
+                "-1",
+                "--format=%H",
+                f"--grep=import MaxText at {expected}",
+                "--",
+                "maxtext/pyproject.toml",
+            ],
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
+        clean = (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository_root),
+                    "diff",
+                    "--quiet",
+                    imported_at,
+                    "--",
+                    "maxtext",
+                ],
+                check=False,
+            ).returncode
+            == 0
+        )
     except (OSError, subprocess.CalledProcessError) as error:
         return Check("maxtext_pin", False, f"cannot inspect vendored MaxText: {error}")
-    ok = actual.startswith(expected)
-    return Check("maxtext_pin", ok, f"expected {expected}, found {actual}")
+    if not imported_at:
+        return Check("maxtext_pin", False, f"no import commit records upstream {expected}")
+    return Check(
+        "maxtext_pin",
+        clean,
+        f"upstream {expected}, import commit {imported_at[:8]}, clean={clean}",
+    )
 
 
 def run_doctor(hardware: HardwareProfile | None = None) -> tuple[bool, list[dict[str, Any]]]:
