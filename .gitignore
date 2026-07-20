@@ -1,0 +1,24 @@
+# Local environments and caches
+.venv/
+.ruff_cache/
+**/__pycache__/
+*.py[cod]
+.DS_Store
+
+# Credentials and machine-local overrides
+.env
+.env.*
+*.pem
+*.key
+*credentials*.json
+application_default_credentials.json
+
+# MaxText runtime output and raw TPU profiler captures. Compact summaries,
+# metrics, and logs under results/ remain versioned.
+results/**/maxtext-output/
+*.xplane.pb
+*.trace.json.gz
+
+# Large upstream regression fixtures are not needed by these TPU experiments.
+maxtext/tests/assets/
+
