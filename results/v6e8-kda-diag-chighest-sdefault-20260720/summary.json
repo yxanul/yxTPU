@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-diag-chighest-sdefault-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.308799,
+    "median": 0.308813,
+    "p90": 0.30909739999999997
+  },
+  "tokens_per_second_per_device": {
+    "mean": 53057.19690494974,
+    "median": 53054.76129567084,
+    "p10": 53005.94595645783,
+    "p90": 53118.30105519395
+  },
+  "tokens_per_second_global": {
+    "mean": 424457.57523959794,
+    "median": 424438.0903653667,
+    "p10": 424047.5676516626,
+    "p90": 424946.4084415516
+  },
+  "tflops_per_second_per_device": {
+    "mean": 82.89367134146063,
+    "median": 82.88986607833219
+  },
+  "loss": {
+    "first": 7.75040340423584,
+    "last": 0.44462260603904724
+  }
+}

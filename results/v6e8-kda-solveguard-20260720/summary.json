@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-solveguard-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.23361059999999997,
+    "median": 0.233553,
+    "p90": 0.233912
+  },
+  "tokens_per_second_per_device": {
+    "mean": 70138.19649991307,
+    "median": 70151.10060671454,
+    "p10": 70043.43520712986,
+    "p90": 70211.34908230635
+  },
+  "tokens_per_second_global": {
+    "mean": 561105.5719993046,
+    "median": 561208.8048537163,
+    "p10": 560347.4816570389,
+    "p90": 561690.7926584508
+  },
+  "tflops_per_second_per_device": {
+    "mean": 109.58009371588543,
+    "median": 109.6002543887169
+  },
+  "loss": {
+    "first": 7.749880790710449,
+    "last": 0.44400864839553833
+  }
+}
