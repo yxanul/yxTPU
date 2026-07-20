@@ -185,23 +185,25 @@ class HybridCycle(nnx.Module):
         policy = _remat_policy(self.remat_policy)
         for index in range(4):
             layer = getattr(self, f"layer_{index}")
-            graphdef, state = nnx.split(layer)
+            graphdef, params, state = nnx.split(layer, nnx.Param, ...)
 
-            def apply_layer(state_in, inputs, *, layer_graphdef=graphdef):
-                current_layer = nnx.merge(layer_graphdef, state_in)
+            def apply_layer(params_in, state_in, inputs, *, layer_graphdef=graphdef):
+                current_layer = nnx.merge(layer_graphdef, params_in, state_in)
                 outputs = current_layer(
                     inputs,
                     decoder_segment_ids=decoder_segment_ids,
                     decoder_positions=decoder_positions,
                     record_max_logits=record_max_logits,
                 )
-                return outputs, nnx.state(current_layer)
+                _, _, new_state = nnx.split(current_layer, nnx.Param, ...)
+                return outputs, new_state
 
             hidden_states, new_state = jax.checkpoint(
                 apply_layer,
                 policy=policy,
                 prevent_cse=False,
             )(
+                params,
                 state,
                 hidden_states,
             )
@@ -289,14 +291,11 @@ class HybridLanguageModel(nnx.Module):
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
             )
-            return output, nnx.state(cycle)
+            _, _, new_state = nnx.split(cycle, nnx.Param, ...)
+            return output, new_state
 
         hidden_states, scanned_state = jax.lax.scan(cycle_fn, hidden_states, (params, state))
         scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "cycles", 0)
-        if scan_axis != 0:
-            new_params, new_rest = scanned_state.split(nnx.Param, ...)
-            new_params = maxtext_utils_nnx.nnx_sync_moveaxis(new_params, 0, scan_axis)
-            scanned_state = nnx.State.merge(new_params, new_rest)
         nnx.update(self.cycles, scanned_state)
         return hidden_states
 
