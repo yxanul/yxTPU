@@ -1,0 +1,112 @@
+{
+  "device": "/device:TPU:0",
+  "profiled_steps": 3,
+  "step_time_milliseconds": {
+    "mean": 237.618721276,
+    "min": 236.7545425,
+    "max": 238.187915
+  },
+  "leaf_device_time_accounted_percent": 99.81937507068947,
+  "training_phases": {
+    "embedding/input prep": {
+      "milliseconds_per_step": 1.466231302666667,
+      "percent_of_step": 0.6170520970709219
+    },
+    "forward transformer scan": {
+      "milliseconds_per_step": 73.54831729600001,
+      "percent_of_step": 30.95224016906135
+    },
+    "output head + loss": {
+      "milliseconds_per_step": 13.872316666666666,
+      "percent_of_step": 5.838057116111498
+    },
+    "backward transformer scan": {
+      "milliseconds_per_step": 137.04750262399997,
+      "percent_of_step": 57.67538091614252
+    },
+    "post-backward + optimizer/metrics": {
+      "milliseconds_per_step": 11.255154739333333,
+      "percent_of_step": 4.736644772303186
+    }
+  },
+  "splash_attention_kernels": {
+    "forward": {
+      "milliseconds_per_step": 18.186964765333332,
+      "percent_of_step": 7.653843378867746
+    },
+    "backward dKV": {
+      "milliseconds_per_step": 21.466565494666664,
+      "percent_of_step": 9.034037966113251
+    },
+    "backward dQ": {
+      "milliseconds_per_step": 17.261134192,
+      "percent_of_step": 7.2642147467626375
+    },
+    "total": {
+      "milliseconds_per_step": 56.914664452,
+      "percent_of_step": 23.952096091743638
+    }
+  },
+  "xla_hlo_categories": {
+    "loop fusion": {
+      "milliseconds_per_step": 91.10945796666657,
+      "percent_of_step": 38.34271032072456
+    },
+    "convolution fusion": {
+      "milliseconds_per_step": 68.68638208200001,
+      "percent_of_step": 28.906132359082548
+    },
+    "custom-call": {
+      "milliseconds_per_step": 56.914717186666714,
+      "percent_of_step": 23.95211828472003
+    },
+    "data formatting": {
+      "milliseconds_per_step": 10.703298007999988,
+      "percent_of_step": 4.504400137549702
+    },
+    "all-reduce": {
+      "milliseconds_per_step": 7.075753334666665,
+      "percent_of_step": 2.9777760340895045
+    },
+    "custom fusion": {
+      "milliseconds_per_step": 1.2435586979999997,
+      "percent_of_step": 0.5233420545831385
+    },
+    "broadcast": {
+      "milliseconds_per_step": 0.7949665340000002,
+      "percent_of_step": 0.33455551386316357
+    },
+    "non-fusion elementwise": {
+      "milliseconds_per_step": 0.4252523953333337,
+      "percent_of_step": 0.17896417969499662
+    },
+    "copy-done": {
+      "milliseconds_per_step": 0.19136584800000253,
+      "percent_of_step": 0.08053483621676695
+    },
+    "dynamic-update-slice": {
+      "milliseconds_per_step": 0.026999454000000003,
+      "percent_of_step": 0.011362511276474497
+    },
+    "sort": {
+      "milliseconds_per_step": 0.011429583333333333,
+      "percent_of_step": 0.004810051696245596
+    },
+    "copy-start": {
+      "milliseconds_per_step": 0.0033644033333333208,
+      "percent_of_step": 0.0014158831068809107
+    },
+    "iota": {
+      "milliseconds_per_step": 0.001952655333333334,
+      "percent_of_step": 0.0008217598861098477
+    },
+    "async-start": {
+      "milliseconds_per_step": 0.0007058593333333328,
+      "percent_of_step": 0.00029705543803236776
+    },
+    "async-done": {
+      "milliseconds_per_step": 0.0003186199999999979,
+      "percent_of_step": 0.0001340887613101465
+    }
+  }
+}

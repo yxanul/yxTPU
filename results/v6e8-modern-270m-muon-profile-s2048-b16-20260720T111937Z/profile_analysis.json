@@ -1,0 +1,133 @@
+{
+  "device": "/device:TPU:0",
+  "profiled_steps": 3,
+  "step_time_milliseconds": {
+    "mean": 274.2903970833333,
+    "min": 274.14682124999996,
+    "max": 274.478865
+  },
+  "leaf_device_time_accounted_percent": 99.85042224918216,
+  "training_phases": {
+    "embedding/input prep": {
+      "milliseconds_per_step": 1.8342075253333332,
+      "percent_of_step": 0.6687100769248131
+    },
+    "forward transformer scan": {
+      "milliseconds_per_step": 64.945065488,
+      "percent_of_step": 23.67748422059004
+    },
+    "output head + loss": {
+      "milliseconds_per_step": 12.803198618,
+      "percent_of_step": 4.667753138331783
+    },
+    "backward transformer scan": {
+      "milliseconds_per_step": 150.69473921666668,
+      "percent_of_step": 54.93985236781129
+    },
+    "post-backward + optimizer/metrics": {
+      "milliseconds_per_step": 43.60290882866666,
+      "percent_of_step": 15.896622445524219
+    }
+  },
+  "splash_attention_kernels": {
+    "forward": {
+      "milliseconds_per_step": 24.492714374666665,
+      "percent_of_step": 8.929482998715931
+    },
+    "backward fused dQ/dK/dV": {
+      "milliseconds_per_step": 40.14290822866667,
+      "percent_of_step": 14.63518542957619
+    },
+    "total": {
+      "milliseconds_per_step": 64.63562260333333,
+      "percent_of_step": 23.56466842829212
+    }
+  },
+  "xla_hlo_categories": {
+    "convolution fusion": {
+      "milliseconds_per_step": 103.23874270600011,
+      "percent_of_step": 37.63848235439126
+    },
+    "loop fusion": {
+      "milliseconds_per_step": 73.47728957599993,
+      "percent_of_step": 26.788137812085527
+    },
+    "custom-call": {
+      "milliseconds_per_step": 64.63566499866673,
+      "percent_of_step": 23.5646838846602
+    },
+    "data formatting": {
+      "milliseconds_per_step": 18.86813454266666,
+      "percent_of_step": 6.87888994412526
+    },
+    "all-reduce": {
+      "milliseconds_per_step": 6.153101302666665,
+      "percent_of_step": 2.243279884420185
+    },
+    "reduce": {
+      "milliseconds_per_step": 4.204176380000001,
+      "percent_of_step": 1.532746470421534
+    },
+    "broadcast": {
+      "milliseconds_per_step": 1.4931424439999992,
+      "percent_of_step": 0.5443655555853679
+    },
+    "custom fusion": {
+      "milliseconds_per_step": 1.2432581513333334,
+      "percent_of_step": 0.4532634625759844
+    },
+    "non-fusion elementwise": {
+      "milliseconds_per_step": 0.3233505206666665,
+      "percent_of_step": 0.11788619802407008
+    },
+    "copy-done": {
+      "milliseconds_per_step": 0.18420470000000339,
+      "percent_of_step": 0.06715681699350175
+    },
+    "dynamic-update-slice": {
+      "milliseconds_per_step": 0.04037713666666668,
+      "percent_of_step": 0.014720579756352001
+    },
+    "sort": {
+      "milliseconds_per_step": 0.011423255333333335,
+      "percent_of_step": 0.004164657404999413
+    },
+    "copy-start": {
+      "milliseconds_per_step": 0.0048717213333332775,
+      "percent_of_step": 0.001776118079647236
+    },
+    "iota": {
+      "milliseconds_per_step": 0.0015459373333333328,
+      "percent_of_step": 0.0005636133637094322
+    },
+    "async-start": {
+      "milliseconds_per_step": 0.0006045073333333335,
+      "percent_of_step": 0.000220389535966757
+    },
+    "async-done": {
+      "milliseconds_per_step": 0.00023179666666666584,
+      "percent_of_step": 8.450775861330745e-05
+    }
+  },
+  "muon_optimizer": {
+    "total": {
+      "milliseconds_per_step": 32.483450416000004,
+      "percent_of_step": 11.842722443589984
+    },
+    "events_per_step": 54.0,
+    "xla_hlo_categories": {
+      "convolution fusion": {
+        "milliseconds_per_step": 29.162187030000005,
+        "percent_of_step": 10.631865840035267
+      },
+      "loop fusion": {
+        "milliseconds_per_step": 2.1647976306666665,
+        "percent_of_step": 0.7892356617971465
+      },
+      "data formatting": {
+        "milliseconds_per_step": 1.1564657553333333,
+        "percent_of_step": 0.4216209417575719
+      }
+    }
+  }
+}

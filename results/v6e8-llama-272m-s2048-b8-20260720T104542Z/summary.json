@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-llama-272m-s2048-b8-20260720T104542Z/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.12914544,
+    "median": 0.12911,
+    "p90": 0.1293346
+  },
+  "tokens_per_second_per_device": {
+    "mean": 126865.01914784886,
+    "median": 126899.54302532724,
+    "p10": 126679.17405451334,
+    "p90": 127061.93222927
+  },
+  "tokens_per_second_global": {
+    "mean": 1014920.1531827908,
+    "median": 1015196.3442026179,
+    "p10": 1013433.3924361067,
+    "p90": 1016495.45783416
+  },
+  "tflops_per_second_per_device": {
+    "mean": 219.49556362465836,
+    "median": 219.55529512508716
+  },
+  "loss": {
+    "first": 10.803065299987793,
+    "last": 10.276195526123047
+  }
+}

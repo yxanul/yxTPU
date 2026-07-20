@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-llama-272m-bf16-profile-s2048-b16-20260720T110058Z/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 0.4752558571428572,
+    "median": 0.236425,
+    "p90": 1.1527604000000005
+  },
+  "tokens_per_second_per_device": {
+    "mean": 2177940.16919675,
+    "median": 138597.86401607277,
+    "p10": 42118.610373332966,
+    "p90": 7207326.256343148
+  },
+  "tokens_per_second_global": {
+    "mean": 17423521.353574,
+    "median": 1108782.9121285821,
+    "p10": 336948.8829866637,
+    "p90": 57658610.05074518
+  },
+  "tflops_per_second_per_device": {
+    "mean": 3768.1640549118247,
+    "median": 239.79514986655388
+  },
+  "loss": {
+    "first": 10.814746856689453,
+    "last": 10.747889518737793
+  }
+}

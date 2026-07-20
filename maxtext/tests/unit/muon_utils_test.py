@@ -86,6 +86,9 @@ class TestTransformLogic(unittest.TestCase):
   def test_self_attention_value_projection(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "value")), mdn((0,), (-2, -1)))
 
+  def test_self_attention_fused_qkv_projection(self):
+    self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "qkv_proj")), mdn((0,), (-2, -1)))
+
   def test_self_attention_wq_b_and_wkv_b(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "wq_b")), mdn((0,), (-2, -1)))
     self.assertEqual(muon_utils.transform_logic(("decoder", "self_attention", "wkv_b")), mdn((0,), (-2, -1)))

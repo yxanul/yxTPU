@@ -1,0 +1,82 @@
+# Modern dense decoder throughput benchmark for one v6e-8 slice.
+#
+# This keeps the parameter count nearly identical to the original 271.6M
+# benchmark while moving to a Llama-3-style 18-layer architecture. The patched
+# MaxText fused-QKV path emits one [Q | K | V] GEMM with unequal head groups,
+# so this is true 4:1 GQA rather than padded MHA.
+base_config: "../maxtext/src/maxtext/configs/base.yml"
+
+run_name: "v6e8-modern-270m-synthetic"
+model_name: "default"
+hardware: "tpu"
+
+# 270,046,208 trainable parameters.
+decoder_block: "llama2"
+base_emb_dim: 1024
+base_num_query_heads: 8
+base_num_kv_heads: 2
+head_dim: 128
+base_mlp_dim: 2816
+base_num_decoder_layers: 18
+vocab_size: 32768
+
+# Fused SwiGLU: one input projection creates both SiLU-gate and linear-value
+# branches, followed by a fused elementwise product and one output projection.
+mlp_activations: ["silu", "linear"]
+fused_mlp: true
+
+# One fused projection produces 8 Q heads plus 2 K and 2 V heads.
+fused_qkv: true
+
+# Llama-style RMSNorm and RoPE.
+normalization_layer_epsilon: 1.0e-5
+rope_type: "default"
+rope_max_timescale: 500000
+logits_via_embedding: false
+enable_dropout: false
+
+# BF16 compute, FP32 master weights.
+dtype: "bfloat16"
+weight_dtype: "float32"
+opt_type: "adamw"
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.0e-8
+adam_weight_decay: 0.1
+learning_rate: 3.0e-4
+gradient_clipping_threshold: 1.0
+
+max_target_length: 2048
+per_device_batch_size: 16
+gradient_accumulation_steps: 1
+steps: 30
+
+dataset_type: "synthetic"
+reuse_example_batch: 1
+
+# The complete model and optimizer state fit on every chip. Pure DP avoids
+# parameter all-gathers and isolates architecture/optimizer throughput.
+ici_data_parallelism: 8
+ici_fsdp_parallelism: 1
+
+# Tokamax Splash is MaxText's current Pallas Flash/Splash-style training path.
+# It uses a causal block-sparse mask and does not materialize the full SxS
+# attention matrix.
+attention: "flash"
+use_tokamax_splash: true
+sa_block_q: 1024
+sa_block_q_dkv: 2048
+sa_block_q_dq: 2048
+remat_policy: "minimal_with_context"
+
+enable_checkpointing: false
+save_checkpoint_on_completion: false
+async_checkpointing: false
+enable_tensorboard: false
+gcs_metrics: false
+log_period: 1
+profile_periodically_period: -1
+report_heartbeat_metric_for_gcp_monitoring: false
+report_performance_metric_for_gcp_monitoring: false
+enable_gcp_goodput_metrics: false
+enable_gcp_step_deviation_metrics: false

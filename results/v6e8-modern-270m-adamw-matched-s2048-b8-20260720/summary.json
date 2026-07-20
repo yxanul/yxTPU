@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-modern-270m-adamw-matched-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.1305632,
+    "median": 0.1306,
+    "p90": 0.130789
+  },
+  "tokens_per_second_per_device": {
+    "mean": 125487.51722116042,
+    "median": 125451.76110260337,
+    "p10": 125270.4738166054,
+    "p90": 125893.09081164992
+  },
+  "tokens_per_second_global": {
+    "mean": 1003900.1377692834,
+    "median": 1003614.088820827,
+    "p10": 1002163.7905328432,
+    "p90": 1007144.7264931994
+  },
+  "tflops_per_second_per_device": {
+    "mean": 206.45403900772428,
+    "median": 206.39521247852988
+  },
+  "loss": {
+    "first": 10.822147369384766,
+    "last": 10.427271842956543
+  }
+}

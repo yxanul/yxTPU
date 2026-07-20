@@ -158,6 +158,7 @@ def attention_as_linen(
     mrope_section: tuple[int, int, int] | None = None,
     name: str | None = None,
     rope_type: str | None = None,
+    disable_qwen3_hybrid: bool = False,
 ):
   """A factory function to create an Attention as a Linen module.
 
@@ -219,6 +220,7 @@ def attention_as_linen(
       mrope_section=mrope_section,
       name=name,
       rope_type=rope_type,
+      disable_qwen3_hybrid=disable_qwen3_hybrid,
       metadata_fn=variable_to_logically_partitioned,
       abstract_init=False,
   )
@@ -320,6 +322,7 @@ class Attention(nnx.Module):
       rope_max_timescale: float | None = None,
       partial_rotary_factor: float | None = None,
       share_kv_layer: bool = False,
+      disable_qwen3_hybrid: bool = False,
       rngs: nnx.Rngs | None = None,
   ):
     """Initializes the Attention module.
@@ -431,7 +434,7 @@ class Attention(nnx.Module):
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
     self.is_qwen3_hybrid = (
         self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and not self.is_vision
-    )
+    ) and not disable_qwen3_hybrid
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
@@ -672,12 +675,25 @@ class Attention(nnx.Module):
       raise ValueError(f"proj_name must be 'key' or 'value', but got {proj_name}")
 
   def init_qkv_w(self, inputs_shape: Tuple) -> nnx.Module:
+    if self.num_query_heads % self.num_kv_heads != 0:
+      raise ValueError("Invalid num_kv_heads for fused GQA.")
+
+    if self.num_query_heads == self.num_kv_heads:
+      out_features_shape = (3, self.num_query_heads, self.head_dim)
+      kernel_axes = ("embed", "qkv", "heads", "kv")
+    else:
+      # A single GEMM produces Q followed by K and V. Keeping the unequal head
+      # groups on one axis supports true fused GQA instead of padding K/V up to
+      # the query-head count.
+      out_features_shape = (self.num_query_heads + 2 * self.num_kv_heads, self.head_dim)
+      kernel_axes = ("embed", None, "kv")
+
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
-        out_features_shape=(3, self.num_query_heads, self.head_dim),
+        out_features_shape=out_features_shape,
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -692,7 +708,14 @@ class Attention(nnx.Module):
 
     qkv_proj = self.qkv_proj(inputs, out_sharding)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
-    query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
+    if self.num_query_heads == self.num_kv_heads:
+      query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
+    else:
+      query, key, value = jnp.split(
+          qkv_proj,
+          (self.num_query_heads, self.num_query_heads + self.num_kv_heads),
+          axis=2,
+      )
     return query, key, value
 
   @property

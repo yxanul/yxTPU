@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-modern-270m-muon-profile-s2048-b16-20260720T111937Z/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 0.536811,
+    "median": 0.274286,
+    "p90": 1.2948068000000006
+  },
+  "tokens_per_second_per_device": {
+    "mean": 2135323.6548847496,
+    "median": 119466.54222235187,
+    "p10": 37282.31143878562,
+    "p90": 7048084.326531617
+  },
+  "tokens_per_second_global": {
+    "mean": 17082589.239077996,
+    "median": 955732.337778815,
+    "p10": 298258.49151028495,
+    "p90": 56384674.612252936
+  },
+  "tflops_per_second_per_device": {
+    "mean": 3513.0680955520124,
+    "median": 196.54823614545404
+  },
+  "loss": {
+    "first": 10.81445598602295,
+    "last": 10.761983871459961
+  }
+}

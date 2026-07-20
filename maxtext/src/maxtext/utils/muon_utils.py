@@ -88,7 +88,7 @@ def transform_logic(path: Tuple[str, ...]) -> Optional[mdn]:
       return mdn((0, -2), (-1,))
     # Attention qkv projection: [0, L, -2, -1]
     # MLA, exclude wq_a / wkv_a
-    elif _is_path_contain_any(("query", "key", "value", "wq_b", "wkv_b"), path):
+    elif _is_path_contain_any(("query", "key", "value", "qkv_proj", "wq_b", "wkv_b"), path):
       return mdn((0,), (-2, -1))
 
   # 3 Standard weights, [0, L, -1]

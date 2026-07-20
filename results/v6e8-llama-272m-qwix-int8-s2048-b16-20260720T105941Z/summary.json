@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-llama-272m-qwix-int8-s2048-b16-20260720T105941Z/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 10,
+  "first_measured_step": 5,
+  "last_measured_step": 14,
+  "step_time_seconds": {
+    "mean": 0.3098415,
+    "median": 0.30985,
+    "p90": 0.31011710000000003
+  },
+  "tokens_per_second_per_device": {
+    "mean": 105757.3428660748,
+    "median": 105754.39729341693,
+    "p10": 105663.31271021816,
+    "p90": 105840.47820850258
+  },
+  "tokens_per_second_global": {
+    "mean": 846058.7429285984,
+    "median": 846035.1783473354,
+    "p10": 845306.5016817453,
+    "p90": 846723.8256680206
+  },
+  "tflops_per_second_per_device": {
+    "mean": 182.97610906267647,
+    "median": 182.97101277896422
+  },
+  "loss": {
+    "first": 10.8111572265625,
+    "last": 10.71035099029541
+  }
+}
