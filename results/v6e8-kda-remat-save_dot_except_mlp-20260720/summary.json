@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-remat-save_dot_except_mlp-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.237977,
+    "median": 0.237977,
+    "p90": 0.2381628
+  },
+  "tokens_per_second_per_device": {
+    "mean": 68847.02186989956,
+    "median": 68846.98941494347,
+    "p10": 68793.28293621684,
+    "p90": 68896.44062098178
+  },
+  "tokens_per_second_global": {
+    "mean": 550776.1749591965,
+    "median": 550775.9153195478,
+    "p10": 550346.2634897347,
+    "p90": 551171.5249678543
+  },
+  "tflops_per_second_per_device": {
+    "mean": 107.56283287912257,
+    "median": 107.56278217326884
+  },
+  "loss": {
+    "first": 7.74827241897583,
+    "last": 0.44441595673561096
+  }
+}

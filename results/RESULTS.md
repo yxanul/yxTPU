@@ -716,3 +716,40 @@ Artifacts:
 - `v6e8-kda-substitution-bf16-20260720/`
 - `v6e8-kda-shiftedconv-1-20260720/`
 - `v6e8-kda-shiftedconv-0-20260720/`
+
+### Remat policy and batch scaling
+
+The remat policy was re-tested because the two inputs to the earlier rejection
+had both moved: the fused kernel is 2.8x cheaper and the step now uses 15.2 of
+31.25 GB.
+
+| Policy | Global tok/s | Compiled memory |
+| --- | ---: | ---: |
+| `minimal_with_context` | 560,919 | 15.2 GB |
+| `minimal` | 533,080 | 15.1 GB |
+| `save_dot_except_mlp` | 550,776 | 9.2 GB |
+
+`minimal_with_context` remains selected on throughput. The interesting result
+is `save_dot_except_mlp`, which gives up 1.8% for 6 GB, because everything
+optimized so far reduces per-step cost while batch increases the work each
+step amortizes it over. The profile's 41.591 ms of loop fusion and 19.768 ms
+of data formatting are largely batch-independent.
+
+| Batch/chip, `save_dot_except_mlp` | Global tok/s | Compiled memory |
+| --- | ---: | ---: |
+| 8 | 550,776 | 9.2 GB |
+| 16 | 582,117 | 13.3 GB |
+| 24 | 578,758 | 17.4 GB |
+
+Batch 16 is 3.8% above the batch-8 selected configuration and batch 24
+regresses. This is a different operating point rather than a matched
+comparison: batch size changes the gradient noise scale and would need the
+learning-rate schedule revisited, so the selected batch-8 number remains the
+like-for-like result against the 1,003,900 tok/s batch-8 control.
+
+Artifacts:
+
+- `v6e8-kda-remat-minimal-20260720/`
+- `v6e8-kda-remat-save_dot_except_mlp-20260720/`
+- `v6e8-kda-sdem-b16-20260720/`
+- `v6e8-kda-sdem-b24-20260720/`
