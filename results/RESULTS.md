@@ -753,3 +753,58 @@ Artifacts:
 - `v6e8-kda-remat-save_dot_except_mlp-20260720/`
 - `v6e8-kda-sdem-b16-20260720/`
 - `v6e8-kda-sdem-b24-20260720/`
+
+### Batch and gradient accumulation
+
+All rows use the selected kernel with `save_dot_except_mlp` unless noted.
+
+| Microbatch/chip | `ga` | Effective | Global tok/s | Compiled memory |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 1 | 8 | 550,776 | 9.2 GB |
+| 12 | 1 | 12 | 571,302 | 11.3 GB |
+| 16 | 1 | 16 | 582,117 | 13.3 GB |
+| 20 | 1 | 20 | 580,183 | 15.3 GB |
+| 24 | 1 | 24 | 578,758 | 17.4 GB |
+| 8 | 2 | 16 | 575,364 | 11.3 GB |
+| 16 | 2 | 32 | 596,562 | 15.4 GB |
+| 16 | 4 | 64 | 600,548 | 15.4 GB |
+| 16 | 8 | 128 | 602,362 | 15.4 GB |
+| 20 | 4 | 80 | 596,522 | 17.4 GB |
+| 16, `minimal_with_context` | 1 | 16 | 568,993 | 25.2 GB |
+
+Two separate effects, and only one of them is free.
+
+Microbatch size has an interior optimum at 16: 12 gains, 20 and 24 lose. Past
+16 the larger working set costs more than the amortization returns, and this
+is not a memory ceiling.
+
+Gradient accumulation is not itself a throughput win. At a matched effective
+batch of 16 it costs 1.2%, 575,364 against 582,117, which is what an overhead
+that does not change the update should cost. It wins by reaching effective
+batches that do not fit directly while holding the microbatch at its optimum:
+16 with `ga=8` reaches 602,362 at 15.4 GB, against 578,758 for a direct batch
+of 24 at 17.4 GB.
+
+The gain saturates, at +2.5%, +0.7%, and +0.3% for `ga` of 2, 4, and 8, and
+compiled memory is flat in `ga`. Both follow from the mechanism: accumulation
+spreads the per-optimizer-step tail, 7.602 ms post-backward plus 5.696 ms
+all-reduce, or 5.7% of the step, across more tokens, while per-microbatch
+forward and backward are unchanged. A fixed cost can only be spread so thin.
+
+`minimal_with_context` needs 25.2 GB of 31.25 at batch 16, so the selected
+policy has no headroom for this direction; batch scaling requires the swap to
+`save_dot_except_mlp`.
+
+Every row here is a different training configuration. Batch size changes the
+gradient noise scale and the learning-rate schedule would need revisiting, so
+the batch-8 `minimal_with_context` result remains the like-for-like number
+against the 1,003,900 tok/s batch-8 control.
+
+Artifacts:
+
+- `v6e8-kda-sdem-b12-20260720/`, `v6e8-kda-sdem-b16-20260720/`,
+  `v6e8-kda-sdem-b20-20260720/`, `v6e8-kda-sdem-b24-20260720/`
+- `v6e8-kda-sdem-b8ga2-20260720/`, `v6e8-kda-sdem-b16ga2-20260720/`,
+  `v6e8-kda-sdem-b16ga4-20260720/`, `v6e8-kda-sdem-b16ga8-20260720/`,
+  `v6e8-kda-sdem-b20ga4-20260720/`
+- `v6e8-kda-mwc-b16-20260720/`
