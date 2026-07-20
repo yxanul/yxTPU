@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from yxtpu_pretrain.config import CONFIG_ROOT, load_config
+from yxtpu_pretrain.train import _process_batch_sizes
 
 
 def test_selected_profile_matches_certified_baseline():
@@ -20,6 +21,21 @@ def test_selected_profile_matches_certified_baseline():
     assert config.data.per_device_batch_size == 8
     assert config.hardware.device_count == 8
     assert config.experiment.checkpoint.enabled is False
+
+
+def test_gradient_accumulation_expands_the_effective_batch():
+    config = load_config(
+        model="kda_hybrid_273m",
+        optimizer="adamw",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="max_throughput",
+    )
+    train_batch, eval_batch = _process_batch_sizes(config, local_device_count=8)
+    assert config.data.per_device_batch_size == 16
+    assert config.experiment.gradient_accumulation_steps == 8
+    assert train_batch == 16 * 8 * 8
+    assert eval_batch == 16 * 8
 
 
 def test_cli_override_and_train_alias():

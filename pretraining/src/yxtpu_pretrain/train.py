@@ -171,6 +171,24 @@ def _run_name(config: ResolvedConfig) -> str:
     return f"{timestamp}-{config.model.name}-{config.optimizer.name}-{config.experiment.name}"
 
 
+def _process_batch_sizes(
+    config: ResolvedConfig,
+    *,
+    local_device_count: int,
+) -> tuple[int, int]:
+    """Returns process-local train-update and evaluation batch sizes.
+
+    ``per_device_batch_size`` is the microbatch size. A training iterator must
+    provide one microbatch per accumulation step, while evaluation consumes one
+    microbatch because it does not accumulate gradients.
+    """
+    process_microbatch = config.data.per_device_batch_size * local_device_count
+    process_update_batch = (
+        process_microbatch * config.experiment.gradient_accumulation_steps
+    )
+    return process_update_batch, process_microbatch
+
+
 def run(
     config: ResolvedConfig,
     *,
@@ -182,22 +200,22 @@ def run(
         jax.distributed.initialize()
     mesh = create_mesh(config.hardware)
     logical_axis_rules = make_leaf_config(config).logical_axis_rules
-    global_batch = config.data.per_device_batch_size * config.hardware.device_count
-    local_batch = config.data.per_device_batch_size * jax.local_device_count()
-    if global_batch % config.experiment.gradient_accumulation_steps:
-        raise ValueError("global batch size must be divisible by gradient accumulation steps")
+    train_process_batch, eval_process_batch = _process_batch_sizes(
+        config,
+        local_device_count=jax.local_device_count(),
+    )
     process_data = config.data.model_copy(
         update={"shuffle_seed": config.data.shuffle_seed + 1_000_003 * jax.process_index()}
     )
     data_iterator = create_data_iterator(
         process_data,
-        global_batch_size=local_batch,
+        global_batch_size=train_process_batch,
         vocab_size=config.model.vocab_size,
     )
     eval_iterator = (
         create_data_iterator(
             process_data.model_copy(update={"split": config.data.eval_split}),
-            global_batch_size=local_batch,
+            global_batch_size=eval_process_batch,
             vocab_size=config.model.vocab_size,
         )
         if config.data.eval_interval
@@ -320,6 +338,17 @@ def run(
         "memory": _memory_summary(),
         "jax_process_count": jax.process_count(),
         "jax_device_count": jax.device_count(),
+        "microbatch_size_per_device": config.data.per_device_batch_size,
+        "gradient_accumulation_steps": config.experiment.gradient_accumulation_steps,
+        "effective_batch_size_per_device": (
+            config.data.per_device_batch_size
+            * config.experiment.gradient_accumulation_steps
+        ),
+        "effective_global_batch_size": (
+            config.data.per_device_batch_size
+            * config.experiment.gradient_accumulation_steps
+            * jax.device_count()
+        ),
         "libtpu_init_args": os.environ.get("LIBTPU_INIT_ARGS", ""),
     }
     metrics_writer.close(summary)

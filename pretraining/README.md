@@ -58,7 +58,7 @@ The two validated benchmark operating points are:
 # Batch 8 per device, minimal_with_context rematerialization.
 uv run yx-pretrain benchmark --hardware v6e-8 --experiment selected
 
-# Batch 16 per device, split into 8 accumulated microbatches.
+# Microbatch 16 per device, accumulated 8 times (effective batch 128/device).
 uv run yx-pretrain benchmark --hardware v6e-8 --experiment max_throughput
 ```
 
