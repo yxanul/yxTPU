@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-shiftedconv-0-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.23367376,
+    "median": 0.233629,
+    "p90": 0.23394340000000002
+  },
+  "tokens_per_second_per_device": {
+    "mean": 70114.89552741736,
+    "median": 70128.28030766729,
+    "p10": 70034.03494226625,
+    "p90": 70180.00775697465
+  },
+  "tokens_per_second_global": {
+    "mean": 560919.1642193389,
+    "median": 561026.2424613383,
+    "p10": 560272.27953813,
+    "p90": 561440.0620557972
+  },
+  "tflops_per_second_per_device": {
+    "mean": 109.54368954701359,
+    "median": 109.56460119783074
+  },
+  "loss": {
+    "first": 7.749880790710449,
+    "last": 0.44400864839553833
+  }
+}

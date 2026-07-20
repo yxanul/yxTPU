@@ -393,6 +393,79 @@ sequence-length sweep only after the dedicated kernel is competitive; a
 long-context sweep of the current lowering would mostly measure the known
 implementation bottleneck.
 
+## Stream-collapsed grid and selective BF16 precision
+
+Two follow-ups to the fused kernel take the 272.9M hybrid from 304,300 to
+560,923 global tok/s with the loss curve unchanged.
+
+### Grid occupancy
+
+The fused kernel launched `grid=(batch, heads, num_chunks)` against a
+`[1, 1, chunk, key_dim]` block, so one v6e core walked 2,048 sequential
+programs that each did roughly 13 MFLOP. At 6.354 ms that is 3.1 us per
+program, far above what the arithmetic accounts for, and the cost is grid and
+DMA bookkeeping rather than math.
+
+Only the chunk axis carries a dependency: the state recurrence is ordered
+within a stream, and batch and head are independent. Folding them into the
+block leaves 256 programs. Mosaic's `tpu.matmul` accepts a single batch
+dimension, so the two are merged into one stream axis instead of being kept as
+two leading block axes; `streams_per_program` above 8 fails with
+`CompileTimeScopedVmemOom` because the per-chunk intermediates scale with it.
+
+### Precision
+
+Every in-kernel matmul used `Precision.HIGHEST`, which TPU evaluates as six
+BF16 passes. Q and K and V arrive in BF16, so outside the solve those passes
+refine mantissa bits the operands never carried. `Precision.HIGH`, the
+three-pass mode, fails to compile in this kernel.
+
+Reducing every matmul to one pass is 4.93x faster in the core and reaches NaN
+at model step two. Bisecting by matmul role isolates a single cause:
+
+| Guarded at six passes | Model | Outcome |
+| --- | ---: | --- |
+| Everything | 398,061 | trains |
+| All but the state matmuls | 424,458 | trains |
+| The triangular solve only | 560,923 | trains |
+| The pairwise only | - | NaN at step 2 |
+| The solve's squarings only | - | NaN at step 2 |
+
+The repeated-squaring solve is the only fragile operation. It forms `P^63` by
+squaring `P` six times, so relative error compounds multiplicatively and
+diverges once `(I + A)` is poorly conditioned. Splitting the series by role
+does not rescue it, because the update is
+`solution <- (I + P^(2^k)) solution` and the running solution compounds
+exactly as the power does.
+
+The decay-rescaled pairwise operands were the first hypothesis and were wrong.
+Their factors reach `exp(row_block * |gate_lower_bound|)`, but that sits well
+inside BF16's exponent range, and each product is formed once rather than fed
+back into itself.
+
+### What the correctness harness does not cover
+
+The harness passes on the configuration that NaNs the model, so it cannot by
+itself justify a precision change. Its synthetic system has a small spectral
+radius: L2-normalized keys and `beta = sigmoid(normal)` give an `A` whose
+series converges within two terms, so `P^2` is already negligible and the
+squarings are never stressed. A `--decay-mode production` option was added
+while investigating and widens log decay to the configured gate range, but it
+does not reproduce the failure either. The missing axis is the conditioning of
+the WY system rather than the decay range. Until the harness covers that,
+precision changes should be gated on a training run.
+
+### Remaining barrier
+
+The FP32 solve is 2.73 ms of the 6.437 ms core and no precision setting
+reaches it. Recursive doubling was chosen because it is entirely dense MXU
+matmuls, but it is not backward stable, which is exactly why it alone cannot
+take BF16. Blocked forward substitution bounds error growth to `||L||^15`
+inside a 16-row block instead of `||L||^63` across the chunk while leaving the
+off-diagonal updates as plain matmuls. The earlier 16-row solve was slow for
+an unrelated reason, a row-by-row scalar dependency chain, so a properly
+blocked version has not been measured.
+
 ## Artifacts
 
 - Throughput:
