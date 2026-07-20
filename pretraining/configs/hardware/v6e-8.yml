@@ -1,0 +1,17 @@
+name: v6e-8
+accelerator: v6e-8
+device_count: 8
+chips: 8
+hosts: 1
+mesh: {data: 8, fsdp: 1, tensor: 1, sequence: 1}
+libtpu_init_args:
+  - --xla_tpu_scoped_vmem_limit_kib=98304
+  - --xla_enable_async_all_gather=true
+  - --xla_tpu_overlap_compute_collective_tc=true
+  - --xla_tpu_enable_async_collective_fusion_multiple_steps=true
+  - --xla_tpu_enable_async_collective_fusion=true
+  - --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true
+multi_host: false
+performance_verified: true
+notes: Performance-certified on the yxtpu-v6e8-dev Spot slice in europe-west4-a.
+

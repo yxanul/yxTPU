@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "yxtpu-pretrain"
+version = "0.1.0"
+description = "Standalone KDA/NoPE-GQA pretraining for the yxTPU research workspace"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "maxtext[tpu]",
+  "pydantic>=2.13.4",
+  "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0",
+  "ruff>=0.15.0",
+]
+
+[project.scripts]
+yx-pretrain = "yxtpu_pretrain.cli:main"
+
+[tool.uv.sources]
+maxtext = { path = "../maxtext", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yxtpu_pretrain"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+

@@ -1,0 +1,21 @@
+name: sequence_sweep
+steps: 20
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: true
+checkpoint:
+  enabled: false
+  destination: null
+  save_interval: 0
+  async_save: false
+  keep: 2
+  resume: true
+model_overrides:
+  remat_policy: minimal_with_context
+data_overrides:
+  sequence_length: 16384
+  per_device_batch_size: 1
+

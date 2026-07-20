@@ -1,0 +1,300 @@
+"""Typed layered configuration for standalone pretraining."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_ROOT = PACKAGE_ROOT / "configs"
+
+
+class StrictModel(BaseModel):
+    """Base model that rejects misspelled configuration keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class KDAConfig(StrictModel):
+    chunk_size: int = 64
+    num_heads: int = 8
+    key_head_dim: int = 128
+    value_head_dim: int = 128
+    conv_kernel_size: int = 4
+    gate_rank: int = 128
+    qk_norm: bool = True
+    safe_gate: bool = True
+    gate_lower_bound: float = -5.0
+    precision: Literal["guarded_fp32", "full_fp32"] = "guarded_fp32"
+
+    @model_validator(mode="after")
+    def validate_production_shape(self) -> KDAConfig:
+        if self.chunk_size != 64:
+            raise ValueError("the production KDA kernel is specialized to chunk_size=64")
+        if self.key_head_dim != 128 or self.value_head_dim != 128:
+            raise ValueError("the production KDA kernel requires a 128x128 recurrent state")
+        return self
+
+
+class AttentionConfig(StrictModel):
+    implementation: Literal["tokamax_splash"] = "tokamax_splash"
+    num_query_heads: int = 8
+    num_kv_heads: int = 2
+    head_dim: int = 128
+    block_q: int = 1024
+    block_q_dkv: int = 2048
+    fused_qkv: bool = True
+    rope: bool = False
+
+    @model_validator(mode="after")
+    def validate_gqa(self) -> AttentionConfig:
+        if self.num_query_heads % self.num_kv_heads:
+            raise ValueError("num_query_heads must be divisible by num_kv_heads")
+        return self
+
+
+class ModelConfig(StrictModel):
+    name: str
+    vocab_size: int = 32768
+    emb_dim: int = 1024
+    num_layers: int = 16
+    cycle: tuple[Literal["kda", "gqa"], ...] = ("kda", "kda", "kda", "gqa")
+    num_cycles: int = 4
+    mlp_dim: int = 2816
+    fused_mlp: bool = True
+    rms_norm_epsilon: float = 1.0e-5
+    dtype: Literal["bfloat16", "float32"] = "bfloat16"
+    weight_dtype: Literal["float32"] = "float32"
+    param_scan_axis: int = 1
+    remat_policy: Literal["minimal", "minimal_with_context", "save_dot_except_mlp", "full"] = (
+        "minimal_with_context"
+    )
+    residual_policy: Literal["standard", "block_attnres"] = "standard"
+    logits_via_embedding: bool = False
+    dropout_rate: float = 0.0
+    kda: KDAConfig = Field(default_factory=KDAConfig)
+    attention: AttentionConfig = Field(default_factory=AttentionConfig)
+
+    @model_validator(mode="after")
+    def validate_layout(self) -> ModelConfig:
+        if self.num_layers != self.num_cycles * len(self.cycle):
+            raise ValueError("num_layers must equal num_cycles * len(cycle)")
+        if tuple(self.cycle) != ("kda", "kda", "kda", "gqa"):
+            raise ValueError("the certified baseline requires [KDA,KDA,KDA,NoPE-GQA] cycles")
+        if self.residual_policy == "block_attnres":
+            raise ValueError(
+                "block_attnres is reserved but disabled until its separate quality experiment"
+            )
+        return self
+
+
+class OptimizerConfig(StrictModel):
+    name: Literal["adamw", "muon", "muonclip"]
+    learning_rate: float = 3.0e-4
+    beta1: float = 0.9
+    beta2: float = 0.95
+    epsilon: float = 1.0e-8
+    weight_decay: float = 0.1
+    gradient_clip_norm: float = 1.0
+    muon_beta: float = 0.95
+    muon_epsilon: float = 1.0e-8
+    muon_ns_steps: int = 5
+    qk_clip_tau: float = 100.0
+    qk_clip_epsilon: float = 1.0e-6
+
+
+class DataConfig(StrictModel):
+    name: str
+    type: Literal["synthetic", "huggingface", "grain"]
+    sequence_length: int = 2048
+    per_device_batch_size: int = 8
+    eval_interval: int = 0
+    eval_steps: int = 0
+    dataset_name: str | None = None
+    dataset_path: str | None = None
+    tokenizer: str | None = None
+    split: str = "train"
+    eval_split: str = "validation"
+    shuffle_seed: int = 42
+    reuse_example_batch: bool = True
+
+
+class MeshConfig(StrictModel):
+    data: int
+    fsdp: int = 1
+    tensor: int = 1
+    sequence: int = 1
+
+    @property
+    def size(self) -> int:
+        return self.data * self.fsdp * self.tensor * self.sequence
+
+
+class HardwareProfile(StrictModel):
+    name: str
+    accelerator: Literal["v6e-8", "v6e-64", "v5litepod-16", "v5litepod-64", "v4-32"]
+    device_count: int
+    chips: int
+    hosts: int
+    mesh: MeshConfig
+    libtpu_init_args: tuple[str, ...] = ()
+    multi_host: bool
+    performance_verified: bool = False
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def validate_mesh(self) -> HardwareProfile:
+        if self.mesh.size != self.device_count:
+            raise ValueError(
+                f"mesh contains {self.mesh.size} devices but profile requires {self.device_count}"
+            )
+        if self.multi_host != (self.hosts > 1):
+            raise ValueError("multi_host must agree with hosts")
+        return self
+
+
+class CheckpointConfig(StrictModel):
+    enabled: bool = False
+    destination: str | None = None
+    save_interval: int = 0
+    async_save: bool = False
+    keep: int = 2
+    resume: bool = True
+
+    @model_validator(mode="after")
+    def validate_destination(self) -> CheckpointConfig:
+        if self.enabled and not self.destination:
+            raise ValueError("checkpoint destination is required when checkpointing is enabled")
+        return self
+
+
+class ExperimentConfig(StrictModel):
+    name: str
+    steps: int = 30
+    gradient_accumulation_steps: int = 1
+    run_dir: str = "runs"
+    seed: int = 42
+    log_interval: int = 1
+    profile_steps: tuple[int, ...] = ()
+    benchmark: bool = True
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    model_overrides: dict[str, Any] = Field(default_factory=dict)
+    data_overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_checkpoint_policy(self) -> ExperimentConfig:
+        if self.benchmark and self.checkpoint.enabled:
+            raise ValueError("benchmark profiles must keep checkpointing disabled")
+        if not self.benchmark and not self.checkpoint.enabled:
+            raise ValueError("real-training profiles require an explicit checkpoint destination")
+        return self
+
+
+class ResolvedConfig(StrictModel):
+    model: ModelConfig
+    optimizer: OptimizerConfig
+    data: DataConfig
+    hardware: HardwareProfile
+    experiment: ExperimentConfig
+
+    @model_validator(mode="after")
+    def apply_profile_overrides(self) -> ResolvedConfig:
+        # Overrides are applied before validation by load_config. They remain in the
+        # resolved document as provenance, rather than being silently discarded.
+        return self
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+    def to_yaml(self) -> str:
+        return yaml.safe_dump(self.as_dict(), sort_keys=False)
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"configuration profile not found: {path}")
+    with path.open(encoding="utf-8") as handle:
+        value = yaml.safe_load(handle) or {}
+    if not isinstance(value, dict):
+        raise TypeError(f"configuration profile must be a mapping: {path}")
+    return value
+
+
+def _deep_merge(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _parse_override(raw: str) -> tuple[list[str], Any]:
+    if "=" not in raw:
+        raise ValueError(f"override must use dotted.path=value syntax: {raw!r}")
+    path, raw_value = raw.split("=", 1)
+    keys = [part for part in path.split(".") if part]
+    if not keys:
+        raise ValueError(f"override path is empty: {raw!r}")
+    return keys, yaml.safe_load(raw_value)
+
+
+def _set_nested(config: dict[str, Any], keys: list[str], value: Any) -> None:
+    cursor = config
+    for key in keys[:-1]:
+        child = cursor.get(key)
+        if child is None:
+            child = {}
+            cursor[key] = child
+        if not isinstance(child, dict):
+            raise ValueError(f"cannot set nested key below non-mapping {key!r}")
+        cursor = child
+    cursor[keys[-1]] = value
+
+
+def profile_path(kind: str, name: str) -> Path:
+    filename = name if name.endswith((".yml", ".yaml")) else f"{name}.yml"
+    return CONFIG_ROOT / kind / filename
+
+
+def load_config(
+    *,
+    model: str,
+    optimizer: str,
+    data: str,
+    hardware: str,
+    experiment: str,
+    overrides: list[str] | tuple[str, ...] = (),
+) -> ResolvedConfig:
+    """Loads, composes, overrides, and validates a pretraining configuration."""
+    raw: dict[str, Any] = {
+        "model": _read_yaml(profile_path("models", model)),
+        "optimizer": _read_yaml(profile_path("optimizers", optimizer)),
+        "data": _read_yaml(profile_path("data", data)),
+        "hardware": _read_yaml(profile_path("hardware", hardware)),
+        "experiment": _read_yaml(profile_path("experiments", experiment)),
+    }
+
+    model_overrides = raw["experiment"].get("model_overrides", {})
+    data_overrides = raw["experiment"].get("data_overrides", {})
+    raw["model"] = _deep_merge(raw["model"], model_overrides)
+    raw["data"] = _deep_merge(raw["data"], data_overrides)
+
+    for override in overrides:
+        keys, value = _parse_override(override)
+        # `train.steps` was used in the original command proposal. Preserve that
+        # friendly alias while keeping the typed section named `experiment`.
+        if keys[0] == "train":
+            keys[0] = "experiment"
+        _set_nested(raw, keys, value)
+    return ResolvedConfig.model_validate(raw)
+
+
+def dump_json(config: ResolvedConfig) -> str:
+    return json.dumps(config.as_dict(), indent=2, sort_keys=True)

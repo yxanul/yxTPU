@@ -1,0 +1,13 @@
+name: muonclip
+learning_rate: 3.0e-4
+beta1: 0.9
+beta2: 0.95
+epsilon: 1.0e-8
+weight_decay: 0.1
+gradient_clip_norm: 1.0
+muon_beta: 0.95
+muon_epsilon: 1.0e-8
+muon_ns_steps: 5
+qk_clip_tau: 100.0
+qk_clip_epsilon: 1.0e-6
+

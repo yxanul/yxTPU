@@ -1,0 +1,18 @@
+name: v5e-16
+accelerator: v5litepod-16
+device_count: 16
+chips: 16
+hosts: 4
+mesh: {data: 16, fsdp: 1, tensor: 1, sequence: 1}
+libtpu_init_args:
+  - --xla_tpu_enable_data_parallel_all_reduce_opt=true
+  - --xla_tpu_data_parallel_opt_different_sized_ops=true
+  - --xla_tpu_enable_async_collective_fusion=true
+  - --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true
+  - --xla_tpu_enable_async_collective_fusion_multiple_steps=true
+  - --xla_tpu_overlap_compute_collective_tc=true
+  - --xla_enable_async_all_gather=true
+multi_host: true
+performance_verified: false
+notes: Minimum v5e training slice under the TRC training quota; unverified.
+
