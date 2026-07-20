@@ -22,13 +22,31 @@ def _block_until_ready(tree):
   jax.tree.map(lambda value: value.block_until_ready(), tree)
 
 
-def _make_inputs(batch, sequence_length, heads, seed):
+def _make_inputs(batch, sequence_length, heads, seed, decay_mode="mild", decay_lower_bound=-5.0):
+  """Builds one synthetic KDA workload.
+
+  ``decay_mode`` selects how much per-channel decay accumulates inside a chunk.
+  ``mild`` keeps log decay in ``[-0.04, -0.01]``, which is numerically gentle
+  but does not resemble a configured gate. ``production`` spans the whole
+  ``[kda_gate_lower_bound, 0]`` range the model can actually emit, so the
+  pairwise factorization has to survive its real dynamic range: an eight-row
+  block anchored at one end reaches ``exp(8 * |lower_bound|)``.
+  """
   keys = jax.random.split(jax.random.key(seed), 6)
   shape = (batch, sequence_length, heads, 128)
   query = jax.random.normal(keys[0], shape, dtype=jnp.bfloat16)
   key = jax.random.normal(keys[1], shape, dtype=jnp.bfloat16)
   value = jax.random.normal(keys[2], shape, dtype=jnp.bfloat16)
-  log_decay = -0.01 - 0.03 * jax.nn.sigmoid(jax.random.normal(keys[3], shape, dtype=jnp.float32))
+  if decay_mode == "production":
+    log_decay = decay_lower_bound * jax.nn.sigmoid(
+        jax.random.normal(keys[3], shape, dtype=jnp.float32)
+    )
+  elif decay_mode == "mild":
+    log_decay = -0.01 - 0.03 * jax.nn.sigmoid(
+        jax.random.normal(keys[3], shape, dtype=jnp.float32)
+    )
+  else:
+    raise ValueError(f"unknown decay mode: {decay_mode}")
   beta = jax.nn.sigmoid(
       jax.random.normal(
           keys[4],
@@ -180,6 +198,8 @@ def _correctness(args):
       args.correctness_sequence_length,
       args.correctness_heads,
       args.seed,
+      decay_mode=args.decay_mode,
+      decay_lower_bound=args.decay_lower_bound,
   )
   fused_output, fused_final_state, state_history = _fused_forward(*inputs)
   xla_output, xla_final_state = _reference_forward(*inputs)
@@ -303,6 +323,8 @@ def _production_benchmark(args):
       args.sequence_length,
       args.heads,
       args.seed + 1,
+      decay_mode=args.decay_mode,
+      decay_lower_bound=args.decay_lower_bound,
   )
   tokens = args.batch * args.sequence_length
   results = [
@@ -361,6 +383,18 @@ def main():
   parser.add_argument("--gradient-atol", type=float, default=0.002)
   parser.add_argument("--repetitions", type=int, default=20)
   parser.add_argument("--seed", type=int, default=71)
+  parser.add_argument(
+      "--decay-mode",
+      choices=("mild", "production"),
+      default="mild",
+      help="mild keeps log decay near zero; production spans the configured gate range",
+  )
+  parser.add_argument(
+      "--decay-lower-bound",
+      type=float,
+      default=-5.0,
+      help="most negative log decay per step in production mode (kda_gate_lower_bound)",
+  )
   parser.add_argument("--correctness-only", action="store_true")
   parser.add_argument("--include-blocked", action="store_true")
   args = parser.parse_args()

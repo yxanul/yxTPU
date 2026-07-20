@@ -595,3 +595,81 @@ Software:
 - libtpu: 0.0.42.1
 - Flax: 0.12.7
 - Optax: 0.2.8
+
+### Stream-collapsed grid and selective BF16 MXU precision
+
+Two changes to the fused kernel, measured against the 895,538 tok/s fused
+core and the 304,300 tok/s model of the previous section.
+
+**Grid.** The fused kernel ran `grid=(batch, heads, num_chunks)` with a
+`[1,1,C,K]` block, so a v6e core executed 2,048 sequential programs of about
+13 MFLOP each: 6.354 ms over 2,048 programs is 3.1 us per program, far more
+than the arithmetic justifies. Only the chunk axis carries a real dependency;
+batch and head are independent. Folding them into the block leaves 256
+programs. Mosaic's `tpu.matmul` accepts one batch dimension, so batch and head
+are merged into a single stream axis rather than kept as two leading block
+axes. `streams_per_program` above 8 fails with `CompileTimeScopedVmemOom`.
+
+**Precision.** Every in-kernel matmul used `Precision.HIGHEST`, which TPU
+evaluates as six BF16 passes. Q/K/V enter in BF16, so outside the solve those
+passes refine mantissa bits the operands never carried. `Precision.HIGH`
+(three passes) fails to compile in this kernel.
+
+A blanket reduction to one pass is 4.93x faster in the core and diverges to
+NaN at model step two. Bisecting by matmul role isolates the cause:
+
+| Guarded at six passes | Model | Loss |
+| --- | ---: | --- |
+| Everything | 398,061 | 7.749 -> 0.442 |
+| All but the state matmuls | 424,458 | 7.750 -> 0.445 |
+| The triangular solve only | 560,923 | 7.750 -> 0.444 |
+| The pairwise only | NaN at step 2 | diverges |
+| The solve's squarings only | NaN at step 2 | diverges |
+
+The repeated-squaring solve is the sole fragile operation. It reaches `P^63`
+by squaring `P` six times, so relative error compounds multiplicatively, and
+it diverges when `(I + A)` is poorly conditioned. Splitting the series by role
+does not help: the update is `solution <- (I + P^(2^k)) solution`, so the
+running solution compounds exactly as the power does.
+
+The decay-rescaled pairwise operands were the first suspect and were wrong.
+Their factors reach `exp(row_block * |gate_lower_bound|)`, but that is well
+inside BF16's exponent range and each product is formed once rather than fed
+back.
+
+Selected core, `B=8`, `T=2048`, eight heads, chunk 64:
+
+| Core | Forward | Forward + backward | Training tok/s |
+| --- | ---: | ---: | ---: |
+| Previous fused | 6.361 ms | 18.295 ms | 895,538 |
+| Stream-collapsed, guarded solve | 2.360 ms | 6.437 ms | 2,545,320 |
+| Stream-collapsed, unguarded (diverges) | 1.462 ms | 3.709 ms | 4,416,880 |
+
+Model step time falls from 0.4307 to 0.2337 s. The FP32 solve is 2.73 ms of
+the 6.437 ms core and no precision setting reaches it.
+
+The correctness harness passes on the configuration that NaNs the model, so
+it is not sufficient evidence for a precision change. Its synthetic `A` has a
+small spectral radius, the series converges in two terms, and squaring is
+never stressed. `--decay-mode production` was added while investigating and
+widens log decay to the configured gate range, but it does not reproduce the
+failure either: the gap is the conditioning of the WY system, not the decay
+range. Precision changes should be gated on a training run until the harness
+covers conditioning.
+
+Artifacts:
+
+- `v6e8-kda-hybrid-273m-fused-collapsed-h8-s2048-b8-20260720/`
+- `v6e8-kda-diag-chighest-shighest-20260720/`
+- `v6e8-kda-diag-chighest-sdefault-20260720/`
+- `v6e8-kda-solveguard-20260720/`
+- `v6e8-kda-solveapply-bf16-20260720/`
+- `v6e8-kda-hybrid-273m-selected-s2048-b8-20260720/`
+
+Next: the solve is the remaining barrier. Recursive doubling was chosen for
+dense MXU matmuls but is not backward stable, which is why it alone cannot
+take BF16. Blocked forward substitution bounds error growth to `||L||^15`
+within a 16-row block instead of `||L||^63` across the chunk while keeping
+off-diagonal updates as plain matmuls. The earlier 16-row solve was slow for
+an unrelated reason, a row-by-row scalar loop, so a properly blocked version
+has not been tried.
