@@ -78,6 +78,7 @@ def make_leaf_config(config: ResolvedConfig) -> SimpleNamespace:
         kda_safe_gate=kda.safe_gate,
         kda_gate_lower_bound=kda.gate_lower_bound,
         kda_use_fused_pallas_kernel=kda.precision == "guarded_fp32",
+        kda_precision=kda.precision,
         kda_use_pallas_blocked_solve=False,
         kda_use_analytical_custom_vjp=False,
         # AttentionOp fields. Tokamax Splash is the only TPU production path.
@@ -94,7 +95,7 @@ def make_leaf_config(config: ResolvedConfig) -> SimpleNamespace:
         sa_block_kv_dkv_compute=512,
         sa_block_q_dq=512,
         sa_block_kv_dq=512,
-        sa_use_fused_bwd_kernel=True,
+        sa_use_fused_bwd_kernel=False,
         sa_q_layout="HEAD_DIM_MINOR",
         sa_k_layout="HEAD_DIM_MINOR",
         sa_v_layout="HEAD_DIM_MINOR",
@@ -133,4 +134,3 @@ def make_leaf_config(config: ResolvedConfig) -> SimpleNamespace:
         cost_estimate_flops_bwd=-1,
         dq_reduction_steps=0,
     )
-

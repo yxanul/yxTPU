@@ -93,7 +93,18 @@ def _muon_dimension_tree(parameters, routes: list[Route]):
             else None
         )
         values.append((path, variable.replace(value=dimensions)))
-    return nnx.from_flat_state(values)
+    variable_dimensions = nnx.from_flat_state(values)
+    pure_dimensions = nnx.as_pure(variable_dimensions)
+
+    def dimensions_for(current_parameters):
+        first_value = nnx.to_flat_state(current_parameters)[0][1]
+        return (
+            variable_dimensions
+            if isinstance(first_value, nnx.Variable)
+            else pure_dimensions
+        )
+
+    return dimensions_for
 
 
 def build_optimizer(model: nnx.Module, config: OptimizerConfig):

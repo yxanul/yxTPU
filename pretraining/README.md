@@ -46,8 +46,65 @@ uv run yx-pretrain config dump --hardware v6e-8
 Muon and every excluded role through AdamW. `muonclip` adds a post-update GQA
 QK-Clip adaptation; it is not the original MLA factorization from Kimi K2.
 
+The certified model contains exactly 272,935,520 trainable parameters. Its
+four scanned cycles keep the parameter scan axis at position 1. The GQA layer
+owns a single unequal-head QKV projection and calls MaxText's leaf
+`AttentionOp` with Tokamax Splash on TPU; CPU correctness tests use the same
+causal NoPE-GQA equation directly.
+
+The two validated benchmark operating points are:
+
+```bash
+# Batch 8 per device, minimal_with_context rematerialization.
+uv run yx-pretrain benchmark --hardware v6e-8 --experiment selected
+
+# Batch 16 per device, split into 8 accumulated microbatches.
+uv run yx-pretrain benchmark --hardware v6e-8 --experiment max_throughput
+```
+
+`sequence_sweep` is the 16,384-token crossover profile. Change
+`data.sequence_length` and `data.per_device_batch_size` with `--set` for the
+other measured points.
+
+## Real data and checkpoints
+
+Hugging Face records may come from `data.dataset_name`, or from an offline
+JSONL `data.dataset_path`. Each record contains either `input_ids` or `text`;
+text records additionally require `data.tokenizer`. The Grain adapter accepts
+the same offline format and saves Grain's native iterator state.
+
+Real training must opt out of benchmark mode and provide checkpoint storage:
+
+```bash
+uv run yx-pretrain train \
+  --data huggingface \
+  --set data.dataset_name=allenai/c4 \
+  --set data.tokenizer=google/gemma-2-2b \
+  --set experiment.benchmark=false \
+  --set experiment.checkpoint.enabled=true \
+  --set experiment.checkpoint.destination=gs://EXISTING_BUCKET/yxtpu \
+  --set experiment.checkpoint.save_interval=100
+```
+
+The destination must already be authorized. The launcher creates neither a
+bucket nor a TPU. Checkpoints contain NNX model and optimizer state, step,
+supported iterator state, the resolved configuration, repository and MaxText
+commits, tokenizer identity, and the KDA precision policy. Resuming restores
+the next data batch and optimizer step exactly; this is covered by a local
+interrupted-versus-uninterrupted regression test.
+
+## Existing TPU launchers
+
+`scripts/launch_existing_tpu.sh` requires `GCP_PROJECT`, `TPU_NAME`, and
+`TPU_ZONE` and only opens SSH to that existing VM. It has no provisioning
+commands. `scripts/doctor_profiles.sh` checks an exact execution shape, and
+`scripts/smoke_optimizers.sh` runs the three 30-step finite-loss gates.
+
+Only `v6e-8` is performance-certified. The `v6e-64`, `v5e-16`, `v5e-64`, and
+`v4-32` profiles validate device counts and carry generation-appropriate
+compiler defaults, but remain marked unverified until their own approved run.
+
 Benchmark profiles disable checkpointing. A real-training experiment must name
 an explicit local directory or `gs://` destination; the package never creates
 storage or TPU resources implicitly. `../AGENTS.md` is authoritative for
 project, zone, quota, Spot/on-demand, and approval policy.
-
