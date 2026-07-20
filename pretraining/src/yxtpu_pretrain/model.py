@@ -160,6 +160,7 @@ class HybridCycle(nnx.Module):
     """Owned four-layer `[KDA,KDA,KDA,NoPE-GQA]` scan unit."""
 
     def __init__(self, *, config: ResolvedConfig, leaf_config, mesh, rngs: nnx.Rngs):
+        self.remat_policy = config.model.remat_policy
         for index, kind in enumerate(config.model.cycle):
             setattr(
                 self,
@@ -181,13 +182,30 @@ class HybridCycle(nnx.Module):
         decoder_positions=None,
         record_max_logits: bool = False,
     ):
+        policy = _remat_policy(self.remat_policy)
         for index in range(4):
-            hidden_states = getattr(self, f"layer_{index}")(
+            layer = getattr(self, f"layer_{index}")
+            graphdef, state = nnx.split(layer)
+
+            def apply_layer(state_in, inputs, *, layer_graphdef=graphdef):
+                current_layer = nnx.merge(layer_graphdef, state_in)
+                outputs = current_layer(
+                    inputs,
+                    decoder_segment_ids=decoder_segment_ids,
+                    decoder_positions=decoder_positions,
+                    record_max_logits=record_max_logits,
+                )
+                return outputs, nnx.state(current_layer)
+
+            hidden_states, new_state = jax.checkpoint(
+                apply_layer,
+                policy=policy,
+                prevent_cse=False,
+            )(
+                state,
                 hidden_states,
-                decoder_segment_ids=decoder_segment_ids,
-                decoder_positions=decoder_positions,
-                record_max_logits=record_max_logits,
             )
+            nnx.update(layer, new_state)
         return hidden_states
 
 
@@ -273,9 +291,6 @@ class HybridLanguageModel(nnx.Module):
             )
             return output, nnx.state(cycle)
 
-        policy = _remat_policy(self.config.model.remat_policy)
-        if policy is not None:
-            cycle_fn = jax.checkpoint(cycle_fn, policy=policy, prevent_cse=False)
         hidden_states, scanned_state = jax.lax.scan(cycle_fn, hidden_states, (params, state))
         scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "cycles", 0)
         if scan_axis != 0:
