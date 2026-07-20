@@ -850,31 +850,44 @@ script rounded the inputs once and then computed in FP32, which models
 something strictly more accurate and understated the failure, in one regime by
 three orders of magnitude.
 
-Chunk 64, `K=V=128`, one BF16 pass:
+Chunk 64, `K=V=128`, `width=64`, one BF16 pass. `cancel` is the summed stage
+increment norm over the final solution norm. The reference column records how
+the forward error's ground truth was obtained: float64 forward substitution is
+only trustworthy while `kappa * eps_64` stays far below one, and the negative
+extreme at `kappa` 2.79e17 has `kappa * eps_64` near 62, so it uses exact
+rational arithmetic instead, which is available because its entries are 0 and
++/-1 and the right-hand side is dyadic.
 
-| Regime | `k2(I+A)` | `max norm(P^k)` | dbl backward | dbl forward | sub backward | sub forward |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| exact extreme: all-ones, positive | 82.1 | 6.17e17 | 4.8e-2 | 1.7e15 | 8.4e-4 | 1.4e-3 |
-| exact extreme: all-ones, negative | 2.79e17 | 6.17e17 | 6.0e-6 | 2.4e-3 | 5.9e-19 | 3.2e-3 |
-| harness today: independent keys | 1.52 | 0.367 | 2.6e-4 | 5.4e-4 | 2.4e-4 | 5.1e-4 |
-| stress: correlated c=0.9, beta 0.95 | 56.2 | 3.04e15 | 6.8e-2 | 1.4e13 | 9.1e-4 | 1.4e-2 |
-| stress: correlated c=0.99, beta 0.99 | 69.7 | 2.39e17 | 5.9e-2 | 7.1e14 | 8.4e-4 | 1.3e-2 |
-| stress: mixed-sign correlated c=0.9 | 55.7 | 2.63e15 | 6.4e-2 | 1.3e13 | 9.5e-4 | 1.4e-2 |
-| stress: AR(1) phi=0.95, beta 0.95 | 24.6 | 3.12e15 | 1.5e-1 | 9.6e12 | 8.9e-4 | 8.8e-3 |
-| stress: correlated c=0.9, fast decay | 3.39 | 137 | 7.0e-1 | 1.5 | 6.4e-4 | 2.3e-3 |
+| Regime | `k2(I+A)` | `max norm(P^k)` | cancel | dbl backward | dbl forward | sub backward | reference |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| exact extreme: all-ones, positive | 82.1 | 6.17e17 | 129 | 4.8e-2 | 1.3e15 | 7.1e-4 | float64 |
+| exact extreme: all-ones, negative | 2.79e17 | 6.17e17 | inf | 5.8e-6 | 2.3e-3 | 7.2e-19 | exact rational |
+| harness today: independent keys | 1.51 | 0.343 | 0.689 | 2.2e-4 | 4.4e-4 | 2.0e-4 | float64 |
+| stress: correlated c=0.9, beta 0.95 | 54.7 | 1.55e15 | 90 | 6.5e-2 | 5.4e12 | 6.4e-4 | float64 |
+| stress: correlated c=0.99, beta 0.99 | 69.7 | 2.40e17 | 97.8 | 5.7e-2 | 6.8e14 | 7.3e-4 | float64 |
+| stress: mixed-sign correlated c=0.9 | 56.4 | 3.71e15 | 89.7 | 6.3e-2 | 1.5e13 | 7.4e-4 | float64 |
+| stress: AR(1) phi=0.95, beta 0.95 | 26.4 | 2.91e15 | 101 | 1.4e-1 | 8.3e12 | 7.2e-4 | float64 |
+| stress: correlated c=0.9, fast decay | 3.32 | 65.9 | 44.9 | 4.0e-1 | 6.2e-1 | 5.5e-4 | float64 |
 
-Growth is the dominant mechanism in the regimes that motivated this work. The
-positive all-ones extreme is a benign problem, `max abs inverse` exactly 1 and
-`k2` only 82.1, yet doubling forms powers of norm 6.17e17 and returns a
-forward error of 1.7e15. The stress regimes sit at `k2` between 25 and 70,
-also benign, with growth of 1e15 to 1e17 and forward errors of 1e12 or worse.
-So `norm(A) > 1` does not imply large entries in `(I + A)^-1`; that bound is
-loose because the Neumann terms cancel.
+No scalar proxy here orders the regimes correctly, so none should become a
+threshold. `max norm(P^k)` is not monotone in the backward error: fast decay
+grows to 66 and errs 0.4, while correlated regimes grow to 1e15 and err 0.065.
+The cancellation factor is not monotone either, and runs the other way: fast
+decay cancels 45x and errs 0.4, correlated cancels 90x and errs 0.065. The
+negative extreme reports an infinite cancellation factor because its BF16
+intermediate solution overflows float32 outright, which is a cleaner failure
+signal than any norm ratio.
 
-Conditioning still has to be reported alongside it. On the negative extreme,
-substitution reaches a backward error of 5.9e-19, essentially exact, and still
-carries 3.2e-3 forward error, because `k2` of 2.79e17 amplifies it. Backward
-error alone would have scored that solve as perfect.
+A correctness gate should therefore assert on the quantity it cares about, the
+measured BF16-versus-full-precision solve error and gradient error, and treat
+growth, cancellation, per-stage divergence and `kappa` as diagnostics that
+explain a failure rather than predict one.
+
+Conditioning still has to be reported alongside, but as a bound rather than a
+prediction: `kappa` bounds how far a backward error *may* be amplified into
+forward error, and does not predict the realized forward error for a given
+right-hand side. On the negative extreme substitution reaches a backward error
+of 7.2e-19, essentially exact, and still carries 2.3e-3 forward error.
 
 The harness row explains why it passes on a configuration that NaNs the model.
 Independent L2-normalized keys in 128 dimensions give `abs(k_i . k_j)` near
