@@ -101,11 +101,24 @@ class OptimizerConfig(StrictModel):
     epsilon: float = 1.0e-8
     weight_decay: float = 0.1
     gradient_clip_norm: float = 1.0
+    warmup_steps: int = 3
+    schedule_steps: int = 30
+    final_learning_rate_fraction: float = 0.1
     muon_beta: float = 0.95
     muon_epsilon: float = 1.0e-8
     muon_ns_steps: int = 5
     qk_clip_tau: float = 100.0
     qk_clip_epsilon: float = 1.0e-6
+
+    @model_validator(mode="after")
+    def validate_schedule(self) -> OptimizerConfig:
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be non-negative")
+        if self.schedule_steps <= self.warmup_steps:
+            raise ValueError("schedule_steps must be greater than warmup_steps")
+        if not 0.0 <= self.final_learning_rate_fraction <= 1.0:
+            raise ValueError("final_learning_rate_fraction must be in [0, 1]")
+        return self
 
 
 class DataConfig(StrictModel):
