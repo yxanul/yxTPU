@@ -976,3 +976,38 @@ margin is only 3%. A fixed-batch sweep is needed to separate them.
 
 Quality is untested. The workload is synthetic reused tokens, so nothing here
 speaks to validation loss or quality per unit compute.
+
+### Standalone scan parity: logical sharding was the gap
+
+The standalone scan and MaxText's decoder scan use the same core construction:
+split NNX state, move the parameter scan axis, merge a sliced module inside a
+rematerialized body, and execute `jax.lax.scan`. The decisive difference was
+the surrounding logical-sharding contract. The standalone trainer traced
+without MaxText's mesh/axis-rule context, and its hybrid layer omitted the
+activation constraints used by the corresponding Qwen layer.
+
+At an otherwise identical batch-4, axis-1, `minimal_with_context` operating
+point:
+
+| Scanned standalone | Global tok/s | Change |
+| --- | ---: | ---: |
+| Before logical sharding | 266,482 | baseline |
+| After logical sharding | 450,508 | +69.1% |
+
+The old two-step XPlane trace contains 256 exact all-gather events, including
+MLP activations expanding from `bf16[4,2048,1024]` to
+`bf16[32,2048,1024]`. The corrected trace contains zero. Returning to batch 8
+reaches 545,495 tok/s, 97.25% of the historical 560,923 MaxText selected
+result, so scan restructuring is no longer justified by the original gap.
+
+The max-throughput rerun also caught a separate semantic mismatch. The first
+standalone run split a total per-device batch of 16 into eight microbatches,
+processing only 262,144 tokens/update and reaching 477,209 tok/s. MaxText's
+profile uses microbatch 16 accumulated eight times, an effective batch of 128
+per device. After making the iterator provide one configured microbatch per
+accumulation step, the standalone processes 2,097,152 tokens/update and reaches
+598,517 tok/s, 99.36% of the historical 602,373 result.
+
+Artifacts:
+
+- `v6e8-standalone-sharding-parity-20260721/`

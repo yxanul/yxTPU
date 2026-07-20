@@ -1,0 +1,50 @@
+{
+  "experiment_id": "EXP-029",
+  "hardware": "v6e-8",
+  "devices": 8,
+  "sequence_length": 2048,
+  "model_parameters": 272935520,
+  "scan_axis": 1,
+  "sharding_fix_commit": "7236f00",
+  "accumulation_fix_commit": "b133f41",
+  "controlled_batch_4": {
+    "before_run": "20260720T220148Z-kda_hybrid_273m-adamw-selected",
+    "before_tokens_per_second": 266481.54031551554,
+    "after_run": "20260720T234046Z-kda_hybrid_273m-adamw-selected",
+    "after_tokens_per_second": 450508.0920787099,
+    "improvement_percent": 69.05789854910999,
+    "remat_policy": "minimal_with_context"
+  },
+  "selected_batch_8": {
+    "run": "20260720T233354Z-kda_hybrid_273m-adamw-selected",
+    "tokens_per_second": 545495.0271635461,
+    "final_loss": 0.3419795632362366,
+    "historical_maxtext_tokens_per_second": 560923,
+    "historical_parity_percent": 97.24953820106255
+  },
+  "profile": {
+    "run": "20260720T233619Z-kda_hybrid_273m-adamw-selected",
+    "old_exact_all_gather_events": 256,
+    "new_exact_all_gather_events": 0,
+    "old_all_gather_shape": "bf16[4,2048,1024] -> bf16[32,2048,1024]",
+    "profiled_steps": 2
+  },
+  "max_throughput": {
+    "run": "20260720T234849Z-kda_hybrid_273m-adamw-max_throughput",
+    "microbatch_size_per_device": 16,
+    "gradient_accumulation_steps": 8,
+    "effective_batch_size_per_device": 128,
+    "effective_global_batch_size": 1024,
+    "tokens_per_update": 2097152,
+    "tokens_per_second": 598517.4536865419,
+    "final_loss": 7.197320938110352,
+    "historical_maxtext_tokens_per_second": 602373.4453899801,
+    "historical_parity_percent": 99.35986691761589
+  },
+  "invalid_accumulation_control": {
+    "run": "20260720T234330Z-kda_hybrid_273m-adamw-max_throughput",
+    "tokens_per_update": 262144,
+    "tokens_per_second": 477209.18806107494,
+    "reason": "The configured per-device microbatch was incorrectly divided by the accumulation count."
+  }
+}
