@@ -253,7 +253,7 @@ class HybridLanguageModel(nnx.Module):
         self.logits = DenseGeneral(
             in_features_shape=model.emb_dim,
             out_features_shape=model.vocab_size,
-            dtype=jnp.float32,
+            dtype=self.leaf_config.dtype,
             weight_dtype=self.leaf_config.weight_dtype,
             kernel_axes=("embed", "vocab"),
             matmul_precision="default",

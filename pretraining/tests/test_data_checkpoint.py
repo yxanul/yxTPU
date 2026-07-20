@@ -59,6 +59,18 @@ def test_synthetic_iterator_resume_reproduces_next_batch(tmp_path):
         assert jnp.array_equal(expected[key], actual[key])
 
 
+def test_synthetic_reuse_example_batch_is_stable(tmp_path):
+    config = _tiny_config(tmp_path)
+    iterator = create_data_iterator(
+        config.data, global_batch_size=2, vocab_size=config.model.vocab_size
+    )
+    first = next(iterator)
+    second = next(iterator)
+    assert iterator.get_state() == {"index": 2}
+    for key in first:
+        assert jnp.array_equal(first[key], second[key])
+
+
 def test_offline_huggingface_and_grain_fixtures(tmp_path):
     fixture = tmp_path / "tokens.jsonl"
     fixture.write_text(
