@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import pytest
 from flax import nnx
 
 from yxtpu_pretrain.config import load_config
@@ -12,7 +13,7 @@ from yxtpu_pretrain.optimizers import (
 from yxtpu_pretrain.runtime.mesh import create_mesh
 
 
-def _config(optimizer="muon", *, query_heads=1, kv_heads=1):
+def _config(optimizer="muon", *, query_heads=1, kv_heads=1, scan_axis=1):
     return load_config(
         model="kda_hybrid_273m",
         optimizer=optimizer,
@@ -32,6 +33,7 @@ def _config(optimizer="muon", *, query_heads=1, kv_heads=1):
             "model.vocab_size=256",
             "model.dtype=float32",
             "model.remat_policy=full",
+            f"model.param_scan_axis={scan_axis}",
         ],
     )
 
@@ -41,8 +43,16 @@ def _model(config, seed=1):
     return HybridLanguageModel(config, mesh, rngs=nnx.Rngs(seed))
 
 
-def test_route_is_exhaustive_and_scan_axis_is_a_muon_batch():
-    config = _config()
+@pytest.mark.parametrize(
+    ("scan_axis", "reduction_axes", "batch_axes"),
+    ((0, (1,), (0,)), (1, (0,), (1,))),
+)
+def test_route_is_exhaustive_and_scan_axis_is_a_muon_batch(
+    scan_axis,
+    reduction_axes,
+    batch_axes,
+):
+    config = _config(scan_axis=scan_axis)
     model = _model(config)
     params = nnx.state(model, nnx.Param)
     routes = classify_parameters(params)
@@ -53,9 +63,9 @@ def test_route_is_exhaustive_and_scan_axis_is_a_muon_batch():
         for route in routes
         if route.role == "gqa_qkv" and route.path[-1] == "kernel"
     )
-    assert qkv.reduction_axes == (0,)
+    assert qkv.reduction_axes == reduction_axes
     assert qkv.output_axes == (2, 3)
-    assert qkv.batch_axes == (1,)
+    assert qkv.batch_axes == batch_axes
     assert next(route for route in routes if route.role == "embedding").optimizer == "adamw"
     assert next(route for route in routes if route.role == "depthwise_conv").optimizer == "adamw"
 

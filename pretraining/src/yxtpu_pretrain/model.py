@@ -24,6 +24,12 @@ from yxtpu_pretrain.layers.roles import (
 )
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 
+ACTIVATION_LOGICAL_AXES = (
+    "activation_batch",
+    "activation_norm_length",
+    "activation_embed",
+)
+
 
 def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
     for module in (
@@ -139,6 +145,7 @@ class HybridLayer(nnx.Module):
     ):
         residual = hidden_states
         normalized = self.input_norm(hidden_states)
+        normalized = nn.with_logical_constraint(normalized, ACTIVATION_LOGICAL_AXES)
         if self.kind == "kda":
             mixed, _ = self.mixer(
                 normalized,
@@ -152,8 +159,16 @@ class HybridLayer(nnx.Module):
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
             )
-        hidden_states = residual + mixed
-        return hidden_states + self.mlp(self.post_mixer_norm(hidden_states), deterministic=True)
+        hidden_states = nn.with_logical_constraint(
+            residual + mixed,
+            ACTIVATION_LOGICAL_AXES,
+        )
+        mlp_input = nn.with_logical_constraint(
+            self.post_mixer_norm(hidden_states),
+            ACTIVATION_LOGICAL_AXES,
+        )
+        layer_output = hidden_states + self.mlp(mlp_input, deterministic=True)
+        return nn.with_logical_constraint(layer_output, ACTIVATION_LOGICAL_AXES)
 
 
 class HybridCycle(nnx.Module):
@@ -299,13 +314,18 @@ class HybridLanguageModel(nnx.Module):
                 jnp.arange(token_ids.shape[1], dtype=jnp.int32), token_ids.shape
             )
         hidden_states = self.token_embedding(token_ids, model_mode=MODEL_MODE_TRAIN)
+        hidden_states = nn.with_logical_constraint(hidden_states, ACTIVATION_LOGICAL_AXES)
         hidden_states = self._apply_cycles(
             hidden_states,
             decoder_segment_ids=decoder_segment_ids,
             decoder_positions=decoder_positions,
             record_max_logits=record_max_logits,
         )
-        return self.logits(self.final_norm(hidden_states)).astype(jnp.float32)
+        hidden_states = nn.with_logical_constraint(
+            self.final_norm(hidden_states),
+            ACTIVATION_LOGICAL_AXES,
+        )
+        return self.logits(hidden_states).astype(jnp.float32)
 
 
 def count_parameters(model: nnx.Module) -> int:

@@ -22,8 +22,10 @@ from yxtpu_pretrain.model import HybridLanguageModel, attention_logit_intermedia
 from yxtpu_pretrain.optimizers import apply_gqa_muonclip, build_optimizer
 from yxtpu_pretrain.runtime.checkpoints import CheckpointIO
 from yxtpu_pretrain.runtime.data import create_data_iterator
+from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.metrics import MetricsWriter
+from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 
 def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
@@ -179,6 +181,7 @@ def run(
     if config.hardware.multi_host and not jax.distributed.is_initialized():
         jax.distributed.initialize()
     mesh = create_mesh(config.hardware)
+    logical_axis_rules = make_leaf_config(config).logical_axis_rules
     global_batch = config.data.per_device_batch_size * config.hardware.device_count
     local_batch = config.data.per_device_batch_size * jax.local_device_count()
     if global_batch % config.experiment.gradient_accumulation_steps:
@@ -200,10 +203,11 @@ def run(
         if config.data.eval_interval
         else None
     )
-    model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(config.experiment.seed))
-    transform, routes = build_optimizer(model, config.optimizer)
-    optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
-    state = TrainStateNNX(model, optimizer)
+    with logical_mesh_context(mesh, logical_axis_rules):
+        model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(config.experiment.seed))
+        transform, routes = build_optimizer(model, config.optimizer)
+        optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+        state = TrainStateNNX(model, optimizer)
 
     run_name = _run_name(config)
     run_dir = Path(config.experiment.run_dir).expanduser().resolve() / run_name
@@ -230,14 +234,14 @@ def run(
         config,
         run_name=f"{config.model.name}-{config.optimizer.name}-{config.experiment.name}",
     )
-    start_step = (
-        checkpoint_io.restore(state, data_iterator)
-        if config.experiment.checkpoint.resume
-        else 0
-    )
-
-    train_step = _make_train_step(config)
-    eval_step = _make_eval_step()
+    with logical_mesh_context(mesh, logical_axis_rules):
+        start_step = (
+            checkpoint_io.restore(state, data_iterator)
+            if config.experiment.checkpoint.resume
+            else 0
+        )
+        train_step = _make_train_step(config)
+        eval_step = _make_eval_step()
     throughputs = []
     losses = []
     trace_active = False
@@ -248,8 +252,9 @@ def run(
                 trace_active = True
             batch = _device_batch(next(data_iterator), mesh)
             started = time.perf_counter()
-            metrics = train_step(state, batch)
-            jax.block_until_ready(metrics)
+            with logical_mesh_context(mesh, logical_axis_rules):
+                metrics = train_step(state, batch)
+                jax.block_until_ready(metrics)
             elapsed = time.perf_counter() - started
             tokens = float(metrics["tokens"])
             throughput = tokens / elapsed
@@ -279,10 +284,11 @@ def run(
             if eval_iterator is not None and step % config.data.eval_interval == 0:
                 eval_losses = []
                 for _ in range(config.data.eval_steps):
-                    eval_metrics = eval_step(
-                        state.model,
-                        _device_batch(next(eval_iterator), mesh),
-                    )
+                    with logical_mesh_context(mesh, logical_axis_rules):
+                        eval_metrics = eval_step(
+                            state.model,
+                            _device_batch(next(eval_iterator), mesh),
+                        )
                     eval_losses.append(float(eval_metrics["loss"]))
                 metrics_writer.write(
                     {"step": step, "evaluation_loss": statistics.mean(eval_losses)}
