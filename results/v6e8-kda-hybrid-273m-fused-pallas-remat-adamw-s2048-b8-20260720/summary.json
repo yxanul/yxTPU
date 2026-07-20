@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-fused-pallas-remat-adamw-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.43995291999999997,
+    "median": 0.440211,
+    "p90": 0.4403922
+  },
+  "tokens_per_second_per_device": {
+    "mean": 37240.61768472577,
+    "median": 37218.515666350904,
+    "p10": 37203.20207717802,
+    "p90": 37240.64635506456
+  },
+  "tokens_per_second_global": {
+    "mean": 297924.94147780613,
+    "median": 297748.12533080723,
+    "p10": 297625.6166174242,
+    "p90": 297925.17084051645
+  },
+  "tflops_per_second_per_device": {
+    "mean": 58.18271041421443,
+    "median": 58.1481794258844
+  },
+  "loss": {
+    "first": 7.7468366622924805,
+    "last": 0.44295671582221985
+  }
+}

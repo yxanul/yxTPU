@@ -1,0 +1,181 @@
+{
+  "backend": "tpu",
+  "device": "TPU_0(process=0,(0,0,0,0))",
+  "correctness": {
+    "shape": {
+      "batch": 1,
+      "sequence_length": 128,
+      "heads": 1,
+      "key_dim": 128,
+      "value_dim": 128,
+      "chunk_size": 64
+    },
+    "fused_vs_recurrent": {
+      "output": {
+        "max_abs": 0.00048828125,
+        "mean_abs": 4.34986905020196e-05,
+        "rmse": 6.836262036813423e-05,
+        "reference_rms": 0.01690051145851612,
+        "all_finite": true
+      },
+      "final_state": {
+        "max_abs": 0.0023308247327804565,
+        "mean_abs": 0.00035884289536625147,
+        "rmse": 0.0004580042732413858,
+        "reference_rms": 0.18803158402442932,
+        "all_finite": true
+      }
+    },
+    "fused_vs_xla_chunked": {
+      "output": {
+        "max_abs": 0.00048828125,
+        "mean_abs": 5.823452738695778e-05,
+        "rmse": 8.514623914379627e-05,
+        "reference_rms": 0.01689593493938446,
+        "all_finite": true
+      },
+      "final_state": {
+        "max_abs": 0.003101140260696411,
+        "mean_abs": 0.0005267520318739116,
+        "rmse": 0.0006740566459484398,
+        "reference_rms": 0.18806970119476318,
+        "all_finite": true
+      }
+    },
+    "state_history_shape": [
+      1,
+      2,
+      1,
+      128,
+      128
+    ],
+    "loss": {
+      "fused": 0.0003210818686056882,
+      "analytical_xla": 0.00032084283884614706,
+      "absolute_difference": 2.390297595411539e-07
+    },
+    "gradient_errors_vs_analytical_xla": {
+      "query": {
+        "max_abs": 3.725290298461914e-09,
+        "mean_abs": 3.7690867094042346e-10,
+        "rmse": 5.471806341361685e-10,
+        "reference_rms": 9.062038230922553e-08,
+        "all_finite": true
+      },
+      "key": {
+        "max_abs": 7.450580596923828e-09,
+        "mean_abs": 3.457846231569306e-10,
+        "rmse": 5.782823664368664e-10,
+        "reference_rms": 9.362089770093007e-08,
+        "all_finite": true
+      },
+      "value": {
+        "max_abs": 3.725290298461914e-09,
+        "mean_abs": 1.9645365889608968e-10,
+        "rmse": 3.2176122877203284e-10,
+        "reference_rms": 6.019219256359065e-08,
+        "all_finite": true
+      },
+      "log_decay": {
+        "max_abs": 1.2874124877271242e-08,
+        "mean_abs": 1.4183197949435566e-09,
+        "rmse": 1.956251161061573e-09,
+        "reference_rms": 7.378214945674699e-07,
+        "all_finite": true
+      },
+      "beta": {
+        "max_abs": 1.0427720553707331e-07,
+        "mean_abs": 1.9865304068389378e-08,
+        "rmse": 2.6607514413967692e-08,
+        "reference_rms": 9.404199772689026e-06,
+        "all_finite": true
+      },
+      "initial_state": {
+        "max_abs": 1.6112799983147852e-09,
+        "mean_abs": 2.300326457094215e-10,
+        "rmse": 2.918819907993253e-10,
+        "reference_rms": 5.5831772982628536e-08,
+        "all_finite": true
+      }
+    }
+  },
+  "production_shape": {
+    "batch": 8,
+    "sequence_length": 2048,
+    "heads": 8,
+    "key_dim": 128,
+    "value_dim": 128,
+    "chunk_size": 64,
+    "tokens": 16384
+  },
+  "benchmarks": [
+    {
+      "name": "XLA chunked forward",
+      "compile_seconds": 4.260066197999549,
+      "mean_milliseconds": 9.665443600169965,
+      "median_milliseconds": 9.6619539999665,
+      "min_milliseconds": 9.64369899884332,
+      "max_milliseconds": 9.69368799997028,
+      "repetitions": 10,
+      "tokens_per_second": 1695111.024155362,
+      "compiled_memory_bytes": {
+        "argument": 172490752,
+        "output": 37748768,
+        "temporary": 774926784,
+        "alias": 0,
+        "total": 985166304
+      }
+    },
+    {
+      "name": "Analytical XLA forward+backward",
+      "compile_seconds": 5.358172946000195,
+      "mean_milliseconds": 31.872203400416765,
+      "median_milliseconds": 31.863375999819255,
+      "min_milliseconds": 31.83415500097908,
+      "max_milliseconds": 31.904805000522174,
+      "repetitions": 5,
+      "tokens_per_second": 514052.94432156393,
+      "compiled_memory_bytes": {
+        "argument": 172490752,
+        "output": 172491296,
+        "temporary": 1594211808,
+        "alias": 0,
+        "total": 1939193856
+      }
+    },
+    {
+      "name": "Pallas fused forward, doubling solve + boundary states",
+      "compile_seconds": 0.5385686749996239,
+      "mean_milliseconds": 6.353916100306378,
+      "median_milliseconds": 6.349169000714028,
+      "min_milliseconds": 6.336899001325946,
+      "max_milliseconds": 6.373178999638185,
+      "repetitions": 10,
+      "tokens_per_second": 2578567.2554300777,
+      "compiled_memory_bytes": {
+        "argument": 172490752,
+        "output": 171966496,
+        "temporary": 235011968,
+        "alias": 0,
+        "total": 579469216
+      }
+    },
+    {
+      "name": "Pallas fused forward+backward",
+      "compile_seconds": 1.2629433949987288,
+      "mean_milliseconds": 18.287209600021015,
+      "median_milliseconds": 18.288047000169172,
+      "min_milliseconds": 18.27401800073858,
+      "max_milliseconds": 18.30324799993832,
+      "repetitions": 5,
+      "tokens_per_second": 895926.7355901675,
+      "compiled_memory_bytes": {
+        "argument": 172490752,
+        "output": 172491296,
+        "temporary": 538180352,
+        "alias": 0,
+        "total": 883162400
+      }
+    }
+  ]
+}

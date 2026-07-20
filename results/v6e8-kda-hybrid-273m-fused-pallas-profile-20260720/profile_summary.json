@@ -1,0 +1,176 @@
+{
+  "device": "/device:TPU:0",
+  "profiled_steps": 3,
+  "step_time_milliseconds": {
+    "mean": 430.7468854166667,
+    "min": 430.6209025,
+    "max": 430.8370175
+  },
+  "leaf_device_time_accounted_percent": 99.9539415303859,
+  "training_phases": {
+    "embedding/input prep": {
+      "milliseconds_per_step": 1.606203382,
+      "percent_of_step": 0.37288798512061205
+    },
+    "forward transformer scan": {
+      "milliseconds_per_step": 99.332430752,
+      "percent_of_step": 23.06051050280132
+    },
+    "output head + loss": {
+      "milliseconds_per_step": 7.315042838,
+      "percent_of_step": 1.6982230366968458
+    },
+    "backward transformer scan": {
+      "milliseconds_per_step": 314.68905538866665,
+      "percent_of_step": 73.05660610505961
+    },
+    "post-backward + optimizer/metrics": {
+      "milliseconds_per_step": 7.605757632666667,
+      "percent_of_step": 1.7657139007074945
+    }
+  },
+  "splash_attention_kernels": {
+    "forward": {
+      "milliseconds_per_step": 2.5104747133333336,
+      "percent_of_step": 0.5828190053898871
+    },
+    "backward fused dQ/dK/dV": {
+      "milliseconds_per_step": 4.450493515333333,
+      "percent_of_step": 1.0332038758744169
+    },
+    "total": {
+      "milliseconds_per_step": 6.960968228666667,
+      "percent_of_step": 1.616022881264304
+    }
+  },
+  "xla_hlo_categories": {
+    "custom-call": {
+      "milliseconds_per_step": 282.92820932199953,
+      "percent_of_step": 65.68317007059022
+    },
+    "convolution fusion": {
+      "milliseconds_per_step": 60.596884249333286,
+      "percent_of_step": 14.067863587850944
+    },
+    "loop fusion": {
+      "milliseconds_per_step": 41.0896821626666,
+      "percent_of_step": 9.539171043087183
+    },
+    "data formatting": {
+      "milliseconds_per_step": 31.376634542000048,
+      "percent_of_step": 7.284239446478887
+    },
+    "dynamic-update-slice": {
+      "milliseconds_per_step": 5.677892890666666,
+      "percent_of_step": 1.318150654803777
+    },
+    "all-reduce": {
+      "milliseconds_per_step": 5.654341770666666,
+      "percent_of_step": 1.3126831469012603
+    },
+    "reduce": {
+      "milliseconds_per_step": 1.0313760933333336,
+      "percent_of_step": 0.23943901354868086
+    },
+    "broadcast": {
+      "milliseconds_per_step": 0.7507734113333334,
+      "percent_of_step": 0.1742957260403871
+    },
+    "non-fusion elementwise": {
+      "milliseconds_per_step": 0.6734984886666676,
+      "percent_of_step": 0.15635597411579294
+    },
+    "custom fusion": {
+      "milliseconds_per_step": 0.6523094533333333,
+      "percent_of_step": 0.1514368357422588
+    },
+    "copy-done": {
+      "milliseconds_per_step": 0.09066270933333129,
+      "percent_of_step": 0.021047792196020675
+    },
+    "sort": {
+      "milliseconds_per_step": 0.008102083333333333,
+      "percent_of_step": 0.001880938343987349
+    },
+    "iota": {
+      "milliseconds_per_step": 0.006696822666666667,
+      "percent_of_step": 0.0015547001947997254
+    },
+    "copy-start": {
+      "milliseconds_per_step": 0.006486122666666702,
+      "percent_of_step": 0.0015057851574231576
+    },
+    "async-done": {
+      "milliseconds_per_step": 0.004300520666666629,
+      "percent_of_step": 0.0009983869442275093
+    },
+    "async-start": {
+      "milliseconds_per_step": 0.0006393506666666651,
+      "percent_of_step": 0.0001484283899228229
+    }
+  },
+  "kimi_delta_attention": {
+    "source_or_stack_total": {
+      "milliseconds_per_step": 345.871142208,
+      "percent_of_step": 80.29568034448691
+    },
+    "direct_source_total": {
+      "milliseconds_per_step": 177.64560720600002,
+      "percent_of_step": 41.24129813130541
+    },
+    "direct_source_groups": {
+      "QKV convolution and gates": {
+        "milliseconds_per_step": 36.263490123999986,
+        "percent_of_step": 8.418746914193443
+      },
+      "shard/rematerialization wrapper": {
+        "milliseconds_per_step": 141.38211708200004,
+        "percent_of_step": 32.822551217111965
+      }
+    },
+    "xla_hlo_categories": {
+      "custom-call": {
+        "milliseconds_per_step": 275.9671166413333,
+        "percent_of_step": 64.06711829718442
+      },
+      "convolution fusion": {
+        "milliseconds_per_step": 30.23036854133339,
+        "percent_of_step": 7.01812817801136
+      },
+      "data formatting": {
+        "milliseconds_per_step": 19.54043189599999,
+        "percent_of_step": 4.536407007818128
+      },
+      "loop fusion": {
+        "milliseconds_per_step": 19.331603333333334,
+        "percent_of_step": 4.487926433788056
+      },
+      "reduce": {
+        "milliseconds_per_step": 0.5337544526666665,
+        "percent_of_step": 0.12391371144804898
+      },
+      "all-reduce": {
+        "milliseconds_per_step": 0.2678253386666667,
+        "percent_of_step": 0.06217696464771788
+      },
+      "non-fusion elementwise": {
+        "milliseconds_per_step": 4.200466666666667e-05,
+        "percent_of_step": 9.751589178882872e-06
+      }
+    }
+  },
+  "fused_pallas_kda_kernels": {
+    "forward": {
+      "milliseconds_per_step": 136.215314194,
+      "percent_of_step": 31.623052610638673
+    },
+    "backward": {
+      "milliseconds_per_step": 139.75180244733332,
+      "percent_of_step": 32.44406568654576
+    },
+    "total": {
+      "milliseconds_per_step": 275.96711664133335,
+      "percent_of_step": 64.06711829718442
+    }
+  }
+}

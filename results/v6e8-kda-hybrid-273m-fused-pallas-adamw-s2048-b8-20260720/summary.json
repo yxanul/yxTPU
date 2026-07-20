@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-fused-pallas-adamw-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.43073251999999995,
+    "median": 0.430712,
+    "p90": 0.43103519999999995
+  },
+  "tokens_per_second_per_device": {
+    "mean": 38037.53860284837,
+    "median": 38039.339512249484,
+    "p10": 38010.8167737662,
+    "p90": 38061.803125494465
+  },
+  "tokens_per_second_global": {
+    "mean": 304300.30882278696,
+    "median": 304314.7160979959,
+    "p10": 304086.5341901296,
+    "p90": 304494.4250039557
+  },
+  "tflops_per_second_per_device": {
+    "mean": 59.427776202185356,
+    "median": 59.43058984483367
+  },
+  "loss": {
+    "first": 7.748318195343018,
+    "last": 0.4428730309009552
+  }
+}

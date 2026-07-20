@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-fused-pallas-profile-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 0.7474404285714286,
+    "median": 0.429034,
+    "p90": 1.7577076000000007
+  },
+  "tokens_per_second_per_device": {
+    "mean": 570834.1519013525,
+    "median": 38188.11562719971,
+    "p10": 12712.729774738293,
+    "p90": 1893376.3306472476
+  },
+  "tokens_per_second_global": {
+    "mean": 4566673.21521082,
+    "median": 305504.9250175977,
+    "p10": 101701.83819790634,
+    "p90": 15147010.64517798
+  },
+  "tflops_per_second_per_device": {
+    "mean": 891.8401524860382,
+    "median": 59.6630295343679
+  },
+  "loss": {
+    "first": 7.412515163421631,
+    "last": 5.377657890319824
+  }
+}

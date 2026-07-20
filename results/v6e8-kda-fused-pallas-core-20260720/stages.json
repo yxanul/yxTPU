@@ -1,0 +1,99 @@
+{
+  "backend": "tpu",
+  "device": "TPU_0(process=0,(0,0,0,0))",
+  "shape": {
+    "batch": 8,
+    "sequence_length": 2048,
+    "heads": 8,
+    "key_dim": 128,
+    "value_dim": 128,
+    "chunk_size": 64,
+    "chunks": 32,
+    "tokens": 16384
+  },
+  "interpretation": "Each row is cumulative within one kernel variant. Differences estimate incremental stage cost; all variants use identical input/output block traffic.",
+  "forward": [
+    {
+      "name": "forward through preprocess",
+      "compile_seconds": 0.47415593400000944,
+      "mean_milliseconds": 1.6786168000180623,
+      "median_milliseconds": 1.6751544999351609,
+      "min_milliseconds": 1.6670090008119587,
+      "max_milliseconds": 1.7046100001607556,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 1.6786168000180623
+    },
+    {
+      "name": "forward through pairwise",
+      "compile_seconds": 0.7744892720002099,
+      "mean_milliseconds": 3.1694294995759265,
+      "median_milliseconds": 3.1662789997426444,
+      "min_milliseconds": 3.158779998557293,
+      "max_milliseconds": 3.198148999217665,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 1.490812699557864
+    },
+    {
+      "name": "forward through solve",
+      "compile_seconds": 0.4864893119993212,
+      "mean_milliseconds": 4.690898300032131,
+      "median_milliseconds": 4.689074499765411,
+      "min_milliseconds": 4.680959998950129,
+      "max_milliseconds": 4.704488999777823,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 1.521468800456205
+    },
+    {
+      "name": "forward through full",
+      "compile_seconds": 0.4807604329998867,
+      "mean_milliseconds": 6.3582791000953875,
+      "median_milliseconds": 6.357064000440005,
+      "min_milliseconds": 6.346128999211942,
+      "max_milliseconds": 6.379758999173646,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 1.6673808000632562
+    }
+  ],
+  "backward": [
+    {
+      "name": "backward through reverse_state",
+      "compile_seconds": 0.9103340430010576,
+      "mean_milliseconds": 7.353666999915731,
+      "median_milliseconds": 7.349233999775606,
+      "min_milliseconds": 7.338179000726086,
+      "max_milliseconds": 7.389918999251677,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 7.353666999915731
+    },
+    {
+      "name": "backward through solve_vjp",
+      "compile_seconds": 0.9273990120000235,
+      "mean_milliseconds": 9.995199599325133,
+      "median_milliseconds": 9.99053399937111,
+      "min_milliseconds": 9.982218998629833,
+      "max_milliseconds": 10.03445899914368,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 2.641532599409402
+    },
+    {
+      "name": "backward through pairwise_vjp",
+      "compile_seconds": 0.9901136119988223,
+      "mean_milliseconds": 12.630541300131881,
+      "median_milliseconds": 12.630578500647971,
+      "min_milliseconds": 12.611047999598668,
+      "max_milliseconds": 12.646568000491243,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 2.635341700806748
+    },
+    {
+      "name": "backward through full",
+      "compile_seconds": 0.974437984999895,
+      "mean_milliseconds": 12.798689200099034,
+      "median_milliseconds": 12.79532350054069,
+      "min_milliseconds": 12.786548000804032,
+      "max_milliseconds": 12.833197999498225,
+      "repetitions": 10,
+      "incremental_milliseconds_from_previous_stage": 0.16814789996715263
+    }
+  ]
+}
