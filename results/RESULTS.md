@@ -649,13 +649,33 @@ Model step time falls from 0.4307 to 0.2337 s. The FP32 solve is 2.73 ms of
 the 6.437 ms core and no precision setting reaches it.
 
 The correctness harness passes on the configuration that NaNs the model, so
-it is not sufficient evidence for a precision change. Its synthetic `A` has a
-small spectral radius, the series converges in two terms, and squaring is
-never stressed. `--decay-mode production` was added while investigating and
-widens log decay to the configured gate range, but it does not reproduce the
-failure either: the gap is the conditioning of the WY system, not the decay
-range. Precision changes should be gated on a training run until the harness
-covers conditioning.
+it is not sufficient evidence for a precision change. `A` is strictly lower
+triangular, so its spectral radius is exactly zero and carries no information;
+what matters is norm and power growth. With independent L2-normalized keys in
+128 dimensions `|k_i . k_j|` is about `1/sqrt(128)`, so the harness's `||A||`
+is well under one, the Neumann terms decay geometrically, and every squaring
+past the second operates on a numerically negligible matrix.
+`--decay-mode production` was added while investigating and widens log decay to
+the configured gate range, but it does not reproduce the failure either.
+
+Two failure mechanisms have to be separated here, and the evidence so far
+establishes only the second. A system can be genuinely ill-conditioned, or the
+algorithm can be unstable on a well-conditioned system. At the exact 64x64
+extreme they come apart sharply. For `A` the positive strictly-lower all-ones
+matrix, which is what parallel keys drive toward, `kappa_2(I + A)` is only
+82.1 and `max |(I + A)^-1|` is exactly 1, yet `||A^32||_2` is 6.17e17: the
+problem is benign and recursive doubling still builds enormous intermediates
+that have to cancel. For the negative all-ones matrix `kappa_2(I + A)` is
+2.79e17 and the system itself is catastrophically ill-conditioned.
+
+So `||A|| > 1` does not imply large entries in `(I + A)^-1`; that bound is
+loose precisely because the Neumann terms cancel. What the model runs prove is
+that BF16 recursive doubling is unstable on model-generated systems, not that
+those systems are inherently ill-conditioned. Telling the two apart needs
+problem conditioning, `kappa_2(I + A)`, measured separately from algorithmic
+growth: the sequence `||P||, ||P^2||, ..., ||P^32||`, the largest intermediate
+solution norm, and the final relative residual. Precision changes should be
+gated on a training run until the harness covers both.
 
 Artifacts:
 
@@ -808,3 +828,69 @@ Artifacts:
   `v6e8-kda-sdem-b16ga4-20260720/`, `v6e8-kda-sdem-b16ga8-20260720/`,
   `v6e8-kda-sdem-b20ga4-20260720/`
 - `v6e8-kda-mwc-b16-20260720/`
+
+### Separating WY conditioning from recursive-doubling growth
+
+The earlier attribution of the BF16 divergence to an ill-conditioned WY system
+conflated two different failure modes. `benchmarks/diagnose_wy_conditioning.py`
+measures them separately. Because `A` is strictly lower triangular its spectral
+radius is identically zero, so every measure below is a norm or a growth
+factor. Residuals are relative, at one BF16 pass, chunk 64, `K=V=128`.
+
+| Regime | `k2(I+A)` | `max abs inv` | `max norm(P^k)` | doubling | substitution |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all-ones, positive | 82.1 | 1 | 6.17e17 | 2.98e-2 | 4.84e-5 |
+| all-ones, negative | 2.79e17 | 4.61e18 | 6.17e17 | 1.76e-9 | 1.03e-9 |
+| harness: independent keys | 1.52 | 1 | 0.367 | 2.6e-3 | 2.6e-3 |
+| correlated c=0.9, beta 0.95 | 56.2 | 1 | 3.04e15 | 6.4e-2 | 3.3e-4 |
+| correlated c=0.99, beta 0.99 | 69.7 | 1 | 2.39e17 | 3.7e-2 | 2.6e-4 |
+| mixed-sign correlated c=0.9 | 55.7 | 1 | 2.63e15 | 5.8e-2 | 3.2e-4 |
+| AR(1) phi=0.95, beta 0.95 | 24.6 | 1 | 3.12e15 | 1.2e-1 | 4.7e-4 |
+| correlated c=0.9, fast decay | 3.39 | 1 | 137 | 1.8e-3 | 1.8e-3 |
+
+Conditioning does not predict the failure and growth does. The positive
+all-ones extreme is a benign problem, `max abs inverse` is exactly 1, yet
+doubling forms powers of norm 6.17e17 and loses 3% at one BF16 pass. The
+negative extreme is genuinely ill-conditioned at 2.79e17 and returns a 1.8e-9
+residual, because there the sensitivity is in the answer rather than the
+residual. The regimes that resemble a trained model, correlated keys with beta
+near one and slow decay, sit at `k2` between 25 and 70 with growth of 1e15 to
+1e17 and 6 to 12 percent BF16 residual. `norm(A) > 1` therefore does not imply
+large entries in `(I + A)^-1`: that bound is loose because the Neumann terms
+cancel.
+
+The harness rows explain why it passes on a configuration that NaNs the model.
+Independent L2-normalized keys in 128 dimensions give `abs(k_i . k_j)` near
+`1/sqrt(128)`, so `norm(A)` stays under one, the terms decay geometrically, and
+every squaring past the second operates on a numerically negligible matrix.
+Note that for `k_i = normalize(sqrt(c) * base + sqrt(1 - c) * noise_i)` the
+expected pairwise correlation is `c`; using `c` and `sqrt(1 - c**2)` as the
+coefficients would instead target `c**2`.
+
+### Substitution solve, re-measured
+
+The first substitution comparison was invalid. Both custom-VJP call sites
+hardcoded `solve_method="doubling"`, so the forward never used the selected
+method and only the backward switched, and the substitution base case was
+itself a nilpotent series. Those runs compared doubling-forward against
+doubling-forward, at 16x16 instead of 64x64 in the backward.
+
+With the plumbing fixed and a base case that forms no powers:
+
+| Solve | Core forward+backward | Model |
+| --- | ---: | ---: |
+| Doubling, FP32 solve (selected) | 6.437 ms | 560,923 |
+| Substitution, row-serial base, BF16 | 8.617 ms | not run |
+| Substitution, FP32 16x16 base, BF16 coupling | 6.111 ms | 548,450 |
+
+Substitution is the better algorithm numerically and still loses. The stable
+row-serial base case costs more than the FP32 doubling it replaces. Splitting
+the roles, keeping full passes only for the small diagonal block while the
+wide inter-block coupling takes one BF16 pass, is 5.1% faster in the core and
+2.2% slower in the model, a core gain that inverts at model level exactly as
+the shifted convolution did. Both variants train, at 7.749 to 0.443.
+
+Artifacts:
+
+- `benchmarks/diagnose_wy_conditioning.py`
+- `v6e8-kda-subst-hybrid-20260720/`
