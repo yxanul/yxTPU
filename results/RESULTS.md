@@ -627,10 +627,11 @@ NaN at model step two. Bisecting by matmul role isolates the cause:
 | The solve's squarings only | NaN at step 2 | diverges |
 
 The repeated-squaring solve is the sole fragile operation. It reaches `P^63`
-by squaring `P` six times, so relative error compounds multiplicatively, and
-it diverges when `(I + A)` is poorly conditioned. Splitting the series by role
-does not help: the update is `solution <- (I + P^(2^k)) solution`, so the
-running solution compounds exactly as the power does.
+by squaring `P` six times, so relative error compounds multiplicatively.
+Splitting the series by role does not help: the update is
+`solution <- (I + P^(2^k)) solution`, so the running solution compounds
+exactly as the power does. The mechanism is algorithmic growth rather than
+problem conditioning; the two are separated quantitatively below.
 
 The decay-rescaled pairwise operands were the first suspect and were wrong.
 Their factors reach `exp(row_block * |gate_lower_bound|)`, but that is well
@@ -832,40 +833,62 @@ Artifacts:
 ### Separating WY conditioning from recursive-doubling growth
 
 The earlier attribution of the BF16 divergence to an ill-conditioned WY system
-conflated two different failure modes. `benchmarks/diagnose_wy_conditioning.py`
-measures them separately. Because `A` is strictly lower triangular its spectral
-radius is identically zero, so every measure below is a norm or a growth
-factor. Residuals are relative, at one BF16 pass, chunk 64, `K=V=128`.
+conflated two mechanisms that are complementary rather than alternatives:
 
-| Regime | `k2(I+A)` | `max abs inv` | `max norm(P^k)` | doubling | substitution |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| all-ones, positive | 82.1 | 1 | 6.17e17 | 2.98e-2 | 4.84e-5 |
-| all-ones, negative | 2.79e17 | 4.61e18 | 6.17e17 | 1.76e-9 | 1.03e-9 |
-| harness: independent keys | 1.52 | 1 | 0.367 | 2.6e-3 | 2.6e-3 |
-| correlated c=0.9, beta 0.95 | 56.2 | 1 | 3.04e15 | 6.4e-2 | 3.3e-4 |
-| correlated c=0.99, beta 0.99 | 69.7 | 1 | 2.39e17 | 3.7e-2 | 2.6e-4 |
-| mixed-sign correlated c=0.9 | 55.7 | 1 | 2.63e15 | 5.8e-2 | 3.2e-4 |
-| AR(1) phi=0.95, beta 0.95 | 24.6 | 1 | 3.12e15 | 1.2e-1 | 4.7e-4 |
-| correlated c=0.9, fast decay | 3.39 | 1 | 137 | 1.8e-3 | 1.8e-3 |
+- recursive-doubling growth predicts the *backward* error of the solve, how
+  nearly the computed solution solves the system;
+- `kappa_2(I + A)` predicts how much of that backward error is amplified into
+  *forward* error in the solution itself.
 
-Conditioning does not predict the failure and growth does. The positive
-all-ones extreme is a benign problem, `max abs inverse` is exactly 1, yet
-doubling forms powers of norm 6.17e17 and loses 3% at one BF16 pass. The
-negative extreme is genuinely ill-conditioned at 2.79e17 and returns a 1.8e-9
-residual, because there the sensitivity is in the answer rather than the
-residual. The regimes that resemble a trained model, correlated keys with beta
-near one and slow decay, sit at `k2` between 25 and 70 with growth of 1e15 to
-1e17 and 6 to 12 percent BF16 residual. `norm(A) > 1` therefore does not imply
-large entries in `(I + A)^-1`: that bound is loose because the Neumann terms
-cancel.
+`benchmarks/diagnose_wy_conditioning.py` measures both. Because `A` is strictly
+lower triangular its spectral radius is identically zero and carries no
+information, so every measure is a norm or a growth factor. Arithmetic is real
+rather than emulated: a TPU matmul at `Precision.DEFAULT` rounds *both*
+operands to BF16 for *every* matmul with FP32 accumulation, so each power and
+each solution update is re-rounded as it is formed. An earlier version of this
+script rounded the inputs once and then computed in FP32, which models
+something strictly more accurate and understated the failure, in one regime by
+three orders of magnitude.
 
-The harness rows explain why it passes on a configuration that NaNs the model.
+Chunk 64, `K=V=128`, one BF16 pass:
+
+| Regime | `k2(I+A)` | `max norm(P^k)` | dbl backward | dbl forward | sub backward | sub forward |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| exact extreme: all-ones, positive | 82.1 | 6.17e17 | 4.8e-2 | 1.7e15 | 8.4e-4 | 1.4e-3 |
+| exact extreme: all-ones, negative | 2.79e17 | 6.17e17 | 6.0e-6 | 2.4e-3 | 5.9e-19 | 3.2e-3 |
+| harness today: independent keys | 1.52 | 0.367 | 2.6e-4 | 5.4e-4 | 2.4e-4 | 5.1e-4 |
+| stress: correlated c=0.9, beta 0.95 | 56.2 | 3.04e15 | 6.8e-2 | 1.4e13 | 9.1e-4 | 1.4e-2 |
+| stress: correlated c=0.99, beta 0.99 | 69.7 | 2.39e17 | 5.9e-2 | 7.1e14 | 8.4e-4 | 1.3e-2 |
+| stress: mixed-sign correlated c=0.9 | 55.7 | 2.63e15 | 6.4e-2 | 1.3e13 | 9.5e-4 | 1.4e-2 |
+| stress: AR(1) phi=0.95, beta 0.95 | 24.6 | 3.12e15 | 1.5e-1 | 9.6e12 | 8.9e-4 | 8.8e-3 |
+| stress: correlated c=0.9, fast decay | 3.39 | 137 | 7.0e-1 | 1.5 | 6.4e-4 | 2.3e-3 |
+
+Growth is the dominant mechanism in the regimes that motivated this work. The
+positive all-ones extreme is a benign problem, `max abs inverse` exactly 1 and
+`k2` only 82.1, yet doubling forms powers of norm 6.17e17 and returns a
+forward error of 1.7e15. The stress regimes sit at `k2` between 25 and 70,
+also benign, with growth of 1e15 to 1e17 and forward errors of 1e12 or worse.
+So `norm(A) > 1` does not imply large entries in `(I + A)^-1`; that bound is
+loose because the Neumann terms cancel.
+
+Conditioning still has to be reported alongside it. On the negative extreme,
+substitution reaches a backward error of 5.9e-19, essentially exact, and still
+carries 3.2e-3 forward error, because `k2` of 2.79e17 amplifies it. Backward
+error alone would have scored that solve as perfect.
+
+The harness row explains why it passes on a configuration that NaNs the model.
 Independent L2-normalized keys in 128 dimensions give `abs(k_i . k_j)` near
-`1/sqrt(128)`, so `norm(A)` stays under one, the terms decay geometrically, and
+`1/sqrt(128)`, so `norm(A)` stays under one, terms decay geometrically, and
 every squaring past the second operates on a numerically negligible matrix.
-Note that for `k_i = normalize(sqrt(c) * base + sqrt(1 - c) * noise_i)` the
-expected pairwise correlation is `c`; using `c` and `sqrt(1 - c**2)` as the
-coefficients would instead target `c**2`.
+
+For `k_i = normalize(sqrt(c) * base + sqrt(1 - c) * noise_i)` the expected
+pairwise correlation is `c`; using `c` and `sqrt(1 - c**2)` would target
+`c**2`.
+
+These correlated, mixed-sign, and AR(1) cases are plausible stress regimes
+chosen to bracket the behaviour. They are not measured trained-model
+distributions, and should not be described as such until the real-token
+instrumentation below exists.
 
 ### Substitution solve, re-measured
 

@@ -432,11 +432,24 @@ at model step two. Bisecting by matmul role isolates a single cause:
 | The solve's squarings only | - | NaN at step 2 |
 
 The repeated-squaring solve is the only fragile operation. It forms `P^63` by
-squaring `P` six times, so relative error compounds multiplicatively and
-diverges once `(I + A)` is poorly conditioned. Splitting the series by role
-does not rescue it, because the update is
-`solution <- (I + P^(2^k)) solution` and the running solution compounds
-exactly as the power does.
+squaring `P` six times, so relative error compounds multiplicatively. Splitting
+the series by role does not rescue it, because the update is
+`solution <- (I + P^(2^k)) solution` and the running solution compounds exactly
+as the power does.
+
+The mechanism is algorithmic growth rather than problem conditioning, and the
+two are complementary rather than alternatives. `A` is strictly lower
+triangular, so its spectral radius is identically zero and says nothing; what
+matters is norm and power growth. Growth predicts the *backward* error of the
+solve, how nearly the computed solution solves the system, while
+`kappa_2(I + A)` predicts how much of that backward error is amplified into
+*forward* error in the solution. In the stress regimes that motivated this
+work, `kappa_2` is only about 25 to 70, a benign problem, while the powers
+reach 1e15 to 1e17 and one BF16 pass gives 5 to 15 percent backward error and
+forward error of 1e12 or worse. Both must be reported: on the genuinely
+ill-conditioned extreme, substitution reaches a backward error of 5.9e-19 and
+still carries 3.2e-3 forward error. See
+`benchmarks/diagnose_wy_conditioning.py`.
 
 The decay-rescaled pairwise operands were the first hypothesis and were wrong.
 Their factors reach `exp(row_block * |gate_lower_bound|)`, but that sits well
