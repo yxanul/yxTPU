@@ -160,7 +160,6 @@ class HybridCycle(nnx.Module):
     """Owned four-layer `[KDA,KDA,KDA,NoPE-GQA]` scan unit."""
 
     def __init__(self, *, config: ResolvedConfig, leaf_config, mesh, rngs: nnx.Rngs):
-        self.remat_policy = config.model.remat_policy
         for index, kind in enumerate(config.model.cycle):
             setattr(
                 self,
@@ -182,32 +181,13 @@ class HybridCycle(nnx.Module):
         decoder_positions=None,
         record_max_logits: bool = False,
     ):
-        policy = _remat_policy(self.remat_policy)
         for index in range(4):
-            layer = getattr(self, f"layer_{index}")
-            graphdef, params, state = nnx.split(layer, nnx.Param, ...)
-
-            def apply_layer(params_in, state_in, inputs, *, layer_graphdef=graphdef):
-                current_layer = nnx.merge(layer_graphdef, params_in, state_in)
-                outputs = current_layer(
-                    inputs,
-                    decoder_segment_ids=decoder_segment_ids,
-                    decoder_positions=decoder_positions,
-                    record_max_logits=record_max_logits,
-                )
-                _, _, new_state = nnx.split(current_layer, nnx.Param, ...)
-                return outputs, new_state
-
-            hidden_states, new_state = jax.checkpoint(
-                apply_layer,
-                policy=policy,
-                prevent_cse=False,
-            )(
-                params,
-                state,
+            hidden_states = getattr(self, f"layer_{index}")(
                 hidden_states,
+                decoder_segment_ids=decoder_segment_ids,
+                decoder_positions=decoder_positions,
+                record_max_logits=record_max_logits,
             )
-            nnx.update(layer, new_state)
         return hidden_states
 
 
@@ -294,6 +274,11 @@ class HybridLanguageModel(nnx.Module):
             _, _, new_state = nnx.split(cycle, nnx.Param, ...)
             return output, new_state
 
+        cycle_fn = jax.checkpoint(
+            cycle_fn,
+            policy=_remat_policy(self.config.model.remat_policy),
+            prevent_cse=False,
+        )
         hidden_states, scanned_state = jax.lax.scan(cycle_fn, hidden_states, (params, state))
         scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "cycles", 0)
         nnx.update(self.cycles, scanned_state)
