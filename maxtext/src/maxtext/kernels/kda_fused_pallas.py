@@ -125,9 +125,14 @@ _PAIRWISE_MATMUL_PRECISION = _PRECISION_BY_NAME[
 ]
 
 # The nilpotent series solve raises the strictly lower factor to the power of
-# the chunk size by squaring it log2(chunk) times. Each squaring multiplies the
-# relative error of the previous one, so when (I + A) is poorly conditioned a
-# single BF16 pass diverges even though a two-chunk synthetic case looks clean.
+# the chunk size by squaring it log2(chunk) times, so each squaring multiplies
+# the relative error of the previous one. The failure is algorithmic growth,
+# not problem conditioning: at chunk 64 the stress regimes have kappa_2(I + A)
+# of only about 25 to 70, a benign system, while the powers doubling forms
+# reach norms of 1e15 to 1e17 and one BF16 pass returns backward errors of 5 to
+# 15 percent and forward errors of 1e12 or worse. Growth predicts the backward
+# error; kappa predicts how far that is amplified into the solution. See
+# benchmarks/diagnose_wy_conditioning.py.
 _SOLVE_MATMUL_PRECISION = _PRECISION_BY_NAME[
     os.environ.get("KDA_SOLVE_MATMUL_PRECISION", "highest").lower()
 ]
