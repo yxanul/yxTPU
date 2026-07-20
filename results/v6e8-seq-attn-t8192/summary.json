@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-seq-attn-t8192/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 0.19654871428571427,
+    "median": 0.196551,
+    "p90": 0.19659120000000002
+  },
+  "tokens_per_second_per_device": {
+    "mean": 83358.47224481088,
+    "median": 83357.50008903541,
+    "p10": 83340.45479754067,
+    "p90": 83377.77720378333
+  },
+  "tokens_per_second_global": {
+    "mean": 666867.777958487,
+    "median": 666860.0007122833,
+    "p10": 666723.6383803254,
+    "p90": 667022.2176302667
+  },
+  "tflops_per_second_per_device": {
+    "mean": 193.7828562513384,
+    "median": 193.78059628762
+  },
+  "loss": {
+    "first": 10.840018272399902,
+    "last": 10.788516998291016
+  }
+}

@@ -930,3 +930,49 @@ Artifacts:
 
 - `benchmarks/diagnose_wy_conditioning.py`
 - `v6e8-kda-subst-hybrid-20260720/`
+
+### Sequence-length sweep: where the hybrid overtakes attention
+
+Every result before this one was measured at sequence length 2048, where
+Tokamax Splash accounts for 2.98% of the step. Replacing a token mixer that
+cheap can only lose, so the kernel work needed a length sweep to say whether
+the architecture is worth anything.
+
+Matched pair, 18-layer dense attention control against the 16-layer 3:1 KDA
+hybrid, 12 steps with 5 discarded, global tokens per step held at 131,072 by
+halving batch as length doubles. The 32,768 row cannot halve below batch one,
+so it carries 262,144 tokens per step.
+
+| Sequence | Batch/chip | Attention tok/s | KDA tok/s | Ratio | Attn mem | KDA mem |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 8 | 1,002,746 | 537,246 | attention 1.87x | 14.0 GB | 15.1 GB |
+| 4,096 | 4 | 860,064 | 527,270 | attention 1.63x | 14.7 GB | 15.9 GB |
+| 8,192 | 2 | 666,860 | 507,893 | attention 1.31x | 15.7 GB | 16.8 GB |
+| 16,384 | 1 | 454,026 | 468,387 | KDA 1.03x | 17.8 GB | 17.7 GB |
+| 32,768 | 1 | 267,970 | 420,484 | KDA 1.57x | 35.0 GB | 34.3 GB |
+
+The curves separate the way the cost models predict. Attention sheds 14%, then
+22%, then 32%, then 41% per doubling as the quadratic term takes over. KDA
+sheds 2%, 4%, 8%, then 10%, and those declines track the shrinking batch
+rather than sequence cost, since its work per token is constant.
+
+Throughput crossover is near 16,384. At 32,768 the hybrid is 1.57x faster.
+
+Memory is not a differentiator in training. Both models sit within 1 GB of
+each other at every length, and both roughly double at 32,768 because tokens
+per step double there. Tokamax Splash is flash-style with memory linear in
+sequence length, so neither model is quadratic in memory. The recurrent
+state's advantage over a KV cache is an inference property and is not measured
+by this sweep.
+
+Two caveats before treating the crossover as settled.
+
+Batch is confounded with length here. Holding tokens per step fixed forces
+batch from 8 down to 1, and a separate control at fixed length 2048 measured
+attention losing 45% between batch 8 and batch 1, from 1,003,422 to 550,852
+tok/s, against KDA's smaller decline. Part of attention's fall across this
+sweep is therefore batch effect flattering the hybrid, and at 16,384 the
+margin is only 3%. A fixed-batch sweep is needed to separate them.
+
+Quality is untested. The workload is synthetic reused tokens, so nothing here
+speaks to validation loss or quality per unit compute.
