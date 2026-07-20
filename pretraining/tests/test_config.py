@@ -70,6 +70,21 @@ def test_all_required_profiles_exist():
     assert expected <= found
 
 
+@pytest.mark.parametrize("profile", ("v6e-8", "v6e-64", "v5e-16", "v5e-64"))
+def test_lite_tpu_profiles_disable_unsupported_continuation_fusion(profile):
+    config = load_config(
+        model="kda_hybrid_273m",
+        optimizer="adamw",
+        data="synthetic",
+        hardware=profile,
+        experiment="selected",
+    )
+    flags = set(config.hardware.libtpu_init_args)
+    assert "--xla_tpu_enable_async_collective_fusion=false" in flags
+    assert "--xla_tpu_enable_async_collective_fusion_multiple_steps=true" not in flags
+    assert "--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true" not in flags
+
+
 def test_pin_matches_imported_maxtext_commit():
     package_root = Path(__file__).resolve().parents[1]
     assert (package_root / "MAXTEXT_PIN").read_text().strip() == "dfd8d293"
