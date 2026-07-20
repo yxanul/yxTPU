@@ -112,12 +112,26 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
     parameters = nnx.state(model, nnx.Param)
     routes = classify_parameters(parameters)
     clipping = optax.clip_by_global_norm(config.gradient_clip_norm)
+    warmup = optax.linear_schedule(
+        init_value=0.0,
+        end_value=config.learning_rate,
+        transition_steps=config.warmup_steps,
+    )
+    decay = optax.cosine_decay_schedule(
+        init_value=config.learning_rate,
+        decay_steps=config.schedule_steps - config.warmup_steps,
+        alpha=config.final_learning_rate_fraction,
+    )
+    learning_rate = optax.join_schedules(
+        schedules=(warmup, decay),
+        boundaries=(config.warmup_steps,),
+    )
     if config.name == "adamw":
         routes = [replace(route, optimizer="adamw") for route in routes]
         transform = optax.chain(
             clipping,
             optax.adamw(
-                learning_rate=config.learning_rate,
+                learning_rate=learning_rate,
                 b1=config.beta1,
                 b2=config.beta2,
                 eps=config.epsilon,
@@ -129,7 +143,7 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
         transform = optax.chain(
             clipping,
             optax.contrib.muon(
-                learning_rate=config.learning_rate,
+                learning_rate=learning_rate,
                 ns_steps=config.muon_ns_steps,
                 beta=config.muon_beta,
                 eps=config.muon_epsilon,
@@ -137,7 +151,7 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
                 adam_b1=config.beta1,
                 adam_b2=config.beta2,
                 adam_weight_decay=config.weight_decay,
-                adam_learning_rate=config.learning_rate,
+                adam_learning_rate=learning_rate,
                 muon_weight_dimension_numbers=dimensions,
             ),
         )
