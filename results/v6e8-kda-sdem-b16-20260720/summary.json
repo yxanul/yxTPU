@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-sdem-b16-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.45031060000000006,
+    "median": 0.450329,
+    "p90": 0.4505224
+  },
+  "tokens_per_second_per_device": {
+    "mean": 72767.56422720983,
+    "median": 72764.57878573221,
+    "p10": 72733.3426994672,
+    "p90": 72808.65253847791
+  },
+  "tokens_per_second_global": {
+    "mean": 582140.5138176787,
+    "median": 582116.6302858577,
+    "p10": 581866.7415957376,
+    "p90": 582469.2203078233
+  },
+  "tflops_per_second_per_device": {
+    "mean": 113.68807447885047,
+    "median": 113.68341018787598
+  },
+  "loss": {
+    "first": 8.593127250671387,
+    "last": 1.9997503757476807
+  }
+}

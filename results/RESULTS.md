@@ -595,3 +595,216 @@ Software:
 - libtpu: 0.0.42.1
 - Flax: 0.12.7
 - Optax: 0.2.8
+
+### Stream-collapsed grid and selective BF16 MXU precision
+
+Two changes to the fused kernel, measured against the 895,538 tok/s fused
+core and the 304,300 tok/s model of the previous section.
+
+**Grid.** The fused kernel ran `grid=(batch, heads, num_chunks)` with a
+`[1,1,C,K]` block, so a v6e core executed 2,048 sequential programs of about
+13 MFLOP each: 6.354 ms over 2,048 programs is 3.1 us per program, far more
+than the arithmetic justifies. Only the chunk axis carries a real dependency;
+batch and head are independent. Folding them into the block leaves 256
+programs. Mosaic's `tpu.matmul` accepts one batch dimension, so batch and head
+are merged into a single stream axis rather than kept as two leading block
+axes. `streams_per_program` above 8 fails with `CompileTimeScopedVmemOom`.
+
+**Precision.** Every in-kernel matmul used `Precision.HIGHEST`, which TPU
+evaluates as six BF16 passes. Q/K/V enter in BF16, so outside the solve those
+passes refine mantissa bits the operands never carried. `Precision.HIGH`
+(three passes) fails to compile in this kernel.
+
+A blanket reduction to one pass is 4.93x faster in the core and diverges to
+NaN at model step two. Bisecting by matmul role isolates the cause:
+
+| Guarded at six passes | Model | Loss |
+| --- | ---: | --- |
+| Everything | 398,061 | 7.749 -> 0.442 |
+| All but the state matmuls | 424,458 | 7.750 -> 0.445 |
+| The triangular solve only | 560,923 | 7.750 -> 0.444 |
+| The pairwise only | NaN at step 2 | diverges |
+| The solve's squarings only | NaN at step 2 | diverges |
+
+The repeated-squaring solve is the sole fragile operation. It reaches `P^63`
+by squaring `P` six times, so relative error compounds multiplicatively, and
+it diverges when `(I + A)` is poorly conditioned. Splitting the series by role
+does not help: the update is `solution <- (I + P^(2^k)) solution`, so the
+running solution compounds exactly as the power does.
+
+The decay-rescaled pairwise operands were the first suspect and were wrong.
+Their factors reach `exp(row_block * |gate_lower_bound|)`, but that is well
+inside BF16's exponent range and each product is formed once rather than fed
+back.
+
+Selected core, `B=8`, `T=2048`, eight heads, chunk 64:
+
+| Core | Forward | Forward + backward | Training tok/s |
+| --- | ---: | ---: | ---: |
+| Previous fused | 6.361 ms | 18.295 ms | 895,538 |
+| Stream-collapsed, guarded solve | 2.360 ms | 6.437 ms | 2,545,320 |
+| Stream-collapsed, unguarded (diverges) | 1.462 ms | 3.709 ms | 4,416,880 |
+
+Model step time falls from 0.4307 to 0.2337 s. The FP32 solve is 2.73 ms of
+the 6.437 ms core and no precision setting reaches it.
+
+The correctness harness passes on the configuration that NaNs the model, so
+it is not sufficient evidence for a precision change. Its synthetic `A` has a
+small spectral radius, the series converges in two terms, and squaring is
+never stressed. `--decay-mode production` was added while investigating and
+widens log decay to the configured gate range, but it does not reproduce the
+failure either: the gap is the conditioning of the WY system, not the decay
+range. Precision changes should be gated on a training run until the harness
+covers conditioning.
+
+Artifacts:
+
+- `v6e8-kda-hybrid-273m-fused-collapsed-h8-s2048-b8-20260720/`
+- `v6e8-kda-diag-chighest-shighest-20260720/`
+- `v6e8-kda-diag-chighest-sdefault-20260720/`
+- `v6e8-kda-solveguard-20260720/`
+- `v6e8-kda-solveapply-bf16-20260720/`
+- `v6e8-kda-hybrid-273m-selected-s2048-b8-20260720/`
+
+Next: the solve is the remaining barrier. Recursive doubling was chosen for
+dense MXU matmuls but is not backward stable, which is why it alone cannot
+take BF16. Blocked forward substitution bounds error growth to `||L||^15`
+within a 16-row block instead of `||L||^63` across the chunk while keeping
+off-diagonal updates as plain matmuls. The earlier 16-row solve was slow for
+an unrelated reason, a row-by-row scalar loop, so a properly blocked version
+has not been tried.
+
+### Profile of the selected configuration, and two rejected follow-ups
+
+The 233.564 ms step of the selected 560,923 tok/s configuration divides as:
+
+| Component | ms/step | % of step |
+| --- | ---: | ---: |
+| Fused Pallas KDA kernels | 86.597 | 37.08% |
+| Convolution fusion | 62.080 | 26.58% |
+| Loop fusion | 41.591 | 17.81% |
+| Data formatting | 19.768 | 8.46% |
+| Splash Attention, four layers | 6.958 | 2.98% |
+
+Forward and backward of the fused kernel are 40.519 and 46.078 ms.
+
+**Blocked forward substitution, rejected.** Written to test two claims about
+the doubling solve and refuting both. It should cost about a fifth of the
+arithmetic, since doubling applies six full-width powers to the `K + V`-wide
+right-hand side; measured, it is 1.6% faster at 6.315 against 6.418 ms. The
+solve is therefore bound by matmul latency on 16-row blocks and four serial
+block steps, not by FLOPs. It should also be better conditioned, capping
+growth at `||L||^15` per block against `||L||^63` across the chunk; measured,
+one BF16 pass still reaches NaN, at step zero rather than step two.
+
+**Shifted QKV convolution, rejected.** The convolution-fusion line above
+suggested the depthwise mixer was mislowered, so it was rewritten as one pad
+and four slice-multiply-accumulates. The rewrite is exactly equivalent, 2.4e-7
+against the Flax causal convolution, and a perturbation test confirms nothing
+leaks backwards in time. It measured 537,292 tok/s against 560,919, 4.2%
+slower. The profile category was misread: a convolution fusion node also
+carries the SiLU and reshapes XLA fused into it, so it overstates the
+convolution, and four full passes over the QKV tensor plus a pad cost more
+traffic than the convolution they remove.
+
+Both are retained behind default-off switches with the measurements recorded
+at the switch, so neither hypothesis has to be re-derived.
+
+Artifacts:
+
+- `v6e8-kda-selected-profile-20260720/`
+- `v6e8-kda-substitution-bf16-20260720/`
+- `v6e8-kda-shiftedconv-1-20260720/`
+- `v6e8-kda-shiftedconv-0-20260720/`
+
+### Remat policy and batch scaling
+
+The remat policy was re-tested because the two inputs to the earlier rejection
+had both moved: the fused kernel is 2.8x cheaper and the step now uses 15.2 of
+31.25 GB.
+
+| Policy | Global tok/s | Compiled memory |
+| --- | ---: | ---: |
+| `minimal_with_context` | 560,919 | 15.2 GB |
+| `minimal` | 533,080 | 15.1 GB |
+| `save_dot_except_mlp` | 550,776 | 9.2 GB |
+
+`minimal_with_context` remains selected on throughput. The interesting result
+is `save_dot_except_mlp`, which gives up 1.8% for 6 GB, because everything
+optimized so far reduces per-step cost while batch increases the work each
+step amortizes it over. The profile's 41.591 ms of loop fusion and 19.768 ms
+of data formatting are largely batch-independent.
+
+| Batch/chip, `save_dot_except_mlp` | Global tok/s | Compiled memory |
+| --- | ---: | ---: |
+| 8 | 550,776 | 9.2 GB |
+| 16 | 582,117 | 13.3 GB |
+| 24 | 578,758 | 17.4 GB |
+
+Batch 16 is 3.8% above the batch-8 selected configuration and batch 24
+regresses. This is a different operating point rather than a matched
+comparison: batch size changes the gradient noise scale and would need the
+learning-rate schedule revisited, so the selected batch-8 number remains the
+like-for-like result against the 1,003,900 tok/s batch-8 control.
+
+Artifacts:
+
+- `v6e8-kda-remat-minimal-20260720/`
+- `v6e8-kda-remat-save_dot_except_mlp-20260720/`
+- `v6e8-kda-sdem-b16-20260720/`
+- `v6e8-kda-sdem-b24-20260720/`
+
+### Batch and gradient accumulation
+
+All rows use the selected kernel with `save_dot_except_mlp` unless noted.
+
+| Microbatch/chip | `ga` | Effective | Global tok/s | Compiled memory |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 1 | 8 | 550,776 | 9.2 GB |
+| 12 | 1 | 12 | 571,302 | 11.3 GB |
+| 16 | 1 | 16 | 582,117 | 13.3 GB |
+| 20 | 1 | 20 | 580,183 | 15.3 GB |
+| 24 | 1 | 24 | 578,758 | 17.4 GB |
+| 8 | 2 | 16 | 575,364 | 11.3 GB |
+| 16 | 2 | 32 | 596,562 | 15.4 GB |
+| 16 | 4 | 64 | 600,548 | 15.4 GB |
+| 16 | 8 | 128 | 602,362 | 15.4 GB |
+| 20 | 4 | 80 | 596,522 | 17.4 GB |
+| 16, `minimal_with_context` | 1 | 16 | 568,993 | 25.2 GB |
+
+Two separate effects, and only one of them is free.
+
+Microbatch size has an interior optimum at 16: 12 gains, 20 and 24 lose. Past
+16 the larger working set costs more than the amortization returns, and this
+is not a memory ceiling.
+
+Gradient accumulation is not itself a throughput win. At a matched effective
+batch of 16 it costs 1.2%, 575,364 against 582,117, which is what an overhead
+that does not change the update should cost. It wins by reaching effective
+batches that do not fit directly while holding the microbatch at its optimum:
+16 with `ga=8` reaches 602,362 at 15.4 GB, against 578,758 for a direct batch
+of 24 at 17.4 GB.
+
+The gain saturates, at +2.5%, +0.7%, and +0.3% for `ga` of 2, 4, and 8, and
+compiled memory is flat in `ga`. Both follow from the mechanism: accumulation
+spreads the per-optimizer-step tail, 7.602 ms post-backward plus 5.696 ms
+all-reduce, or 5.7% of the step, across more tokens, while per-microbatch
+forward and backward are unchanged. A fixed cost can only be spread so thin.
+
+`minimal_with_context` needs 25.2 GB of 31.25 at batch 16, so the selected
+policy has no headroom for this direction; batch scaling requires the swap to
+`save_dot_except_mlp`.
+
+Every row here is a different training configuration. Batch size changes the
+gradient noise scale and the learning-rate schedule would need revisiting, so
+the batch-8 `minimal_with_context` result remains the like-for-like number
+against the 1,003,900 tok/s batch-8 control.
+
+Artifacts:
+
+- `v6e8-kda-sdem-b12-20260720/`, `v6e8-kda-sdem-b16-20260720/`,
+  `v6e8-kda-sdem-b20-20260720/`, `v6e8-kda-sdem-b24-20260720/`
+- `v6e8-kda-sdem-b8ga2-20260720/`, `v6e8-kda-sdem-b16ga2-20260720/`,
+  `v6e8-kda-sdem-b16ga4-20260720/`, `v6e8-kda-sdem-b16ga8-20260720/`,
+  `v6e8-kda-sdem-b20ga4-20260720/`
+- `v6e8-kda-mwc-b16-20260720/`

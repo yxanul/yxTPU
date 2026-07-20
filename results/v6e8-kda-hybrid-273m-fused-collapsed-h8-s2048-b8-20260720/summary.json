@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-fused-collapsed-h8-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.33722347999999996,
+    "median": 0.337176,
+    "p90": 0.3374722
+  },
+  "tokens_per_second_per_device": {
+    "mean": 48585.00437031609,
+    "median": 48591.83334519658,
+    "p10": 48549.18419987811,
+    "p90": 48613.86408324145
+  },
+  "tokens_per_second_global": {
+    "mean": 388680.03496252873,
+    "median": 388734.66676157265,
+    "p10": 388393.4735990249,
+    "p90": 388910.9126659316
+  },
+  "tflops_per_second_per_device": {
+    "mean": 75.90656158506356,
+    "median": 75.91723080304648
+  },
+  "loss": {
+    "first": 7.748318195343018,
+    "last": 0.4428730309009552
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-selected-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.23367248,
+    "median": 0.233672,
+    "p90": 0.2339106
+  },
+  "tokens_per_second_per_device": {
+    "mean": 70115.3957951752,
+    "median": 70115.37539799378,
+    "p10": 70043.85456915326,
+    "p90": 70192.39538158083
+  },
+  "tokens_per_second_global": {
+    "mean": 560923.1663614016,
+    "median": 560923.0031839502,
+    "p10": 560350.8365532261,
+    "p90": 561539.1630526467
+  },
+  "tflops_per_second_per_device": {
+    "mean": 109.54447113807979,
+    "median": 109.54443927063576
+  },
+  "loss": {
+    "first": 7.749880790710449,
+    "last": 0.44400864839553833
+  }
+}

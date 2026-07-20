@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-diag-chighest-shighest-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.32927648,
+    "median": 0.329239,
+    "p90": 0.32949320000000004
+  },
+  "tokens_per_second_per_device": {
+    "mean": 49757.59497063919,
+    "median": 49763.2419002609,
+    "p10": 49724.85031431644,
+    "p90": 49786.4385834791
+  },
+  "tokens_per_second_global": {
+    "mean": 398060.75976511353,
+    "median": 398105.9352020872,
+    "p10": 397798.80251453153,
+    "p90": 398291.5086678328
+  },
+  "tflops_per_second_per_device": {
+    "mean": 77.7385531999881,
+    "median": 77.7473756549133
+  },
+  "loss": {
+    "first": 7.7490129470825195,
+    "last": 0.4421035051345825
+  }
+}
