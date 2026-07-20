@@ -6,10 +6,7 @@ hosts: 8
 mesh: {data: 64, fsdp: 1, tensor: 1, sequence: 1}
 libtpu_init_args:
   - --xla_enable_async_all_gather=true
-  - --xla_tpu_overlap_compute_collective_tc=true
-  - --xla_tpu_enable_async_collective_fusion_multiple_steps=true
-  - --xla_tpu_enable_async_collective_fusion=true
+  - --xla_tpu_enable_async_collective_fusion=false
 multi_host: true
 performance_verified: false
 notes: Portable smoke-test profile; requires separate approval and validation.
-
