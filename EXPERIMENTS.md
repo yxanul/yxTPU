@@ -57,9 +57,17 @@ These are recorded so the reasoning is not lost. None has been run.
 
 | ID | Experiment | Why it matters | Prerequisite |
 | --- | --- | --- | --- |
-| OPEN-001 | Promote the adversarial regimes into the correctness gate, backed by hardware rather than emulation | The harness passes on the configuration that NaNs the model, so it can falsify a precision change but never confirm one. It needs correlated, mixed-sign, and AR(1) keys, beta quantiles reaching 0.9 to 1.0, slow-decay cases, and assertions on both `kappa_2(I + A)` and doubling-power growth, plus BF16-versus-full-pass solve residual and gradient error. Thresholds should be validated with the real JAX/Pallas solve on TPU | None |
+| OPEN-001 | Promote the adversarial regimes into the correctness gate, backed by hardware rather than emulation | The harness passes on the configuration that NaNs the model, so it can falsify a precision change but never confirm one. It needs correlated, mixed-sign, and AR(1) keys, beta quantiles reaching 0.9 to 1.0, slow-decay cases, and assertions on both `kappa_2(I + A)` and doubling-power growth, plus BF16-versus-full-pass solve residual and gradient error. Assert on that measured error, not on a proxy: neither `max norm(P^k)` nor the cancellation factor orders the regimes correctly, and both mis-rank the worst case. Growth, cancellation, per-stage divergence and `kappa` are diagnostics that explain a failure rather than predict one. Thresholds validated with the real JAX/Pallas solve on TPU, and the forward-error reference chosen so `kappa * eps` stays far below one | None |
 | OPEN-002 | Measure the WY system from real language tokens, across layer depth and training time | Every stress regime used so far is synthetic, and the training workload is random tokens, which may not reproduce the key-correlation distribution of real pretraining at all. Until this exists the stress regimes are plausible brackets, not trained-model measurements. The compact record per sampled chunk is: beta quantiles, key cosine similarity at lags 1, 4, and 16, decay retention, `kappa_2(I + A)`, maximum doubling-power norm, and solve residual | A tokenized batch and a hook on the KDA layer |
 | OPEN-003 | Conditional beta-cap sweep at 0.9, 0.75, and 0.5 | Bounding beta bounds `norm(A)` and might make the solve BF16-safe, which is worth about 40% of the core. But it is not free: `0.5 * sigmoid(z)` moves mean beta from roughly 0.5 to 0.25 with centered logits, a substantial model change, and a cap of 0.5 does not guarantee `norm(A) < 1` at chunk 64, where the c=0.9 regime measures 30.5. Prefer `beta_max * sigmoid(z)` over hard clipping so saturated logits retain gradients | OPEN-002, to establish that beta is actually responsible for the observed growth |
+
+## Selection rule
+
+Isolated core measurements are hypothesis filters, never selection criteria.
+Full-model throughput is authoritative. Two changes in this ledger improved the
+core and regressed the model: the shifted depthwise convolution and the hybrid
+substitution solve, the latter 5.1% faster in the core and 2.2% slower in the
+model. A core result is grounds for running the model, nothing more.
 
 ## Recording checklist
 

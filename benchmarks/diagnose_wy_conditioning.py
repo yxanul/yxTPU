@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import argparse
 import json
+from fractions import Fraction
 
 import jax
 import jax.numpy as jnp
+import mpmath
 import numpy as np
 from jax import lax
 
@@ -118,16 +120,37 @@ def _power_norms(system, rows):
 
 
 def _solve_doubling(system, rhs, *, bf16):
+  """Recursive doubling, returning the solution and its whole path.
+
+  The path is what distinguishes regimes that grow harmlessly from those that
+  grow and then cancel: ``increments`` is the magnitude added at each stage and
+  ``solution_norms`` is where the running solution sat, so a large sum of
+  increments against a small final norm is exactly the cancellation that BF16
+  cannot survive.
+  """
   power = jnp.asarray(-system, dtype=jnp.float32)
   solution = jnp.asarray(rhs, dtype=jnp.float32)
-  solution = solution + _dot(power, solution, bf16=bf16)
-  power = _dot(power, power, bf16=bf16)
-  covered = 2
+  increments = []
+  solution_norms = []
+  snapshots = []
+  covered = 1
   while covered < rhs.shape[0]:
-    solution = solution + _dot(power, solution, bf16=bf16)
+    delta = _dot(power, solution, bf16=bf16)
+    solution = solution + delta
+    increments.append(float(jnp.linalg.norm(delta.astype(jnp.float32))))
+    solution_norms.append(float(jnp.linalg.norm(solution.astype(jnp.float32))))
+    snapshots.append(np.asarray(solution, dtype=np.float64))
     power = _dot(power, power, bf16=bf16)
     covered *= 2
-  return np.asarray(solution, dtype=np.float64)
+  final = np.asarray(solution, dtype=np.float64)
+  final_norm = float(np.linalg.norm(final, 2)) + 1e-300
+  path = {
+      "stage_solution_norms": solution_norms,
+      "stage_increment_norms": increments,
+      "max_intermediate_ratio": max(solution_norms) / final_norm,
+      "cancellation_factor": float(sum(increments)) / final_norm,
+  }
+  return final, path, snapshots
 
 
 def _solve_substitution(system, rhs, *, bf16, block=16):
@@ -154,7 +177,57 @@ def _solve_substitution(system, rhs, *, bf16, block=16):
         )
       rows_out.append(value)
     solved.append(jnp.concatenate(rows_out, axis=0))
-  return np.asarray(jnp.concatenate(solved, axis=0), dtype=np.float64)
+  return np.asarray(jnp.concatenate(solved, axis=0), dtype=np.float64), None, None
+
+
+def _reference_solution(system, rhs, kappa):
+  """Ground truth for the forward error, chosen so it is actually trustworthy.
+
+  float64 forward substitution is only meaningful while ``kappa * eps_64`` stays
+  far below one. The negative all-ones extreme has ``kappa`` near 2.8e17, so
+  ``kappa * eps_64`` is about 62 and a float64 reference carries no correct
+  digits at all. Where the system entries are exactly representable, which is
+  the case for both all-ones extremes, exact rational forward substitution is
+  used instead: the entries are 0 or +/-1 and the right-hand side is float64,
+  so every intermediate stays a dyadic rational and nothing is rounded.
+  """
+  rows, width = rhs.shape
+  entries = np.unique(np.abs(system))
+  exactly_representable = bool(np.all(np.isin(entries, (0.0, 1.0))))
+  if kappa * np.finfo(np.float64).eps < 1e-8:
+    return np.linalg.solve(np.eye(rows) + system, rhs), "float64"
+  if exactly_representable:
+    lower = [[Fraction(system[i][j]) for j in range(i)] for i in range(rows)]
+    solved: list[list[Fraction]] = []
+    for i in range(rows):
+      row = []
+      for k in range(width):
+        accumulator = Fraction(rhs[i][k])
+        for j in range(i):
+          if lower[i][j]:
+            accumulator -= lower[i][j] * solved[j][k]
+        row.append(accumulator)
+      solved.append(row)
+    return (
+        np.array([[float(value) for value in row] for row in solved]),
+        "exact rational",
+    )
+  mpmath.mp.dps = 120
+  lower_mp = [[mpmath.mpf(float(system[i][j])) for j in range(i)] for i in range(rows)]
+  solved_mp: list[list] = []
+  for i in range(rows):
+    row = []
+    for k in range(width):
+      accumulator = mpmath.mpf(float(rhs[i][k]))
+      for j in range(i):
+        if lower_mp[i][j] != 0:
+          accumulator -= lower_mp[i][j] * solved_mp[j][k]
+      row.append(accumulator)
+    solved_mp.append(row)
+  return (
+      np.array([[float(value) for value in row] for row in solved_mp]),
+      "mpmath dps=120",
+  )
 
 
 def _errors(system, rhs, computed, exact):
@@ -173,14 +246,16 @@ def _errors(system, rhs, computed, exact):
 def _analyze(system, rhs, label):
   rows = system.shape[0]
   matrix = np.eye(rows) + system
-  exact = np.linalg.solve(matrix, rhs)
+  kappa = float(np.linalg.cond(matrix, 2))
+  exact, reference_method = _reference_solution(system, rhs, kappa)
   growth = _power_norms(-system, rows)
 
   record = {
       "regime": label,
+      "reference_method": reference_method,
       "problem_conditioning": {
           "norm_A": float(np.linalg.norm(system, 2)),
-          "kappa_2_I_plus_A": float(np.linalg.cond(matrix, 2)),
+          "kappa_2_I_plus_A": kappa,
           "max_abs_inverse": float(np.max(np.abs(np.linalg.inv(matrix)))),
       },
       "algorithmic_growth": {
@@ -189,9 +264,28 @@ def _analyze(system, rhs, label):
       },
       "solvers": {},
   }
+
+  # Per-stage divergence of the BF16 path from the full-precision path, after
+  # powers 1, 2, 4, ... This localizes where the doubling solve actually loses
+  # the answer, which max power norm alone cannot show.
+  _, path_hi, snapshots_hi = _solve_doubling(system, rhs, bf16=False)
+  _, path_lo, snapshots_lo = _solve_doubling(system, rhs, bf16=True)
+  stage_errors = []
+  for stage, (hi, lo) in enumerate(zip(snapshots_hi, snapshots_lo)):
+    denominator = np.linalg.norm(hi, 2) + 1e-300
+    stage_errors.append(float(np.linalg.norm(lo - hi, 2) / denominator))
+  record["doubling_path"] = {
+      "covered_terms": [2**i for i in range(1, len(stage_errors) + 1)],
+      "stage_bf16_vs_highest": stage_errors,
+      "max_intermediate_ratio_bf16": path_lo["max_intermediate_ratio"],
+      "cancellation_factor_bf16": path_lo["cancellation_factor"],
+      "max_intermediate_ratio_fp32": path_hi["max_intermediate_ratio"],
+      "cancellation_factor_fp32": path_hi["cancellation_factor"],
+  }
+
   for name, solver in (("doubling", _solve_doubling), ("substitution", _solve_substitution)):
     for precision, bf16 in (("fp32", False), ("bf16", True)):
-      computed = solver(system, rhs, bf16=bf16)
+      computed, _, _ = solver(system, rhs, bf16=bf16)
       backward, forward, finite = _errors(system, rhs, computed, exact)
       record["solvers"][f"{name}_{precision}"] = {
           "backward_error": backward,
@@ -264,25 +358,29 @@ def main():
 
   print("\n" + "=" * 124)
   print(
-      f"{'regime':<46} {'k2(I+A)':>10} {'max|P^k|':>10} "
-      f"{'dbl bwd':>9} {'dbl fwd':>9} {'sub bwd':>9} {'sub fwd':>9}"
+      f"{'regime':<40} {'k2(I+A)':>9} {'max|P^k|':>9} {'cancel':>9} "
+      f"{'dbl bwd':>9} {'dbl fwd':>9} {'sub bwd':>9} {'ref':>15}"
   )
   print("-" * 124)
   for record in records:
     cond = record["problem_conditioning"]
     grow = record["algorithmic_growth"]
-    s = record["solvers"]
+    solvers = record["solvers"]
     print(
-        f"{record['regime'][:46]:<46} {cond['kappa_2_I_plus_A']:10.3g} "
-        f"{grow['max_power_norm']:10.3g} "
-        f"{s['doubling_bf16']['backward_error']:9.2g} "
-        f"{s['doubling_bf16']['forward_error']:9.2g} "
-        f"{s['substitution_bf16']['backward_error']:9.2g} "
-        f"{s['substitution_bf16']['forward_error']:9.2g}"
+        f"{record['regime'][:40]:<40} {cond['kappa_2_I_plus_A']:9.3g} "
+        f"{grow['max_power_norm']:9.3g} "
+        f"{record['doubling_path']['cancellation_factor_bf16']:9.3g} "
+        f"{solvers['doubling_bf16']['backward_error']:9.2g} "
+        f"{solvers['doubling_bf16']['forward_error']:9.2g} "
+        f"{solvers['substitution_bf16']['backward_error']:9.2g} "
+        f"{record['reference_method']:>15}"
     )
   print("=" * 124)
-  print("bwd is backward error, fwd is forward error, both at one BF16 pass.")
-  print("Growth predicts backward error; kappa predicts its amplification into forward error.")
+  print("cancel is sum of stage increment norms over final solution norm.")
+  print("Growth alone does not predict backward error; the cancellation factor")
+  print("separates regimes that grow harmlessly from those that grow and cancel.")
+  print("kappa bounds how far a backward error may be amplified into forward")
+  print("error; it does not predict the realized forward error for a given RHS.")
 
 
 if __name__ == "__main__":
