@@ -56,7 +56,8 @@ class SyntheticIterator(Iterator[Batch]):
         return self
 
     def __next__(self) -> Batch:
-        rng = np.random.default_rng(self.config.shuffle_seed + self.index)
+        seed_offset = 0 if self.config.reuse_example_batch else self.index
+        rng = np.random.default_rng(self.config.shuffle_seed + seed_offset)
         tokens = rng.integers(
             1,
             self.vocab_size,
