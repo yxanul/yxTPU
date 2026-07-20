@@ -55,7 +55,11 @@ def _make_train_step(config: ResolvedConfig):
     def differentiated_loss(model, batch):
         return _loss(model, batch, record_max_logits=use_clip)
 
-    @nnx.jit
+    # The train state is replaced by the updated NNX graph state on every call,
+    # so its input buffers may be donated just as in MaxText's functional step.
+    # Without donation the 272.9M baseline retains a second optimizer/model
+    # buffer set and exceeds v6e HBM at the selected batch-8 operating point.
+    @nnx.jit(donate_argnums=(0,))
     def train_step(state: TrainStateNNX, batch):
         microbatches = jax.tree.map(
             lambda value: value.reshape(
