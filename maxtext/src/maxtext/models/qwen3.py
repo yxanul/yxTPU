@@ -36,6 +36,7 @@ from maxtext.common.common_types import KV_BATCH, KV_HEAD
 from maxtext.utils.sharding import logical_to_mesh_axes
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
+from maxtext.layers import kimi_delta_attention
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
@@ -1026,6 +1027,8 @@ class Qwen3NextFullAttention(nnx.Module):
         model_mode=model_mode,
         use_mrope=cfg.use_mrope,
         mrope_section=cfg.mrope_section,
+        is_nope_layer=cfg.linear_attention_type == "kda" and cfg.kda_nope_full_attention,
+        disable_qwen3_hybrid=cfg.linear_attention_type == "kda",
         rngs=rngs,
     )
 
@@ -1278,9 +1281,22 @@ class Qwen3NextDecoderLayer(nnx.Module):
     else:
       batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
       dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
-      self.attention = Qwen3NextGatedDeltaNet(
-          config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
-      )
+      if cfg.linear_attention_type == "kda":
+        self.attention = kimi_delta_attention.KimiDeltaAttention(
+            config=cfg,
+            mesh=self.mesh,
+            model_mode=model_mode,
+            rngs=rngs,
+        )
+      else:
+        self.attention = Qwen3NextGatedDeltaNet(
+            config=cfg,
+            inputs_shape=dummy_inputs_shape,
+            mesh=self.mesh,
+            dtype=cfg.dtype,
+            model_mode=model_mode,
+            rngs=rngs,
+        )
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -1291,8 +1307,22 @@ class Qwen3NextDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3NextSparseMoeBlock`.
-    self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    if cfg.hybrid_attention_use_dense_mlp:
+      self.mlp = MlpBlock(
+          config=cfg,
+          mesh=self.mesh,
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          quant=self.quant,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
+    else:
+      self.mlp = Qwen3NextSparseMoeBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
   def __call__(
       self,
@@ -1327,7 +1357,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      attention_output, new_kv_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = self.attention(
           hidden_states,
           model_mode=model_mode,
           kv_cache=kv_cache,
@@ -1346,13 +1376,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
-    # Instantiate and call our `Qwen3NextSparseMoeBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
-
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+    if self.config.hybrid_attention_use_dense_mlp:
+      mlp_output = self.mlp(hidden_states, deterministic=deterministic)
+    else:
+      mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+      if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+        self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output

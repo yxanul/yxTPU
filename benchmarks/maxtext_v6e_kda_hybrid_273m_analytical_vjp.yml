@@ -1,0 +1,6 @@
+# Whole-KDA analytical backward experiment derived from ejkernel's XLA GDR
+# custom VJP. The forward retains the selected XLA inverse implementation.
+base_config: "maxtext_v6e_kda_hybrid_273m.yml"
+
+kda_use_analytical_custom_vjp: true
+kda_use_fused_pallas_kernel: false

@@ -1,0 +1,5 @@
+# Fused production-shape TPU Pallas KDA forward/backward experiment.
+base_config: "maxtext_v6e_kda_hybrid_273m.yml"
+
+kda_use_analytical_custom_vjp: false
+kda_use_fused_pallas_kernel: true

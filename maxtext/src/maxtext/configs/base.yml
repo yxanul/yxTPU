@@ -1243,6 +1243,23 @@ pure_nnx_decoder: true
 pure_nnx: true
 
 ################################## Qwen3-Next Specific Configs ##################################
+# Linear token mixer for the four-layer hybrid container: "gdn" or "kda".
+linear_attention_type: "gdn"
+# Use a dense SwiGLU MLP instead of Qwen3-Next's sparse MoE block.
+hybrid_attention_use_dense_mlp: false
+# Low-rank dimension for the KDA decay and output gates.
+kda_gate_rank: 128
+# FLA's bounded log gate keeps accelerated KDA factorizations numerically safe.
+kda_safe_gate: false
+kda_gate_lower_bound: -5.0
+# Direct blocked WY solve with a custom TPU Pallas forward/backward rule.
+kda_use_pallas_blocked_solve: false
+# Whole-KDA analytical XLA backward with blockwise channel-decay gradients.
+kda_use_analytical_custom_vjp: false
+# Use the fixed production-shape fused Pallas KDA forward/backward kernels.
+kda_use_fused_pallas_kernel: false
+# Kimi Linear delegates positional information to KDA and uses NoPE global attention.
+kda_nope_full_attention: true
 # Kernel size for the 1D convolution in the Gated Delta Net
 gdn_conv_kernel_dim: 4
 # Head dimension for the key/query in the Gated Delta Net

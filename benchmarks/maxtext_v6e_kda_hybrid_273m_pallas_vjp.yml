@@ -1,0 +1,7 @@
+# Experimental KDA solve backend. This is numerically validated for training,
+# but is intentionally not the default because it is slower on v6e.
+base_config: "maxtext_v6e_kda_hybrid_273m.yml"
+
+kda_use_pallas_blocked_solve: true
+kda_use_analytical_custom_vjp: false
+kda_use_fused_pallas_kernel: false
