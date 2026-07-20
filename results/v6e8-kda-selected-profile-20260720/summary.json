@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-selected-profile-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 0.5538801428571428,
+    "median": 0.232027,
+    "p90": 1.3741768000000008
+  },
+  "tokens_per_second_per_device": {
+    "mean": 568506.104543131,
+    "median": 70612.47182439975,
+    "p10": 20520.97536624746,
+    "p90": 1801530.5952696926
+  },
+  "tokens_per_second_global": {
+    "mean": 4548048.836345048,
+    "median": 564899.774595198,
+    "p10": 164167.8029299797,
+    "p90": 14412244.76215754
+  },
+  "tflops_per_second_per_device": {
+    "mean": 888.2029382373192,
+    "median": 110.32107562157852
+  },
+  "loss": {
+    "first": 7.412625789642334,
+    "last": 5.3769683837890625
+  }
+}
