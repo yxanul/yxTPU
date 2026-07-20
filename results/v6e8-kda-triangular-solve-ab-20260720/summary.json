@@ -1,0 +1,59 @@
+{
+  "backend": "tpu",
+  "device": "TPU_0(process=0,(0,0,0,0))",
+  "software": {
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2",
+    "device_kind": "TPU v6 lite"
+  },
+  "shape": {
+    "systems": 2048,
+    "chunk_size": 64,
+    "rhs_width": 256,
+    "interpretation": "one chip's B=8, T=2048, H=8 KDA solve workload"
+  },
+  "results": [
+    {
+      "name": "XLA inverse + two matmuls, forward",
+      "compile_seconds": 3.9590068720008276,
+      "mean_milliseconds": 1.8832411999937904,
+      "median_milliseconds": 1.8819394999809447,
+      "repetitions": 20
+    },
+    {
+      "name": "XLA inverse + two matmuls, forward+VJP",
+      "compile_seconds": 5.084342513000593,
+      "mean_milliseconds": 2.8355255997666973,
+      "median_milliseconds": 2.834889000041585,
+      "repetitions": 10
+    },
+    {
+      "name": "XLA direct + custom VJP, forward",
+      "compile_seconds": 4.0273986119991605,
+      "mean_milliseconds": 1.575717250125308,
+      "median_milliseconds": 1.575059500282805,
+      "repetitions": 20
+    },
+    {
+      "name": "XLA direct + custom VJP, forward+VJP",
+      "compile_seconds": 4.416781627000091,
+      "mean_milliseconds": 3.495599500274693,
+      "median_milliseconds": 3.4916900003736373,
+      "repetitions": 10
+    },
+    {
+      "name": "Pallas blocked + custom VJP, forward",
+      "compile_seconds": 0.2802164199983963,
+      "mean_milliseconds": 16.932130100121867,
+      "median_milliseconds": 16.925533000176074,
+      "repetitions": 20
+    },
+    {
+      "name": "Pallas blocked + custom VJP, forward+VJP",
+      "compile_seconds": 2.7079662879987154,
+      "mean_milliseconds": 34.43719720016816,
+      "median_milliseconds": 34.435970000231464,
+      "repetitions": 10
+    }
+  ]
+}

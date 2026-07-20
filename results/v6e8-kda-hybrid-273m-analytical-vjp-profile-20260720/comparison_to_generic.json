@@ -1,0 +1,59 @@
+{
+  "generic_profile": "results/v6e8-kda-hybrid-273m-block8-safe-profile-s2048-b8-20260720/profile_analysis.json",
+  "analytical_profile": "results/v6e8-kda-hybrid-273m-analytical-vjp-profile-20260720/profile_summary.json",
+  "profiled_steps_each": 3,
+  "milliseconds_per_step": {
+    "generic": 837.7566438646667,
+    "analytical": 700.4495215886667,
+    "reduction": 137.30712227599997
+  },
+  "training_phases_milliseconds_per_step": {
+    "embedding_input_prep": {
+      "generic": 1.4117631226666665,
+      "analytical": 1.418047936,
+      "change": 0.006284813333333528
+    },
+    "forward_transformer_scan": {
+      "generic": 150.865863112,
+      "analytical": 150.35350593133333,
+      "change": -0.5123571806666689
+    },
+    "output_head_and_loss": {
+      "generic": 5.948505336666666,
+      "analytical": 5.900960390666667,
+      "change": -0.04754494599999859
+    },
+    "backward_transformer_scan": {
+      "generic": 668.241968154,
+      "analytical": 531.5226025740001,
+      "change": -136.71936557999993
+    },
+    "post_backward_optimizer_metrics": {
+      "generic": 9.307609299333333,
+      "analytical": 9.306014037333332,
+      "change": -0.0015952620000003748
+    }
+  },
+  "kda_source_or_stack_milliseconds_per_step": {
+    "generic": 743.4918838340001,
+    "analytical": 599.728888274,
+    "reduction": 143.76299556000012
+  },
+  "selected_hlo_categories_milliseconds_per_step": {
+    "loop_fusion": {
+      "generic": 243.40406144599862,
+      "analytical": 92.08351058133361,
+      "change": -151.320550864665
+    },
+    "convolution_fusion": {
+      "generic": 301.7905705359986,
+      "analytical": 307.7838810746678,
+      "change": 5.9933105386692205
+    },
+    "custom_call": {
+      "generic": 171.6574545053333,
+      "analytical": 171.58388454333323,
+      "change": -0.0735699620000787
+    }
+  }
+}

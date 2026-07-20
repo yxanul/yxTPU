@@ -1,0 +1,125 @@
+{
+  "environment": {
+    "accelerator": "TPU v6 lite",
+    "devices_used": 1,
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2"
+  },
+  "workload": {
+    "batch": 8,
+    "sequence_length": 2048,
+    "heads": 8,
+    "key_dim": 128,
+    "value_dim": 128,
+    "chunk_size": 64,
+    "tokens": 16384,
+    "input_dtype": "bfloat16",
+    "qk_l2norm": true,
+    "gradient_arguments": [
+      "query",
+      "key",
+      "value",
+      "log_decay",
+      "beta",
+      "initial_state"
+    ]
+  },
+  "correctness": {
+    "cpu_tests": "7 passed",
+    "native_tpu_shape": {
+      "batch": 1,
+      "sequence_length": 64,
+      "heads": 1,
+      "key_dim": 128,
+      "value_dim": 128,
+      "chunk_size": 64
+    },
+    "generic_loss": 0.00026931476895697415,
+    "analytical_loss": 0.000269263080554083,
+    "absolute_loss_difference": 5.168840289115906e-08,
+    "all_gradients_finite": true,
+    "maximum_absolute_gradient_difference": {
+      "query": 7.450580596923828e-09,
+      "key": 1.4901161193847656e-08,
+      "value": 3.725290298461914e-09,
+      "log_decay": 1.411127392936473e-08,
+      "beta": 1.7564889276400208e-07,
+      "initial_state": 2.3283064365386963e-09
+    }
+  },
+  "results": [
+    {
+      "name": "generic, forward",
+      "compile_seconds": 4.111075411999991,
+      "mean_milliseconds": 9.660153700042429,
+      "median_milliseconds": 9.658243499870878,
+      "min_milliseconds": 9.640389000196592,
+      "max_milliseconds": 9.69388900011836,
+      "repetitions": 20,
+      "compiled_memory_bytes": {
+        "argument": 170393600,
+        "output": 37748768,
+        "temporary": 774926784,
+        "alias": 0,
+        "total": 983069152
+      },
+      "tokens_per_second": 1696039.2669454152
+    },
+    {
+      "name": "generic, forward+backward",
+      "compile_seconds": 5.650998752000305,
+      "mean_milliseconds": 32.69603759999882,
+      "median_milliseconds": 32.685685499927786,
+      "min_milliseconds": 32.63461599999573,
+      "max_milliseconds": 32.79659500003618,
+      "repetitions": 10,
+      "compiled_memory_bytes": {
+        "argument": 170393600,
+        "output": 170394144,
+        "temporary": 6272825760,
+        "alias": 0,
+        "total": 6613613504
+      },
+      "tokens_per_second": 501100.47585706814
+    },
+    {
+      "name": "analytical, forward",
+      "compile_seconds": 4.136902258000191,
+      "mean_milliseconds": 9.665722199679294,
+      "median_milliseconds": 9.65755299966986,
+      "min_milliseconds": 9.63786899956176,
+      "max_milliseconds": 9.73110899940366,
+      "repetitions": 20,
+      "compiled_memory_bytes": {
+        "argument": 170393600,
+        "output": 37748768,
+        "temporary": 774926784,
+        "alias": 0,
+        "total": 983069152
+      },
+      "tokens_per_second": 1695062.1651989562
+    },
+    {
+      "name": "analytical, forward+backward",
+      "compile_seconds": 5.5510690360006265,
+      "mean_milliseconds": 31.877821699708875,
+      "median_milliseconds": 31.870585499746085,
+      "min_milliseconds": 31.83851599897025,
+      "max_milliseconds": 31.92923599999631,
+      "repetitions": 10,
+      "compiled_memory_bytes": {
+        "argument": 170393600,
+        "output": 170394144,
+        "temporary": 1589001664,
+        "alias": 0,
+        "total": 1929789408
+      },
+      "tokens_per_second": 513962.3451796152
+    }
+  ],
+  "comparison": {
+    "forward_plus_backward_throughput_change_percent": 2.5667246275407063,
+    "forward_plus_backward_time_reduction_percent": 2.5024925353339222,
+    "forward_plus_backward_compiled_memory_reduction_percent": 70.82095276912025
+  }
+}

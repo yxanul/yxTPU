@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-block8-safe-profile-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 1.486496142857143,
+    "median": 0.834642,
+    "p90": 3.5025388000000017
+  },
+  "tokens_per_second_per_device": {
+    "mean": 558341.454559101,
+    "median": 19629.973090259056,
+    "p10": 6687.57831022135,
+    "p90": 1881982.6283889385
+  },
+  "tokens_per_second_global": {
+    "mean": 4466731.636472808,
+    "median": 157039.78472207245,
+    "p10": 53500.6264817708,
+    "p90": 15055861.027111508
+  },
+  "tflops_per_second_per_device": {
+    "mean": 872.3222433603052,
+    "median": 30.668799573048084
+  },
+  "loss": {
+    "first": 7.414370059967041,
+    "last": 5.378676414489746
+  }
+}

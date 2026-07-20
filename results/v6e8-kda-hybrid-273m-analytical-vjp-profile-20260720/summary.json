@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-analytical-vjp-profile-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 7,
+  "first_measured_step": 5,
+  "last_measured_step": 11,
+  "step_time_seconds": {
+    "mean": 1.3150147142857143,
+    "median": 0.697167,
+    "p90": 3.134107000000001
+  },
+  "tokens_per_second_per_device": {
+    "mean": 522620.46421105845,
+    "median": 23500.825483707635,
+    "p10": 7782.82682086275,
+    "p90": 1746870.640093376
+  },
+  "tokens_per_second_global": {
+    "mean": 4180963.7136884676,
+    "median": 188006.60386966108,
+    "p10": 62262.614566902,
+    "p90": 13974965.120747007
+  },
+  "tflops_per_second_per_device": {
+    "mean": 816.5137158346852,
+    "median": 36.716408282732836
+  },
+  "loss": {
+    "first": 7.414873123168945,
+    "last": 5.379352569580078
+  }
+}

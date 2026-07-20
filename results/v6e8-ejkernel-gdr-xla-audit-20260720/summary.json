@@ -1,0 +1,138 @@
+{
+  "environment": {
+    "tpu": "v6e-8",
+    "device_measured": "TPU_0(process=0,(0,0,0,0))",
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2",
+    "ejkernel_version": "0.0.82",
+    "ejkernel_commit": "2a426edbd4f88368d9d31d80cf2e4219aa69d7cc"
+  },
+  "workload": {
+    "batch": 8,
+    "sequence_length": 2048,
+    "heads": 8,
+    "key_dim": 128,
+    "value_dim": 128,
+    "tokens": 16384,
+    "dtype": "bfloat16",
+    "qk_l2norm": true,
+    "measurement_scope": "one token-mixer layer on one TPU chip"
+  },
+  "correctness": {
+    "shape": {
+      "batch": 1,
+      "sequence_length": 64,
+      "heads": 2,
+      "key_dim": 16,
+      "value_dim": 16,
+      "chunk_size": 16,
+      "dtype": "float32"
+    },
+    "private_custom_vjp_vs_active_exact": {
+      "loss_absolute_error": 0.0,
+      "output_max_absolute_error": 0.0,
+      "final_state_max_absolute_error": 0.0,
+      "gradient_max_absolute_error": {
+        "query": 1.2732925824820995e-11,
+        "key": 2.1827872842550278e-11,
+        "value": 1.0913936421275139e-11,
+        "beta": 5.820766091346741e-11,
+        "decay": 5.238689482212067e-10,
+        "initial_state": 9.094947017729282e-12
+      },
+      "all_custom_gradients_finite": true
+    }
+  },
+  "chunk_size_64": [
+    {
+      "path": "active exact triangular solve + JAX autodiff",
+      "phase": "forward",
+      "mean_milliseconds": 2.705224600049405,
+      "median_milliseconds": 2.70005449965538,
+      "tokens_per_second": 6056428.7341246195,
+      "compiled_memory_bytes": 309656768,
+      "repetitions": 20
+    },
+    {
+      "path": "active exact triangular solve + JAX autodiff",
+      "phase": "forward+backward",
+      "mean_milliseconds": 7.2899139995570295,
+      "median_milliseconds": 7.279829000253812,
+      "tokens_per_second": 2247488.79081366,
+      "compiled_memory_bytes": 1223214240,
+      "repetitions": 10
+    },
+    {
+      "path": "private exact inverse + handwritten custom VJP",
+      "phase": "forward",
+      "mean_milliseconds": 2.55600564978522,
+      "median_milliseconds": 2.553974499278411,
+      "tokens_per_second": 6410001.480777924,
+      "compiled_memory_bytes": 274005184,
+      "repetitions": 20
+    },
+    {
+      "path": "private exact inverse + handwritten custom VJP",
+      "phase": "forward+backward",
+      "mean_milliseconds": 9.95575170036318,
+      "median_milliseconds": 9.949188500286255,
+      "tokens_per_second": 1645681.8624155042,
+      "compiled_memory_bytes": 1352616416,
+      "repetitions": 10
+    }
+  ],
+  "chunk_size_256": [
+    {
+      "path": "active exact triangular solve + JAX autodiff",
+      "phase": "forward",
+      "mean_milliseconds": 12.72974220028118,
+      "median_milliseconds": 12.727868000183662,
+      "tokens_per_second": 1287064.5565499438,
+      "compiled_memory_bytes": 747075904,
+      "repetitions": 10
+    },
+    {
+      "path": "active exact triangular solve + JAX autodiff",
+      "phase": "forward+backward",
+      "mean_milliseconds": 17.2769036002137,
+      "median_milliseconds": 17.24539799943159,
+      "tokens_per_second": 948318.0770770373,
+      "compiled_memory_bytes": 1952621280,
+      "repetitions": 5
+    },
+    {
+      "path": "private exact inverse + handwritten custom VJP",
+      "phase": "forward",
+      "mean_milliseconds": 12.684948299647658,
+      "median_milliseconds": 12.677792999056692,
+      "tokens_per_second": 1291609.5212193404,
+      "compiled_memory_bytes": 611383104,
+      "repetitions": 10
+    },
+    {
+      "path": "private exact inverse + handwritten custom VJP",
+      "phase": "forward+backward",
+      "mean_milliseconds": 18.816693400003714,
+      "median_milliseconds": 18.804757000907557,
+      "tokens_per_second": 870716.2120203737,
+      "compiled_memory_bytes": 1389780960,
+      "repetitions": 5
+    }
+  ],
+  "matched_maxtext_kda_chunk_size_64": [
+    {
+      "phase": "forward",
+      "mean_milliseconds": 9.656797149818885,
+      "median_milliseconds": 9.65585900030419,
+      "tokens_per_second": 1696628.7834167962,
+      "repetitions": 20
+    },
+    {
+      "phase": "forward+backward",
+      "mean_milliseconds": 32.6527694998731,
+      "median_milliseconds": 32.65130599902477,
+      "tokens_per_second": 501764.4827971996,
+      "repetitions": 10
+    }
+  ]
+}

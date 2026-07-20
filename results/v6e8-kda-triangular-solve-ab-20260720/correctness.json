@@ -1,0 +1,33 @@
+{
+  "backend": "tpu",
+  "device_kind": "TPU v6 lite",
+  "blocked_solve_vs_xla": {
+    "shape": [1, 1, 8, 64, 64],
+    "rhs_shape": [1, 1, 8, 64, 256],
+    "max_absolute_error": {
+      "output": 9.5367e-7,
+      "system_gradient": 2.2888e-5,
+      "rhs_gradient": 7.1526e-7
+    },
+    "all_finite": true
+  },
+  "end_to_end_kda_vs_recurrent": {
+    "shape": {
+      "batch": 1,
+      "sequence": 64,
+      "heads": 1,
+      "key_dim": 128,
+      "value_dim": 128
+    },
+    "max_absolute_error": {
+      "loss": 7.28e-11,
+      "query_gradient": 1.21e-13,
+      "key_gradient": 1.14e-12,
+      "value_gradient": 1.36e-12,
+      "log_decay_gradient": 3.18e-12,
+      "beta_gradient": 1.46e-11,
+      "initial_state_gradient": 5.4e-13
+    },
+    "all_finite": true
+  }
+}

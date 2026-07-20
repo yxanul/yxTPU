@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-pallas-vjp-adamw-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 1.4620502400000002,
+    "median": 1.46206,
+    "p90": 1.462966
+  },
+  "tokens_per_second_per_device": {
+    "mean": 11206.18403044363,
+    "median": 11206.106452539569,
+    "p10": 11199.166977301149,
+    "p90": 11212.947454071847
+  },
+  "tokens_per_second_global": {
+    "mean": 89649.47224354904,
+    "median": 89648.85162031655,
+    "p10": 89593.33581840919,
+    "p90": 89703.57963257478
+  },
+  "tflops_per_second_per_device": {
+    "mean": 17.507930878362313,
+    "median": 17.507809674875176
+  },
+  "loss": {
+    "first": 7.750171661376953,
+    "last": 0.44438543915748596
+  }
+}

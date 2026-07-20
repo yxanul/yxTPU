@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-analytical-vjp-adamw-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.70161964,
+    "median": 0.701255,
+    "p90": 0.7035556000000001
+  },
+  "tokens_per_second_per_device": {
+    "mean": 23351.85068770337,
+    "median": 23363.826282878556,
+    "p10": 23287.429277138086,
+    "p90": 23418.668158046465
+  },
+  "tokens_per_second_global": {
+    "mean": 186814.80550162695,
+    "median": 186910.61026302844,
+    "p10": 186299.4342171047,
+    "p90": 187349.34526437172
+  },
+  "tflops_per_second_per_device": {
+    "mean": 36.48365818475344,
+    "median": 36.5023682016499
+  },
+  "loss": {
+    "first": 7.7497758865356445,
+    "last": 0.4451630711555481
+  }
+}

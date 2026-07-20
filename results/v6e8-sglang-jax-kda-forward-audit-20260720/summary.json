@@ -1,0 +1,39 @@
+{
+  "date": "2026-07-20",
+  "hardware": "one TPU v6e device from yxtpu-v6e8-dev",
+  "jax_version": "0.10.2",
+  "sglang_jax": {
+    "repository": "https://github.com/sgl-project/sglang-jax",
+    "repository_commit": "91399b45da2c7af6509546c60534de780e0b1d1f",
+    "last_kda_file_commit": "13fc48de4e00635262765b296a7a53c76616b88d",
+    "entry_point": "chunk_kda_fwd",
+    "layout": "packed B=1, T=16384 with eight 2048-token segments",
+    "mean_forward_milliseconds": 38.523,
+    "median_forward_milliseconds": 38.520,
+    "forward_tokens_per_second": 425307,
+    "compile_seconds": 1.907,
+    "output_finite": true,
+    "final_state_finite": true,
+    "reverse_mode_result": "failed",
+    "reverse_mode_error": "ValueError: Linearization failed to produce known values for all output primals. This is typically caused by attempting to differentiate a function uses an operation that does not support reverse-mode autodiff."
+  },
+  "current_maxtext_kda_core": {
+    "layout": "B=8, T=2048",
+    "mean_forward_milliseconds": 9.664,
+    "median_forward_milliseconds": 9.660,
+    "forward_tokens_per_second": 1695337,
+    "compile_seconds": 4.103,
+    "output_finite": true,
+    "final_state_finite": true
+  },
+  "common_shape": {
+    "tokens": 16384,
+    "heads": 8,
+    "key_dimension": 128,
+    "value_dimension": 128,
+    "chunk_size": 64,
+    "input_dtype": "bfloat16",
+    "state_dtype": "float32"
+  },
+  "caveat": "Orientation microbenchmark, not a full-model comparison. SGLang-JAX includes packed-variable-length alignment, gather/scatter, and gate activation; the current MaxText core includes Q/K L2 normalization but receives already activated log decay."
+}

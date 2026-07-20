@@ -1,0 +1,33 @@
+{
+  "metrics_file": "/home/a1111/yxTPU/results/v6e8-kda-hybrid-273m-block8-safe-adamw-s2048-b8-20260720/metrics.jsonl",
+  "devices": 8,
+  "warmup_steps_discarded": 5,
+  "measured_steps": 25,
+  "first_measured_step": 5,
+  "last_measured_step": 29,
+  "step_time_seconds": {
+    "mean": 0.8386462,
+    "median": 0.838384,
+    "p90": 0.8402482
+  },
+  "tokens_per_second_per_device": {
+    "mean": 19536.272926053796,
+    "median": 19542.35767858165,
+    "p10": 19499.000726542003,
+    "p90": 19559.538004503298
+  },
+  "tokens_per_second_global": {
+    "mean": 156290.18340843037,
+    "median": 156338.8614286532,
+    "p10": 155992.00581233602,
+    "p90": 156476.30403602638
+  },
+  "tflops_per_second_per_device": {
+    "mean": 30.522407545776336,
+    "median": 30.531914031336473
+  },
+  "loss": {
+    "first": 7.74960994720459,
+    "last": 0.4450587034225464
+  }
+}
