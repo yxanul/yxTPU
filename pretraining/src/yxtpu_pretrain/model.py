@@ -55,7 +55,7 @@ def _remat_policy(name: str):
         )
     if name == "save_dot_except_mlp":
         return jax.checkpoint_policies.save_only_these_names(
-            "qkv_proj", "context", "out_proj"
+            "qkv_proj", "out_proj"
         )
     raise ValueError(f"unknown rematerialization policy: {name}")
 
