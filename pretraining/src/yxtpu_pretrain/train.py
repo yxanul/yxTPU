@@ -470,6 +470,20 @@ def run(
             throughput = tokens / elapsed
             loss = float(host_metrics["loss"])
             grad_norm = float(host_metrics["grad_norm"])
+            if not math.isfinite(loss) or not math.isfinite(grad_norm):
+                failure = {
+                    "step": step,
+                    "tokens_seen_before_failed_step": tokens_seen - int(tokens),
+                    "failure": "non_finite_train_metrics",
+                    "loss": loss,
+                    "grad_norm": grad_norm,
+                }
+                metrics_writer.write(failure)
+                print(json.dumps(failure, sort_keys=True), flush=True)
+                raise FloatingPointError(
+                    f"non-finite training metrics at step {step}: "
+                    f"loss={loss}, grad_norm={grad_norm}"
+                )
             record = {
                 "step": step,
                 "loss": loss,
