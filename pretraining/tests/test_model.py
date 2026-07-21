@@ -95,8 +95,11 @@ def test_tiny_model_forward_is_finite_and_masks_padding():
     segments = segments.at[:, -8:].set(0)
     with logical_mesh_context(mesh, make_leaf_config(config).logical_axis_rules):
         logits = model(tokens, decoder_segment_ids=segments)
+        hidden = model.hidden_states(tokens, decoder_segment_ids=segments)
+        projected = model.project_logits(hidden)
     assert logits.shape == (1, 64, config.model.vocab_size)
     assert jnp.all(jnp.isfinite(logits))
+    assert jnp.allclose(logits, projected)
 
 
 def test_model_preserves_logical_data_sharding_across_layer_boundaries(monkeypatch):

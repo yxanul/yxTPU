@@ -64,6 +64,22 @@ def test_block_attnres_is_reserved_but_rejected():
         )
 
 
+def test_fused_loss_rejects_vocabulary_parallel_meshes():
+    with pytest.raises(ValueError, match="vocabulary parallelism"):
+        load_config(
+            model="kda_hybrid_273m",
+            optimizer="adamw",
+            data="synthetic",
+            hardware="v6e-8",
+            experiment="selected",
+            overrides=[
+                "model.loss.implementation=tokamax_fused",
+                "hardware.mesh.data=4",
+                "hardware.mesh.tensor=2",
+            ],
+        )
+
+
 def test_all_required_profiles_exist():
     expected = {
         "models/kda_hybrid_273m.yml",
