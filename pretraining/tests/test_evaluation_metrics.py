@@ -10,7 +10,7 @@ from yxtpu_pretrain.evaluation.lm_harness import (
     _json_safe,
     flatten_harness_metrics,
 )
-from yxtpu_pretrain.model import HybridLanguageModel
+from yxtpu_pretrain.model import HybridLanguageModel, attention_logit_intermediates
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.metrics import _flatten_metrics
 from yxtpu_pretrain.train import _host_diagnostics, _learning_rate, _make_diagnostics_step
@@ -139,3 +139,53 @@ def test_separate_diagnostics_pass_reports_finite_norms_and_attention():
     assert metrics["finite"] == 1.0
     assert metrics["grad_norm"] > 0
     assert "attention/cycle_0/head_0_max_logit" in metrics
+
+
+def test_recording_forward_keeps_attention_logit_intermediate_batch_independent():
+    """A record_max_logits forward must not resize the persisted intermediate.
+
+    Regression for the step-250 crash: with adamw the compiled train step never
+    records, so it captures the max-logit intermediates at their initial
+    [cycles, 1, heads] shape. A diagnostics forward that recorded a batch-sized
+    [cycles, B, heads] value left the model state incompatible with the next
+    donated train step. The reduction must keep the shape batch-independent.
+    """
+    config = load_config(
+        model="kda_hybrid_273m",
+        optimizer="adamw",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="selected",
+        overrides=[
+            "model.emb_dim=128",
+            "model.mlp_dim=256",
+            "model.num_layers=4",
+            "model.num_cycles=1",
+            "model.kda.num_heads=1",
+            "model.kda.precision=full_fp32",
+            "model.attention.num_query_heads=2",
+            "model.attention.num_kv_heads=1",
+            "model.vocab_size=256",
+            "model.dtype=float32",
+            "model.remat_policy=full",
+            "data.sequence_length=64",
+            "data.per_device_batch_size=1",
+        ],
+    )
+    mesh = create_mesh(config.hardware, allow_device_mismatch=True)
+    model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(9))
+    expected = (config.model.num_cycles, 1, config.model.attention.num_query_heads)
+    assert attention_logit_intermediates(model).shape == expected
+
+    batch_rows = 4
+    tokens = (jnp.arange(batch_rows * 64, dtype=jnp.int32).reshape(batch_rows, 64) % 255) + 1
+    batch = {
+        "input_ids": tokens,
+        "labels": jnp.roll(tokens, -1, axis=1),
+        "loss_mask": jnp.ones_like(tokens, dtype=jnp.float32),
+        "segment_ids": jnp.ones_like(tokens, dtype=jnp.int32),
+        "positions": jnp.broadcast_to(jnp.arange(64, dtype=jnp.int32), tokens.shape),
+    }
+    # A batch of four rows would previously leak a [cycles, 4, heads] shape.
+    _make_diagnostics_step()(model, batch)
+    assert attention_logit_intermediates(model).shape == expected

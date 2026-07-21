@@ -97,10 +97,13 @@ def _make_train_step(config: ResolvedConfig):
         accumulated_grads = None
         loss_sum = jnp.asarray(0.0, dtype=jnp.float32)
         token_sum = jnp.asarray(0.0, dtype=jnp.float32)
+        # Per-head attention logit maxima are reduced over the batch inside the
+        # mixer, so the accumulator carries a single [cycles, 1, heads] row and
+        # takes the max across accumulation microbatches.
         max_logits = jnp.full(
             (
                 config.model.num_cycles,
-                microbatches["input_ids"].shape[1],
+                1,
                 config.model.attention.num_query_heads,
             ),
             -jnp.inf,

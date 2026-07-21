@@ -125,7 +125,11 @@ class NoPEGQA(nnx.Module):
             mask = mask & (same_segment & valid)[:, None, None, :, :]
         logits = jnp.where(mask, logits, jnp.asarray(-1.0e30, dtype=logits.dtype))
         if record_max_logits:
-            maxima = jnp.max(logits, axis=(-2, -1)).reshape(batch, self.num_query_heads)
+            # Reduce over the batch axis as well so the recorded intermediate
+            # keeps the fixed [1, heads] shape it was initialized with. A
+            # batch-sized shape here persists on the model and is incompatible
+            # with a train step compiled without recording (see __call__).
+            maxima = jnp.max(logits, axis=(0, -2, -1)).reshape(1, self.num_query_heads)
             self.max_logits.value = maxima
         probabilities = jax.nn.softmax(logits, axis=-1).astype(value.dtype)
         output = jnp.einsum(
@@ -167,6 +171,17 @@ class NoPEGQA(nnx.Module):
                 record_max_logits=record_max_logits,
             )
             if record_max_logits:
-                self.max_logits.value = self.attention_op.max_logits.value
+                # The AttentionOp records a batch-sized [batch, heads] maximum.
+                # Collapse the batch axis so both this intermediate and the
+                # AttentionOp's own intermediate return to the fixed [1, heads]
+                # shape the NNX graph was initialized and compiled with.
+                # Otherwise a diagnostics forward (record_max_logits=True) leaves
+                # batch-sized intermediates on the model that a subsequent
+                # record-free (e.g. adamw) train step cannot consume.
+                reduced = jnp.max(
+                    self.attention_op.max_logits.value, axis=0, keepdims=True
+                )
+                self.attention_op.max_logits.value = reduced
+                self.max_logits.value = reduced
         output = self.out_proj(output.astype(self.dtype))
         return jax.ad_checkpoint.checkpoint_name(output, "out_proj")
