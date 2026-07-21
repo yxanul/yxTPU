@@ -118,6 +118,10 @@ def load_fast_tokenizer(name: str, *, padded_vocab_size: int):
         raise ValueError(f"tokenizer {name!r} has no EOS token")
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # GPT-2's published 1,024-token positional limit is not a tokenizer limit;
+    # this model has no learned positional table and trains at 2,048 tokens.
+    # Disable Transformers' misleading long-document warning without truncating.
+    tokenizer.model_max_length = 1_000_000_000
     if len(tokenizer) > padded_vocab_size:
         raise ValueError(
             f"tokenizer vocabulary {len(tokenizer)} exceeds model vocabulary {padded_vocab_size}"
