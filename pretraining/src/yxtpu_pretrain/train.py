@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import statistics
 import time
@@ -19,13 +20,20 @@ from maxtext.utils import max_utils
 
 from yxtpu_pretrain.config import ResolvedConfig
 from yxtpu_pretrain.losses import data_parallel_linear_cross_entropy
-from yxtpu_pretrain.model import HybridLanguageModel, attention_logit_intermediates
-from yxtpu_pretrain.optimizers import apply_gqa_muonclip, build_optimizer
+from yxtpu_pretrain.model import (
+    HybridLanguageModel,
+    attention_logit_intermediates,
+    count_parameters,
+)
+from yxtpu_pretrain.optimizers import (
+    apply_gqa_muonclip,
+    build_optimizer,
+)
 from yxtpu_pretrain.runtime.checkpoints import CheckpointIO
 from yxtpu_pretrain.runtime.data import create_data_iterator
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
-from yxtpu_pretrain.runtime.metrics import MetricsWriter
+from yxtpu_pretrain.runtime.metrics import MetricsWriter, WandbTracker
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 
@@ -153,6 +161,77 @@ def _make_eval_step():
     return eval_step
 
 
+def _tree_max_abs(tree):
+    leaves = jax.tree.leaves(tree)
+    return jnp.max(
+        jnp.stack(
+            [jnp.max(jnp.abs(leaf.astype(jnp.float32)), initial=0.0) for leaf in leaves]
+        ),
+        initial=0.0,
+    )
+
+
+def _make_diagnostics_step():
+    """Builds a separate stability pass that never enters the timed train step."""
+
+    @nnx.jit
+    def diagnostics_step(model: HybridLanguageModel, batch):
+        def diagnostic_loss(current_model):
+            hidden = current_model.hidden_states(
+                batch["input_ids"],
+                decoder_segment_ids=batch["segment_ids"],
+                decoder_positions=batch["positions"],
+                record_max_logits=True,
+            )
+            logits = current_model.project_logits(hidden)
+            targets = jax.nn.one_hot(batch["labels"], logits.shape[-1], dtype=jnp.float32)
+            cross_entropy, _ = max_utils.cross_entropy_with_logits(
+                logits,
+                targets,
+                z_loss=0.0,
+            )
+            weights = batch["loss_mask"].astype(jnp.float32)
+            loss = jnp.sum(cross_entropy * weights) / jnp.maximum(jnp.sum(weights), 1.0)
+            auxiliary = {
+                "hidden_rms": jnp.sqrt(jnp.mean(jnp.square(hidden.astype(jnp.float32)))),
+                "hidden_max_abs": jnp.max(jnp.abs(hidden.astype(jnp.float32))),
+                "logits_max_abs": jnp.max(jnp.abs(logits)),
+            }
+            return loss, auxiliary
+
+        (loss, auxiliary), gradients = nnx.value_and_grad(
+            diagnostic_loss,
+            has_aux=True,
+        )(model)
+        parameters = nnx.state(model, nnx.Param)
+        return {
+            "loss": loss,
+            "grad_norm": max_utils.l2norm_pytree(gradients),
+            "grad_max_abs": _tree_max_abs(gradients),
+            "param_norm": max_utils.l2norm_pytree(parameters),
+            "param_max_abs": _tree_max_abs(parameters),
+            "hidden_rms": auxiliary["hidden_rms"],
+            "hidden_max_abs": auxiliary["hidden_max_abs"],
+            "logits_max_abs": auxiliary["logits_max_abs"],
+            "attention_max_logits": attention_logit_intermediates(model),
+        }
+
+    return diagnostics_step
+
+
+def _host_diagnostics(metrics) -> dict[str, float]:
+    host = jax.device_get(metrics)
+    attention = host.pop("attention_max_logits")
+    result = {key: float(value) for key, value in host.items()}
+    for cycle in range(attention.shape[0]):
+        for head in range(attention.shape[-1]):
+            result[f"attention/cycle_{cycle}/head_{head}_max_logit"] = float(
+                attention[cycle, ..., head].max()
+            )
+    result["finite"] = float(all(math.isfinite(value) for value in result.values()))
+    return result
+
+
 def _device_batch(batch, mesh):
     if jax.process_count() > 1:
         return {
@@ -228,6 +307,21 @@ def _process_batch_sizes(
     return process_update_batch, process_microbatch
 
 
+def _learning_rate(config: ResolvedConfig, step: int) -> float:
+    """Host-side mirror of the Optax schedule, avoiding a TPU dispatch for logging."""
+    optimizer = config.optimizer
+    count = max(step - 1, 0)
+    if count < optimizer.warmup_steps:
+        return optimizer.learning_rate * count / max(optimizer.warmup_steps, 1)
+    decay_steps = optimizer.schedule_steps - optimizer.warmup_steps
+    progress = min(max(count - optimizer.warmup_steps, 0) / decay_steps, 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return optimizer.learning_rate * (
+        optimizer.final_learning_rate_fraction
+        + (1.0 - optimizer.final_learning_rate_fraction) * cosine
+    )
+
+
 def run(
     config: ResolvedConfig,
     *,
@@ -256,6 +350,7 @@ def run(
             process_data.model_copy(update={"split": config.data.eval_split}),
             global_batch_size=eval_process_batch,
             vocab_size=config.model.vocab_size,
+            validation=config.data.streaming,
         )
         if config.data.eval_interval
         else None
@@ -286,6 +381,11 @@ def run(
         + "\n",
         encoding="utf-8",
     )
+    data_metadata = dict(getattr(data_iterator, "metadata", {}))
+    (run_dir / "data_metadata.json").write_text(
+        json.dumps(data_metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     metrics_writer = MetricsWriter(run_dir)
     checkpoint_io = CheckpointIO(
         config,
@@ -299,13 +399,34 @@ def run(
         )
         train_step = _make_train_step(config)
         eval_step = _make_eval_step()
+        diagnostics_step = _make_diagnostics_step()
         first_batch = _device_batch(next(data_iterator), mesh)
         compiled_train_step = train_step.lower(state, first_batch).compile()
         compiled_memory = _compiled_memory_summary(compiled_train_step)
+    parameter_count = count_parameters(state.model)
+    tracker = WandbTracker(
+        config,
+        run_name=run_name,
+        run_dir=run_dir,
+        metadata={
+            "compiled_memory": compiled_memory,
+            "parameter_count": parameter_count,
+            "jax_device_count": jax.device_count(),
+            "jax_process_count": jax.process_count(),
+            "data": data_metadata,
+        },
+    )
+    harness_adapter = None
+    if config.experiment.harness_eval.enabled:
+        from yxtpu_pretrain.evaluation import JaxHarnessLM
+
+        harness_adapter = JaxHarnessLM(config, state.model, mesh, logical_axis_rules)
     print(json.dumps({"compiled_memory": compiled_memory}, sort_keys=True), flush=True)
     metrics_writer.write({"compiled_memory": compiled_memory})
     throughputs = []
     losses = []
+    tokens_seen = 0
+    completed_steps = start_step
     trace_active = False
     try:
         for step in range(start_step + 1, config.experiment.steps + 1):
@@ -322,42 +443,136 @@ def run(
                 metrics = compiled_train_step(state, batch)
                 jax.block_until_ready(metrics)
             elapsed = time.perf_counter() - started
-            tokens = float(metrics["tokens"])
+            host_metrics = jax.device_get(metrics)
+            tokens = float(host_metrics["tokens"])
+            tokens_seen += int(tokens)
             throughput = tokens / elapsed
-            loss = float(metrics["loss"])
+            loss = float(host_metrics["loss"])
+            grad_norm = float(host_metrics["grad_norm"])
             record = {
                 "step": step,
                 "loss": loss,
                 "tokens": int(tokens),
                 "step_ms": elapsed * 1_000,
                 "tokens_per_second": throughput,
-                "grad_norm": float(metrics["grad_norm"]),
+                "grad_norm": grad_norm,
+                "learning_rate": _learning_rate(config, step),
+                "tokens_seen": tokens_seen,
             }
-            if "muonclip_max_logit" in metrics:
+            if "muonclip_max_logit" in host_metrics:
                 record["muonclip"] = {
-                    "max_logit": jax.device_get(metrics["muonclip_max_logit"]).tolist(),
-                    "min_scale": jax.device_get(metrics["muonclip_min_scale"]).tolist(),
-                    "clipped_heads": jax.device_get(
-                        metrics["muonclip_clipped_heads"]
-                    ).tolist(),
+                    "max_logit": host_metrics["muonclip_max_logit"].tolist(),
+                    "min_scale": host_metrics["muonclip_min_scale"].tolist(),
+                    "clipped_heads": host_metrics["muonclip_clipped_heads"].tolist(),
                 }
             metrics_writer.write(record)
             print(json.dumps(record, sort_keys=True), flush=True)
+            if step % config.experiment.log_interval == 0:
+                tracker.log(
+                    {
+                        "train": {
+                            "loss": loss,
+                            "perplexity": math.exp(min(loss, 80.0)),
+                        },
+                        "performance": {
+                            "tokens_per_second": throughput,
+                            "step_ms": elapsed * 1_000,
+                        },
+                        "optimizer": {
+                            "grad_norm": grad_norm,
+                            "learning_rate": record["learning_rate"],
+                        },
+                        "stability": {
+                            "loss_finite": float(math.isfinite(loss)),
+                            "grad_norm_finite": float(math.isfinite(grad_norm)),
+                        },
+                    },
+                    step=step,
+                    tokens_seen=tokens_seen,
+                )
             losses.append(loss)
+            completed_steps = step
             if step > start_step + 5:
                 throughputs.append(throughput)
 
             if eval_iterator is not None and step % config.data.eval_interval == 0:
-                eval_losses = []
+                eval_loss_sum = 0.0
+                eval_token_sum = 0.0
+                diagnostic_batch = None
                 for _ in range(config.data.eval_steps):
+                    diagnostic_batch = _device_batch(next(eval_iterator), mesh)
                     with logical_mesh_context(mesh, logical_axis_rules):
                         eval_metrics = eval_step(
                             state.model,
-                            _device_batch(next(eval_iterator), mesh),
+                            diagnostic_batch,
                         )
-                    eval_losses.append(float(eval_metrics["loss"]))
-                metrics_writer.write(
-                    {"step": step, "evaluation_loss": statistics.mean(eval_losses)}
+                    eval_host = jax.device_get(eval_metrics)
+                    eval_tokens = float(eval_host["tokens"])
+                    eval_loss_sum += float(eval_host["loss"]) * eval_tokens
+                    eval_token_sum += eval_tokens
+                evaluation_loss = eval_loss_sum / max(eval_token_sum, 1.0)
+                evaluation_record = {
+                    "step": step,
+                    "evaluation_loss": evaluation_loss,
+                    "evaluation_tokens": int(eval_token_sum),
+                }
+                metrics_writer.write(evaluation_record)
+                print(json.dumps(evaluation_record, sort_keys=True), flush=True)
+                tracker.log(
+                    {
+                        "eval": {
+                            "train_holdout_loss": evaluation_loss,
+                            "train_holdout_perplexity": math.exp(min(evaluation_loss, 80.0)),
+                            "tokens": int(eval_token_sum),
+                        }
+                    },
+                    step=step,
+                    tokens_seen=tokens_seen,
+                )
+
+                diagnostics = config.experiment.diagnostics
+                if diagnostics.enabled and step % diagnostics.interval == 0:
+                    with logical_mesh_context(mesh, logical_axis_rules):
+                        diagnostic_metrics = diagnostics_step(state.model, diagnostic_batch)
+                        jax.block_until_ready(diagnostic_metrics)
+                    host_diagnostics = _host_diagnostics(diagnostic_metrics)
+                    diagnostics_record = {"step": step, "diagnostics": host_diagnostics}
+                    metrics_writer.write(diagnostics_record)
+                    print(json.dumps(diagnostics_record, sort_keys=True), flush=True)
+                    tracker.log(
+                        {"diagnostics": host_diagnostics},
+                        step=step,
+                        tokens_seen=tokens_seen,
+                    )
+
+            harness = config.experiment.harness_eval
+            if harness_adapter is not None and step % harness.interval == 0:
+                from yxtpu_pretrain.evaluation import run_harness_evaluation
+
+                evaluation_started = time.perf_counter()
+                harness_metrics, harness_path = run_harness_evaluation(
+                    harness_adapter,
+                    config,
+                    run_dir=run_dir,
+                    step=step,
+                )
+                harness_metrics["duration_seconds"] = time.perf_counter() - evaluation_started
+                harness_record = {
+                    "step": step,
+                    "lm_eval": harness_metrics,
+                    "artifact": str(harness_path),
+                }
+                metrics_writer.write(harness_record)
+                print(json.dumps(harness_record, sort_keys=True), flush=True)
+                tracker.log(
+                    {"lm_eval": harness_metrics},
+                    step=step,
+                    tokens_seen=tokens_seen,
+                )
+                tracker.log_artifact(
+                    harness_path,
+                    name=f"{run_name}-lm-eval-step-{step}",
+                    artifact_type="lm-eval-results",
                 )
 
             interval = config.experiment.checkpoint.save_interval
@@ -366,20 +581,30 @@ def run(
             if trace_active and step == max(config.experiment.profile_steps):
                 jax.profiler.stop_trace()
                 trace_active = False
+            if (
+                config.experiment.token_budget is not None
+                and tokens_seen >= config.experiment.token_budget
+            ):
+                break
         if checkpoint_io.enabled:
             checkpoint_io.save(
                 state,
                 data_iterator,
-                config.experiment.steps,
+                completed_steps,
                 force=True,
             )
+    except BaseException:
+        tracker.finish(exit_code=1)
+        raise
     finally:
         if trace_active:
             jax.profiler.stop_trace()
         checkpoint_io.close()
 
     summary = {
-        "steps": config.experiment.steps - start_step,
+        "steps": completed_steps - start_step,
+        "tokens_seen": tokens_seen,
+        "token_budget": config.experiment.token_budget,
         "final_loss": losses[-1] if losses else None,
         "mean_tokens_per_second": statistics.mean(throughputs) if throughputs else None,
         "max_tokens_per_second": max(throughputs) if throughputs else None,
@@ -399,7 +624,10 @@ def run(
             * jax.device_count()
         ),
         "libtpu_init_args": os.environ.get("LIBTPU_INIT_ARGS", ""),
+        "parameter_count": parameter_count,
+        "wandb_url": tracker.url,
     }
     metrics_writer.close(summary)
+    tracker.finish(summary=summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
