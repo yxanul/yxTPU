@@ -1096,7 +1096,7 @@ runs:
 | guarded Pallas doubling / fused | 2,097,152 | 566,328 | 31,989,071,680 bytes | **rejected: invalid gradients** |
 | full FP32 autodiff / fused | 2,097,152 | 158,745 | 44,662,410,976 bytes | safe control |
 | full FP32 analytical / fused | 2,097,152 | 172,961 | 33,265,817,024 bytes | correctness fallback |
-| guarded Pallas substitution / fused | 2,097,152 | **472,668** | **31,989,071,680 bytes** | selected after EXP-034 |
+| guarded Pallas substitution / fused | 2,097,152 | **472,668** | **31,989,071,680 bytes** | workload-qualified; see EXP-035 vector caveat |
 
 The initial guarded throughput number was the mean of the final two steps in a
 seven-step run; its post-first-step measurements lie between 566.18k and
@@ -1155,6 +1155,34 @@ The batch-independent diagnostics fix was then exercised on the same fused
 path: held-out evaluation and diagnostics run at step 2, all diagnostic values
 are finite, and step 3 resumes at 472,679 tok/s.
 
+### One-billion-token run and exhaustive gradient gate
+
+The same substitution path then completed 477 updates and 1,000,341,504 real
+ClimbMix tokens. Every recorded loss and gradient remained finite. Final loss
+was `4.238952`, final raw gradient norm was `0.300861`, mean throughput after
+warmup was 472,463 tok/s, and the compiled peak estimate remained
+31,989,071,680 bytes. Held-out loss at step 250 was `4.981560`; the separate
+diagnostic pass was finite with gradient norm `0.753345` and max element
+`0.017466`. This closes the long-run stability part of the qualification.
+
+The exact update-7/microbatch-4 aggregate figures were reproduced after that
+run. Their close norm and maximum, however, hid a larger gradient-vector
+difference. The strengthened harness computes both complete gradient trees in
+one TPU program and reduces their elementwise difference on device:
+
+| Fused policy | Relative gradient L2 error | Cosine similarity | Max abs difference | Max difference / reference max |
+| --- | ---: | ---: | ---: | ---: |
+| production substitution | **0.0186555** | 0.9998266 | 0.00015831 | 0.0029025 |
+| all fused matmul roles HIGHEST | **0.0178933** | 0.9998407 | 0.00016392 | 0.0030053 |
+
+The two models' parameters are bit-identical. Promoting ordinary fused matmuls
+does not remove the roughly 1.8% discrepancy, so a proposed few-times-`1e-4`
+whole-gradient equivalence gate fails. The result supports the narrower claim
+that fused substitution is stable on the measured 1B workload; it does not
+support calling the path analytically interchangeable or an unconditional 10B
+default. The next decision is to establish an accepted BF16 gradient baseline
+or reduce the discrepancy before making that stronger claim.
+
 The initial full-stack smoke ran on all eight v6e chips and completed the fused
 optimizer step, held-out validation, diagnostics, every requested
 lm-evaluation-harness task at a two-example smoke limit, JSON provenance
@@ -1173,3 +1201,4 @@ Artifacts:
 - `v6e8-climbmix-10b-smoke-20260721/`
 - `v6e8-climbmix-realtext-precision-20260721/`
 - `v6e8-kda-substitution-realtext-20260721/`
+- `v6e8-climbmix-1b-substitution-20260721/`

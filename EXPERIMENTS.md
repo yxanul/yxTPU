@@ -54,9 +54,10 @@ and status here. Detailed measurements and profile interpretation live in
 | EXP-029 | Restore MaxText's logical activation-sharding contract in the standalone scanned model | The scan primitive was not the gap: both paths use merge-inside `lax.scan`. The old standalone trace instead has 256 exact all-gathers across two steps, including MLP activations expanding from batch 4 to 32; the corrected trace has zero. At matched batch 4 throughput rises 69.1%, from 266,482 to 450,508 tok/s. Batch 8 reaches 545,495 tok/s, 97.25% of the historical 560,923 MaxText selected point. A second bug divided the configured microbatch by GA; after correcting it, microbatch 16 with GA=8 processes the intended 2,097,152 tokens/update and reaches 598,517 tok/s, 99.36% of the historical 602,373 result | `results/v6e8-standalone-sharding-parity-20260721/` |
 | EXP-030 | Add an explicitly data-parallel Tokamax fused linear cross-entropy and sweep batch capacity | Eight-device loss, `dx`, `dw`, and full 272.9M AdamW one-step parity pass, including uneven padding with one wholly masked device and edge vocabulary labels. The fused path is not selected for throughput: at batch 8 it is 1.53% slower and its compiled estimate is 1.04 GB larger; at microbatch 16/GA=8 it is 2.60% slower but saves 5.11 GB (13.8%). At batch 32/GA=4 it remains 1.67% slower than standard and saves only 0.775 GB. With full rematerialization it narrowly unlocks batch 64/GA=2 at 550,039 tok/s where standard loss exceeds available HBM by 84.6 MB. Standard batch 16/GA=8 remains selected at 598,543 tok/s. The tested all-reduce XLA-flag bundle is rejected: 0.72% slower and 5.63 GB larger | `results/v6e8-fused-linear-ce-20260721/` |
 | EXP-031 | Build and validate the real-data ClimbMix 10B training stack | The 309,111,392-parameter GPT-2-vocabulary model streams and tokenizes ClimbMix fast enough to stay ahead of the TPU, with a deterministic 1% held-out partition and three-batch prefetch. Standard loss at microbatch 16/GA=8 fails compilation at 36.29 GB of temporaries; Tokamax fused loss fits with a 31,989,071,680-byte compiled estimate and sustains 566,328 tok/s after warmup across real streamed updates. The full eight-device smoke passes one optimizer step, held-out loss, a separate finite stability/attention diagnostic, all ten requested lm-eval tasks, result serialization, and W&B artifact upload. The 10B profile is explicitly non-resumable and reaches its budget in 4,769 updates | `results/v6e8-climbmix-10b-smoke-20260721/`; W&B run `raxd2gkf` |
-| EXP-032 | Gate the fused KDA backward on exact real-text trigger batches | The 566k guarded-Pallas result from EXP-031 is rejected for training. With effectively frozen weights, real ClimbMix updates produced repeatable gradient spikes (446.8 at update 7); at the exact offending microbatch the guarded backward gives norm 3,933.7 and max element 171 against 2.407 and 0.0545 under the full-FP32 reference. A normal run becomes non-finite at step 12. Individual and all-role six-pass promotion, row blocks 2/4/8, and midpoint anchoring all fail, while forward losses stay close, isolating the fused backward. Full-FP32 analytical VJP stays finite through the trigger and 15 training steps at 172,961 tok/s, 9.0% faster than generic XLA autodiff. Real training now rejects guarded Pallas and fails fast on non-finite metrics | `results/v6e8-climbmix-realtext-precision-20260721/` |
+| EXP-032 | Gate the fused KDA backward on exact real-text trigger batches | The 566k recursive-doubling result from EXP-031 is rejected for training. With effectively frozen weights, real ClimbMix updates produced repeatable gradient spikes (446.8 at update 7); at the exact offending microbatch doubling gives norm 3,933.7 and max element 171 against 2.407 and 0.0545 under the full-FP32 reference. A normal run becomes non-finite at step 12. Individual and all-role six-pass promotion, row blocks 2/4/8, and midpoint anchoring all fail, while forward losses stay close, isolating doubling in the fused backward. Full-FP32 analytical VJP became the temporary fail-closed path at 172,961 tok/s. EXP-034 later supersedes the blanket fused-path rejection with stable substitution; doubling remains rejected | `results/v6e8-climbmix-realtext-precision-20260721/` |
 | EXP-033 | Keep attention-logit diagnostics batch-independent across donated NNX train state | The step-250 failure was a telemetry shape leak, not a model failure: both GQA intermediates changed from `[cycles,1,heads]` to `[cycles,batch,heads]`. Reducing over batch in both attention paths and keeping the accumulator at `[cycles,1,heads]` passes 47 CPU tests and a native v6e-8 step-2 validation/diagnostics -> step-3 transition with finite diagnostics | `results/v6e8-climbmix-diagnostics-shape-20260721/` |
-| EXP-034 | Replace recursive doubling with correlated-key-qualified blocked substitution | Doubling explicitly formed `L^2...L^32`; correlated real-text keys drove intermediate norms to ~1e12 and catastrophic FP32 cancellation. Sixteen-row serial substitution with HIGHEST inter-block coupling matches the exact bad ClimbMix microbatch at gradient norm 2.406645/max 0.054548 versus 2.406825/0.054542 from the analytical reference. A 15-step native v6e-8 run covers all known triggers, stays finite, matches the reference loss within 4.2e-5 at step 15, and reaches 472,668 tok/s at a 31,989,071,680-byte compiled estimate—2.73x the safe analytical path | `results/v6e8-kda-substitution-realtext-20260721/` |
+| EXP-034 | Replace recursive doubling with correlated-key-qualified blocked substitution | Doubling explicitly formed `L^2...L^32`; correlated real-text keys drove intermediate norms to ~1e12 and catastrophic FP32 cancellation. Sixteen-row serial substitution with HIGHEST inter-block coupling matches the aggregate norm/max statistics on the exact bad ClimbMix microbatch: 2.406645/0.054548 versus 2.406825/0.054542 from the analytical reference. A 15-step native v6e-8 run covers all known triggers, stays finite, matches the reference loss within 4.2e-5 at step 15, and reaches 472,668 tok/s at a 31,989,071,680-byte compiled estimate—2.73x the safe analytical path. EXP-035 adds the missing whole-gradient comparison | `results/v6e8-kda-substitution-realtext-20260721/` |
+| EXP-035 | Run fused substitution for 1B real tokens and execute the exact-trigger vector gate | The AdamW ClimbMix run completes 1,000,341,504 tokens with every loss/gradient finite, final loss 4.23895, mean 472,463 tok/s, and unchanged 31,989,071,680-byte compiled peak. This closes the long-run stability gate. The strengthened on-device trigger comparison exposes what aggregate norms hid: production substitution differs from the analytical gradient by 1.8655% relative L2 at cosine 0.9998266; promoting every fused matmul role still gives 1.7893%. Parameters are bit-identical. The path is workload stability-qualified but fails a few-times-1e-4 analytical-equivalence criterion, so it is not yet an unconditional 10B default | `results/v6e8-climbmix-1b-substitution-20260721/`; W&B run `g4gaekvg` |
 
 ## Open experiments
 
@@ -72,19 +73,24 @@ These are recorded so the reasoning is not lost. None has been run.
 
 ## Precision policy
 
-Guarded doubling is the default and stays the default. The existing
-NaN-at-step-2 run proves that BF16 doubling is reachable and unsafe for the
-random-token workload, which settles the kernel's general correctness status
-independently of anything OPEN-002 finds.
+Recursive doubling is rejected and is not selectable through the training
+configuration. The production fused kernel fixes the solve to 16-row serial
+substitution with HIGHEST inter-block coupling; the `guarded_fp32` name refers
+to that policy, not to doubling.
 
-If OPEN-002 shows real-language training is consistently benign, BF16 doubling
-becomes a workload-qualified fast path rather than a generally safe
-implementation, and it should be described that way wherever it is offered.
-Qualifying it requires evidence that is strong across all of: multiple layers
-and chunks; initialization and later checkpoints; multiple batches and seeds;
-direct BF16-versus-full solve and gradient errors rather than correlation or
-growth proxies; and a sufficiently long unguarded full-model run. Anything
-short of that leaves the guard in place.
+Substitution has two distinct qualification results. It is strongly
+workload-stability-qualified by the exact trigger, the 15-step spike sweep, and
+a finite 1B-token real ClimbMix run. It is not yet analytically equivalent
+under a few-times-`1e-4` whole-gradient criterion: the exact trigger measures
+1.8655% relative L2 error at cosine 0.9998266, and promoting every fused matmul
+role still measures 1.7893%. Aggregate norm/max agreement must not be presented
+as vector agreement.
+
+The ClimbMix profile currently selects substitution, while `full_fp32` remains
+the correctness reference. A 10B launch therefore needs an explicit decision
+that the measured BF16 gradient discrepancy is acceptable, or a further
+experiment that explains/reduces it against an appropriate BF16 baseline. The
+1B stability result alone does not license the phrase "reference-equivalent."
 
 ## Selection rule
 
