@@ -8,7 +8,12 @@ from yxtpu_pretrain.config import load_config
 from yxtpu_pretrain.model import HybridLanguageModel
 from yxtpu_pretrain.optimizers import build_optimizer
 from yxtpu_pretrain.runtime.checkpoints import CheckpointIO, checkpoint_path
-from yxtpu_pretrain.runtime.data import create_data_iterator
+from yxtpu_pretrain.runtime.data import (
+    PackedTokenBatcher,
+    _example,
+    _is_validation_record,
+    create_data_iterator,
+)
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.train import _make_train_step
 
@@ -95,6 +100,69 @@ def test_offline_huggingface_and_grain_fixtures(tmp_path):
         actual = next(iterator)
         for key in expected:
             assert jnp.array_equal(expected[key], actual[key])
+
+
+def test_token_zero_is_data_not_implicit_padding():
+    example = _example(jnp.asarray([7, 0, 9], dtype=jnp.int32), 4, pad_token_id=42)
+    assert example["input_ids"].tolist() == [7, 0, 9, 42]
+    assert example["labels"].tolist() == [0, 9, 42, 42]
+    assert example["loss_mask"].tolist() == [1.0, 1.0, 0.0, 0.0]
+
+
+def test_streaming_validation_assignment_is_stable_and_disjoint():
+    texts = [f"document {index}" for index in range(10_000)]
+    first = [
+        _is_validation_record(text, fraction=0.01, seed=17)
+        for text in texts
+    ]
+    second = [
+        _is_validation_record(text, fraction=0.01, seed=17)
+        for text in reversed(texts)
+    ][::-1]
+    assert first == second
+    assert 60 <= sum(first) <= 140
+
+
+class _FakeFastTokenizer:
+    is_fast = True
+    eos_token_id = 99
+    pad_token_id = 99
+
+    def __len__(self):
+        return 100
+
+    def __call__(self, texts, **kwargs):
+        del kwargs
+        return {"input_ids": [[ord(character) % 50 for character in text] for text in texts]}
+
+
+def test_streaming_packer_tokenizes_in_batches_and_emits_dense_examples(tmp_path):
+    config = _tiny_config(tmp_path).data.model_copy(
+        update={
+            "type": "huggingface",
+            "streaming": True,
+            "dataset_name": "fixture",
+            "tokenizer": "fixture",
+            "sequence_length": 4,
+            "tokenize_batch_size": 2,
+            "validation_fraction": 0.0,
+        }
+    )
+    records = ({"text": f"text-{index}"} for index in range(100))
+    iterator = PackedTokenBatcher(
+        records,
+        _FakeFastTokenizer(),
+        config,
+        global_batch_size=3,
+        vocab_size=256,
+        validation=False,
+    )
+    batch = next(iterator)
+    assert batch["input_ids"].shape == (3, 4)
+    assert batch["labels"].shape == (3, 4)
+    assert jnp.all(batch["loss_mask"] == 1)
+    assert jnp.all(batch["segment_ids"] == 1)
+    assert iterator.documents_selected % 2 == 0
 
 
 def test_local_orbax_round_trip_preserves_nnx_and_iterator(tmp_path):
