@@ -14,16 +14,24 @@ and input-gradient collectives and must not route through this module.
 
 from __future__ import annotations
 
+import sys
 from functools import partial
 from typing import Literal
 
 import jax
 import jax.numpy as jnp
+from absl import flags
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from tokamax import linear_softmax_cross_entropy_loss
 
 Implementation = Literal["reference", "mosaic_tpu"]
+
+
+def _initialize_tokamax_flags() -> None:
+    """Prevents Tokamax's lazy Abseil parser from consuming our CLI flags."""
+    if not flags.FLAGS.is_parsed():
+        flags.FLAGS([sys.argv[0]], known_only=True)
 
 
 def _linear_logits(x: jax.Array, weights: jax.Array) -> jax.Array:
@@ -57,6 +65,7 @@ def _mosaic_sum(
     weights: jax.Array,
 ) -> jax.Array:
     """Tokamax sum with exact binary-mask gradients and no HBM logits."""
+    _initialize_tokamax_flags()
     mask = loss_mask.astype(jnp.float32)
     masked_x = jnp.where(mask[:, None] > 0, x, jnp.zeros((), dtype=x.dtype))
     raw_sum = linear_softmax_cross_entropy_loss(
