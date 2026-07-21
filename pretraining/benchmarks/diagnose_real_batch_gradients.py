@@ -56,7 +56,14 @@ def _load_update(config, update_index: int):
     return batch
 
 
-def _run_mode(config, host_update, *, highest_roles: tuple[str, ...], microbatches):
+def _run_mode(
+    config,
+    host_update,
+    *,
+    highest_roles: tuple[str, ...],
+    microbatches,
+    pairwise_row_block_size: int | None,
+):
     import jax
     import jax.numpy as jnp
     from flax import nnx
@@ -81,6 +88,10 @@ def _run_mode(config, host_update, *, highest_roles: tuple[str, ...], microbatch
             precision_attributes[role],
             jax.lax.Precision.HIGHEST,
         )
+    if pairwise_row_block_size is not None:
+        if pairwise_row_block_size not in (1, 2, 4, 8):
+            raise ValueError("pairwise row block size must be one of 1, 2, 4, or 8")
+        kda_fused_pallas._PAIRWISE_ROW_BLOCK_SIZE = pairwise_row_block_size
 
     mesh = create_mesh(config.hardware)
     logical_axis_rules = make_leaf_config(config).logical_axis_rules
@@ -142,6 +153,7 @@ def _run_mode(config, host_update, *, highest_roles: tuple[str, ...], microbatch
     return {
         "precision": config.model.kda.precision,
         "kernel_highest_roles": list(highest_roles),
+        "pairwise_row_block_size": kda_fused_pallas._PAIRWISE_ROW_BLOCK_SIZE,
         "compiled_memory": {
             key: int(getattr(memory, key, 0) or 0)
             for key in (
@@ -179,6 +191,13 @@ def main() -> int:
         dest="microbatches",
         help="restrict the comparison to one accumulation microbatch",
     )
+    parser.add_argument(
+        "--pairwise-row-block-size",
+        type=int,
+        choices=(1, 2, 4, 8),
+        default=None,
+        help="override the Pallas decay-rescaling row block",
+    )
     args = parser.parse_args()
     precisions = args.precisions or ["guarded_fp32", "full_fp32"]
 
@@ -193,6 +212,7 @@ def main() -> int:
             microbatches=(
                 tuple(args.microbatches) if args.microbatches is not None else None
             ),
+            pairwise_row_block_size=args.pairwise_row_block_size,
         )
         print(json.dumps({"update_index": args.update_index, **result}, sort_keys=True))
     return 0
