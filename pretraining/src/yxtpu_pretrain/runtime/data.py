@@ -237,6 +237,8 @@ class PackedTokenBatcher(Iterator[Batch]):
         self._available = 0
         self.documents_seen = 0
         self.documents_selected = 0
+        self.tokens_emitted = 0
+        self.batches_emitted = 0
 
     def __iter__(self):
         return self
@@ -286,7 +288,20 @@ class PackedTokenBatcher(Iterator[Batch]):
         remainder = joined[required:]
         self._chunks = [remainder] if remainder.size else []
         self._available = int(remainder.size)
+        self.tokens_emitted += int(required)
+        self.batches_emitted += 1
         return _packed_batch(selected, self.config.sequence_length)
+
+    @property
+    def stats(self) -> dict[str, int]:
+        """Monotonic pipeline counters, safe to read approximately from the
+        consumer thread while the prefetch worker advances them."""
+        return {
+            "documents_seen": self.documents_seen,
+            "documents_selected": self.documents_selected,
+            "tokens_emitted": self.tokens_emitted,
+            "batches_emitted": self.batches_emitted,
+        }
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -388,6 +403,15 @@ class PrefetchIterator(Iterator[Batch]):
         metadata = dict(getattr(self.source, "metadata", {}))
         metadata["prefetch_batches"] = self.depth
         return metadata
+
+    @property
+    def queue_depth(self) -> int:
+        """Currently buffered batches; zero means the consumer is data-bound."""
+        return self._queue.qsize()
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return dict(getattr(self.source, "stats", {}))
 
     def get_state(self):
         return self.source.get_state()

@@ -46,7 +46,10 @@ State is dynamic; verify it before relying on this section.
 - Provisioning: Spot
 - Runtime: `v2-alpha-tpuv6e`
 - Created: 2026-07-20
-- Last verified: queue `ACTIVE`, node `READY` and `HEALTHY`, SSH working
+- Last verified: 2026-07-21 — **Spot-preempted**; the node is deleted and the
+  queued resource is `SUSPENDED`. The VM's local state (repo copy, venv, HF
+  and W&B credentials) is gone; recreate the queued resource and rerun
+  `pretraining` setup before the next TPU run.
 
 Check status:
 
