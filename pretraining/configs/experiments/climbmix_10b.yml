@@ -46,7 +46,7 @@ harness_eval:
 model_overrides:
   remat_policy: save_dot_except_mlp
   kda:
-    precision: full_fp32
+    precision: guarded_fp32
   loss:
     implementation: tokamax_fused
 data_overrides:

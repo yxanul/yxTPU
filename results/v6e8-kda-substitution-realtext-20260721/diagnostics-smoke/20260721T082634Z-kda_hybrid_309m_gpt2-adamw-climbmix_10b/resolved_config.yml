@@ -1,0 +1,162 @@
+model:
+  name: kda_hybrid_309m_gpt2
+  vocab_size: 50432
+  emb_dim: 1024
+  num_layers: 16
+  cycle:
+  - kda
+  - kda
+  - kda
+  - gqa
+  num_cycles: 4
+  mlp_dim: 2816
+  fused_mlp: true
+  rms_norm_epsilon: 1.0e-05
+  dtype: bfloat16
+  weight_dtype: float32
+  param_scan_axis: 1
+  remat_policy: save_dot_except_mlp
+  residual_policy: standard
+  logits_via_embedding: false
+  dropout_rate: 0.0
+  kda:
+    chunk_size: 64
+    num_heads: 8
+    key_head_dim: 128
+    value_head_dim: 128
+    conv_kernel_size: 4
+    gate_rank: 128
+    qk_norm: true
+    safe_gate: true
+    gate_lower_bound: -5.0
+    precision: guarded_fp32
+  attention:
+    implementation: tokamax_splash
+    num_query_heads: 8
+    num_kv_heads: 2
+    head_dim: 128
+    block_q: 1024
+    block_q_dkv: 2048
+    fused_qkv: true
+    rope: false
+  loss:
+    implementation: tokamax_fused
+optimizer:
+  name: adamw
+  learning_rate: 0.0003
+  beta1: 0.9
+  beta2: 0.95
+  epsilon: 1.0e-08
+  weight_decay: 0.1
+  gradient_clip_norm: 1.0
+  warmup_steps: 100
+  schedule_steps: 4769
+  final_learning_rate_fraction: 0.1
+  muon_beta: 0.95
+  muon_epsilon: 1.0e-08
+  muon_ns_steps: 5
+  qk_clip_tau: 100.0
+  qk_clip_epsilon: 1.0e-06
+data:
+  name: climbmix
+  type: huggingface
+  sequence_length: 2048
+  per_device_batch_size: 16
+  eval_interval: 2
+  eval_steps: 1
+  dataset_name: karpathy/climbmix-400b-shuffle
+  dataset_path: null
+  tokenizer: openai-community/gpt2
+  split: train
+  eval_split: train
+  shuffle_seed: 42
+  reuse_example_batch: false
+  streaming: true
+  validation_fraction: 0.01
+  validation_seed: 20260721
+  shuffle_buffer_size: 50000
+  tokenize_batch_size: 256
+  prefetch_batches: 3
+  append_eos: true
+  text_field: text
+hardware:
+  name: v6e-8
+  accelerator: v6e-8
+  device_count: 8
+  chips: 8
+  hosts: 1
+  mesh:
+    data: 8
+    fsdp: 1
+    tensor: 1
+    sequence: 1
+  libtpu_init_args:
+  - --xla_tpu_scoped_vmem_limit_kib=98304
+  - --xla_enable_async_all_gather=true
+  - --xla_tpu_overlap_compute_collective_tc=true
+  - --xla_tpu_enable_async_collective_fusion_multiple_steps=true
+  - --xla_tpu_enable_async_collective_fusion=true
+  - --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true
+  multi_host: false
+  performance_verified: true
+  notes: Performance-certified on the yxtpu-v6e8-dev Spot slice in europe-west4-a.
+experiment:
+  name: climbmix_10b
+  steps: 3
+  gradient_accumulation_steps: 8
+  run_dir: runs/substitution-diag-smoke
+  seed: 42
+  log_interval: 1
+  profile_steps: []
+  benchmark: true
+  token_budget: null
+  acknowledge_no_checkpoint: true
+  checkpoint:
+    enabled: false
+    destination: null
+    save_interval: 0
+    async_save: false
+    keep: 0
+    resume: false
+  wandb:
+    enabled: false
+    project: yxtpu-pretrain
+    entity: null
+    group: climbmix-10b
+    tags:
+    - v6e-8
+    - kda-hybrid
+    - climbmix
+    - gpt2-fast
+    - no-checkpoint
+    mode: online
+  diagnostics:
+    enabled: true
+    interval: 2
+  harness_eval:
+    enabled: false
+    interval: 1250
+    tasks:
+    - hellaswag
+    - piqa
+    - arc_easy
+    - arc_challenge
+    - sciq
+    - boolq
+    - openbookqa
+    - copa
+    - commonsense_qa
+    - lambada_openai
+    batch_size_per_device: 1
+    num_fewshot: 0
+    limit: null
+    use_cache: true
+  model_overrides:
+    remat_policy: save_dot_except_mlp
+    kda:
+      precision: full_fp32
+    loss:
+      implementation: tokamax_fused
+  data_overrides:
+    sequence_length: 2048
+    per_device_batch_size: 16

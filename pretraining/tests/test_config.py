@@ -118,7 +118,7 @@ def test_climbmix_profile_is_explicit_streaming_no_checkpoint_run():
     assert config.data.dataset_name == "karpathy/climbmix-400b-shuffle"
     assert config.data.streaming is True
     assert config.data.validation_fraction == 0.01
-    assert config.model.kda.precision == "full_fp32"
+    assert config.model.kda.precision == "guarded_fp32"
     assert config.data.prefetch_batches == 3
     assert config.experiment.token_budget == 10_000_000_000
     assert config.experiment.checkpoint.enabled is False
@@ -126,16 +126,16 @@ def test_climbmix_profile_is_explicit_streaming_no_checkpoint_run():
     assert config.experiment.harness_eval.interval == 5 * config.data.eval_interval
 
 
-def test_real_training_rejects_the_guarded_fused_kda_backward():
-    with pytest.raises(ValueError, match="real training requires.*full_fp32"):
-        load_config(
-            model="kda_hybrid_309m_gpt2",
-            optimizer="adamw_10b",
-            data="climbmix",
-            hardware="v6e-8",
-            experiment="climbmix_10b",
-            overrides=["model.kda.precision=guarded_fp32"],
-        )
+def test_real_training_selects_qualified_substitution_kernel():
+    config = load_config(
+        model="kda_hybrid_309m_gpt2",
+        optimizer="adamw_10b",
+        data="climbmix",
+        hardware="v6e-8",
+        experiment="climbmix_10b",
+    )
+    assert config.experiment.benchmark is False
+    assert config.model.kda.precision == "guarded_fp32"
 
 
 def test_pin_matches_imported_maxtext_commit():
