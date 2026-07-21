@@ -21,10 +21,10 @@ recomputes compact intra-chunk quantities, emits BF16 output, and stores only
 the FP32 state after that chunk for a future custom backward.
 
 This module deliberately fixes the validated precision and solver policy:
-one-pass BF16-operand matmuls for ordinary KDA work and full-pass FP32
-recursive doubling for the WY solve and solve application. Experimental
-solvers, stage exits, and unsafe precision controls live under
-``pretraining/benchmarks/kda_fused_experimental.py``.
+one-pass BF16-operand matmuls for ordinary KDA work and 16-row serial
+substitution with full-pass FP32 inter-block coupling for the WY solve and its
+transpose. Recursive doubling, stage exits, and unsafe precision controls live
+under ``pretraining/benchmarks/kda_fused_experimental.py``.
 """
 
 from __future__ import annotations
@@ -41,28 +41,28 @@ from jax.experimental.pallas import tpu as pltpu
 _SOLVE_BLOCK_SIZE = 16
 
 # Triangular solve algorithm. "doubling" forms the whole nilpotent series by
-# repeated squaring and is selected. "blocked" is the original row-serial
-# version, kept as a control. "substitution" confines the series to 16-row
-# diagonal blocks and couples them with plain matmuls.
+# repeated squaring and is retained only as an experimental control. Correlated
+# real-text keys make its explicit L^2 ... L^32 intermediates grow to roughly
+# 1e12 even when the unit-lower system and its true solution are benign. The
+# resulting FP32 cancellation invalidates the backward. Production therefore
+# uses 16-row blocked substitution, which never forms global powers.
 #
-# Substitution is numerically the better algorithm and still loses on
-# throughput. The stress harness established that condition number, power
+# The stress harness established that condition number, power
 # growth, and solution-path cancellation are complementary diagnostics, but
 # none orders every regime correctly. Production therefore gates precision on
 # measured BF16-versus-full-pass solve and gradient error, not on a proxy.
-# See benchmarks/diagnose_wy_conditioning.py and OPEN-001 in EXPERIMENTS.md.
+# See benchmarks/diagnose_wy_conditioning.py and EXP-034 in EXPERIMENTS.md.
 #
-# Measured on the model anyway: substitution with a row-serial base case costs
-# 8.617 ms against 6.437 for FP32-guarded doubling, and the faster variant
-# below, a 16x16 full-precision base case with BF16 inter-block coupling, is
-# 6.111 ms in the core yet 548,450 tok/s against 560,923 in the model. A core
-# gain that inverts at model level, as the shifted convolution also did.
+# The earlier model result used BF16 inter-block coupling. Real ClimbMix
+# qualification instead selects HIGHEST coupling: 472,668 tok/s on the 309.1M
+# model, with the exact update-7 trigger matching the analytical reference and
+# all 15 known-trigger steps remaining finite.
 #
 # An earlier rejection of substitution was measured through a bug: both custom
 # VJP call sites hardcoded solve_method="doubling", so the forward never used
 # the selected method and the base case was itself a nilpotent series. Those
 # runs compared doubling-forward against doubling-forward.
-_SOLVE_METHOD = "doubling"
+_SOLVE_METHOD = "substitution"
 
 # Base case for the substitution solve. "serial" forms no power of the
 # diagonal block at all and is the stable limit; "doubling" runs the same
@@ -139,11 +139,11 @@ _SOLVE_MATMUL_PRECISION = lax.Precision.HIGHEST
 # needs the full passes; keep this at ``highest``.
 _SOLVE_APPLY_MATMUL_PRECISION = lax.Precision.HIGHEST
 
-# Coupling between diagonal blocks in the substitution solve. These matmuls
-# carry the wide K+V right-hand side but form no power of anything, so their
-# error is introduced once rather than amplified, and they are the natural
-# place to spend one BF16 pass while the small base case keeps full passes.
-_SOLVE_COUPLING_MATMUL_PRECISION = lax.Precision.DEFAULT
+# Coupling between diagonal blocks in the substitution solve. These matmuls do
+# not form powers, but the real-text/correlated-key qualification sweep still
+# needs their operands evaluated with the full TPU FP32 decomposition to keep
+# forward and transposed solves near the solve_triangular reference.
+_SOLVE_COUPLING_MATMUL_PRECISION = lax.Precision.HIGHEST
 
 __all__ = ["pallas_kda_fused"]
 

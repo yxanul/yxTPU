@@ -1,0 +1,1275 @@
+[
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "input_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "A_log"
+    ],
+    "role": "kda_scalar",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "beta_proj",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      8
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "conv1d",
+      "kernel"
+    ],
+    "role": "depthwise_conv",
+    "optimizer": "adamw",
+    "shape": [
+      4,
+      4,
+      1,
+      3072
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "decay_down",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "decay_up",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "dt_bias"
+    ],
+    "role": "kda_scalar",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "in_proj_qkv",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      3,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3,
+      4
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "out_proj",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "output_gate_down",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "output_gate_up",
+      "bias"
+    ],
+    "role": "bias",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "output_gate_up",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mixer",
+      "output_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mlp",
+      "wi",
+      "kernel"
+    ],
+    "role": "mlp_input",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      2,
+      2816
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "mlp",
+      "wo",
+      "kernel"
+    ],
+    "role": "mlp_output",
+    "optimizer": "adamw",
+    "shape": [
+      2816,
+      4,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_0",
+      "post_mixer_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "input_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "A_log"
+    ],
+    "role": "kda_scalar",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "beta_proj",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      8
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "conv1d",
+      "kernel"
+    ],
+    "role": "depthwise_conv",
+    "optimizer": "adamw",
+    "shape": [
+      4,
+      4,
+      1,
+      3072
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "decay_down",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "decay_up",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "dt_bias"
+    ],
+    "role": "kda_scalar",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "in_proj_qkv",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      3,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3,
+      4
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "out_proj",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "output_gate_down",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "output_gate_up",
+      "bias"
+    ],
+    "role": "bias",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "output_gate_up",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mixer",
+      "output_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mlp",
+      "wi",
+      "kernel"
+    ],
+    "role": "mlp_input",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      2,
+      2816
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "mlp",
+      "wo",
+      "kernel"
+    ],
+    "role": "mlp_output",
+    "optimizer": "adamw",
+    "shape": [
+      2816,
+      4,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_1",
+      "post_mixer_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "input_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "A_log"
+    ],
+    "role": "kda_scalar",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "beta_proj",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      8
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "conv1d",
+      "kernel"
+    ],
+    "role": "depthwise_conv",
+    "optimizer": "adamw",
+    "shape": [
+      4,
+      4,
+      1,
+      3072
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "decay_down",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "decay_up",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "dt_bias"
+    ],
+    "role": "kda_scalar",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "in_proj_qkv",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      3,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3,
+      4
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "out_proj",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "output_gate_down",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "output_gate_up",
+      "bias"
+    ],
+    "role": "bias",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "output_gate_up",
+      "kernel"
+    ],
+    "role": "kda_matrix",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4,
+      8,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mixer",
+      "output_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      128,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mlp",
+      "wi",
+      "kernel"
+    ],
+    "role": "mlp_input",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      2,
+      2816
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "mlp",
+      "wo",
+      "kernel"
+    ],
+    "role": "mlp_output",
+    "optimizer": "adamw",
+    "shape": [
+      2816,
+      4,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_2",
+      "post_mixer_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_3",
+      "input_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_3",
+      "mixer",
+      "out_proj",
+      "kernel"
+    ],
+    "role": "gqa_output",
+    "optimizer": "adamw",
+    "shape": [
+      8,
+      4,
+      128,
+      1024
+    ],
+    "reduction_axes": [
+      0,
+      2
+    ],
+    "output_axes": [
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_3",
+      "mixer",
+      "qkv_proj",
+      "kernel"
+    ],
+    "role": "gqa_qkv",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      12,
+      128
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_3",
+      "mlp",
+      "wi",
+      "kernel"
+    ],
+    "role": "mlp_input",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4,
+      2,
+      2816
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2,
+      3
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_3",
+      "mlp",
+      "wo",
+      "kernel"
+    ],
+    "role": "mlp_output",
+    "optimizer": "adamw",
+    "shape": [
+      2816,
+      4,
+      1024
+    ],
+    "reduction_axes": [
+      0
+    ],
+    "output_axes": [
+      2
+    ],
+    "batch_axes": [
+      1
+    ]
+  },
+  {
+    "path": [
+      "cycles",
+      "layer_3",
+      "post_mixer_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      4
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "final_norm",
+      "scale"
+    ],
+    "role": "norm_scale",
+    "optimizer": "adamw",
+    "shape": [
+      1024
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "logits",
+      "kernel"
+    ],
+    "role": "logits",
+    "optimizer": "adamw",
+    "shape": [
+      1024,
+      50432
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  },
+  {
+    "path": [
+      "token_embedding",
+      "embedding"
+    ],
+    "role": "embedding",
+    "optimizer": "adamw",
+    "shape": [
+      50432,
+      1024
+    ],
+    "reduction_axes": [],
+    "output_axes": [],
+    "batch_axes": []
+  }
+]

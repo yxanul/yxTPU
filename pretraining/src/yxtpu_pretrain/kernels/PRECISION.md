@@ -8,31 +8,34 @@ The production kernel exports only `pallas_kda_fused`. It is specialized to a
 - BF16 Q/K/V input and output traffic;
 - FP32 chunk-boundary state;
 - one-pass TPU matmuls for ordinary chunk, pairwise, and state work;
-- full-pass FP32 recursive doubling for both the WY solve and its application;
+- 16-row serial substitution for the WY solve and its transpose;
+- full-pass FP32 solve application and inter-block coupling;
 - backward recomputation of intra-chunk values with a reverse state scan.
 
-Real ClimbMix batches invalidated `guarded_fp32` as a production mode. With
-effectively frozen weights, one exact update produced an accumulated gradient
-norm of 446.8. Its offending microbatch measured 3,933.7 in the guarded fused
-backward against 2.407 in the full-FP32 reference. A normal-learning-rate run
-became non-finite at step 12. Promoting individual or all Pallas matmul roles,
-shrinking the pairwise row block, and moving the decay anchor did not restore
-the reference gradient. The forward loss remained close, locating the failure
-in the fused backward rather than the optimizer or output loss.
+Real ClimbMix batches invalidated recursive doubling even when every solve
+matmul used the full TPU FP32 decomposition. The algorithm explicitly formed
+`L^2 ... L^32`; correlated keys drove those intermediates above `1e12`, then
+the finite nilpotent-series sum catastrophically cancelled despite a benign
+unit-lower system and a bounded true solution. The exact offending microbatch
+measured gradient norm `3,933.7` under doubling against `2.407` in the
+full-FP32 reference.
 
-Consequently, `guarded_fp32` is a synthetic-benchmark implementation only.
-Typed configuration rejects it whenever `experiment.benchmark=false`.
+Blocked substitution removes global matrix powers. With HIGHEST inter-block
+coupling, the same native-TPU trigger measures `2.406645` and max gradient
+`0.0545479`, against `2.406825` and `0.0545424` from the analytical reference.
+A 15-step real-text run covers all known spike positions, matches the reference
+loss curve, remains finite, and sustains 472,668 global tok/s. This is the
+selected real-training path.
 
 The full model routes `full_fp32` to the owned XLA/recurrent reference with the
-validated analytical VJP. This is the only real-training mode. It recomputes
+validated analytical VJP. It remains the correctness fallback. It recomputes
 compact chunk values during backward, remains finite on the real-text trigger,
 and is about 9% faster than generic XLA autodiff in the measured full model.
 
-Unsafe BF16 solve precision, alternate substitution/block solvers, shifted
-convolution, and stage exits are intentionally confined to
+Recursive doubling, unsafe BF16 solve precision, alternate block solvers,
+shifted convolution, and stage exits are intentionally confined to
 `pretraining/benchmarks/`. They are not workload-independent safe
-implementations. A future workload-qualified fast path must cover exact
-real-text trigger batches with direct per-microbatch gradient comparison, then
-pass a long full-model loss and throughput validation. Solve-only tests are no
-longer sufficient because EXP-032 exposed a fused-backward failure outside the
-previous WY gate.
+implementations. Any future solver change must cover the correlated-key growth
+fixture, the exact real-text trigger with direct per-microbatch gradient
+comparison, and a full-model loss/throughput run. Solve-only residuals are not
+sufficient.

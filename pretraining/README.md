@@ -7,9 +7,9 @@ without importing MaxText's model registry or top-level trainer.
 
 The validated architecture is four `[KDA, KDA, KDA, NoPE-GQA]` cycles with
 RMSNorm and fused SwiGLU. KDA uses BF16 Q/K/V traffic and FP32 weights and
-chunk-boundary states. Synthetic benchmarks retain the guarded fused Pallas
-kernel; real training is fail-closed to the full-FP32 analytical VJP after
-ClimbMix exposed a fused-backward gradient failure (EXP-032).
+chunk-boundary states. The fused Pallas path uses blocked WY substitution with
+full-pass FP32 inter-block coupling; recursive doubling is confined to
+benchmarks after ClimbMix exposed its catastrophic cancellation (EXP-032/034).
 
 ## Install
 
@@ -138,17 +138,17 @@ cannot resume after Spot preemption.
 
 For this 309.1M GPT-2-vocabulary model, the fused output loss remains selected
 as a capacity requirement: standard loss at microbatch 16/GA=8 exceeds v6e HBM
-during compilation. KDA itself uses `full_fp32` with the analytical VJP. That
-safe path compiles with a 33,265,817,024-byte executable estimate and sustains
-about 173.0k tok/s, putting the accelerator-only 10B-token time near 16.1 hours
-before evaluation overhead.
+during compilation. KDA uses the fused substitution VJP. It compiles with a
+31,989,071,680-byte executable estimate and sustains about 472.7k tok/s,
+putting the accelerator-only 10B-token time near 5.9 hours before evaluation
+overhead.
 
-The earlier guarded-Pallas measurement reached 566.3k tok/s but is rejected.
-With frozen weights, update 7 contained one microbatch whose gradient norm was
-3,933.7 instead of the full-FP32 reference's 2.407; the normal training run
-became non-finite at step 12. The trainer now fails immediately on non-finite
-loss or gradient norm, and non-benchmark configuration rejects the guarded
-kernel. See EXP-032 and `../results/v6e8-climbmix-realtext-precision-20260721/`.
+The earlier recursive-doubling Pallas measurement reached 566.3k tok/s but is
+rejected. With frozen weights, update 7 contained one microbatch whose gradient
+norm was 3,933.7 instead of the full-FP32 reference's 2.407. Substitution with
+HIGHEST coupling gives 2.406645 on that trigger and stays finite through all 15
+known-trigger steps. The analytical 173.0k path remains the debug fallback.
+See EXP-032/034 and `../results/v6e8-kda-substitution-realtext-20260721/`.
 
 Training metrics are emitted after device synchronization, outside the timed
 and compiled update. Gradient, parameter, hidden-state, sampled-logit, and

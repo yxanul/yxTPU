@@ -317,12 +317,6 @@ class ResolvedConfig(StrictModel):
             )
         if self.data.streaming and self.data.eval_interval and not self.data.validation_fraction:
             raise ValueError("streaming validation requires a nonzero validation_fraction")
-        if not self.experiment.benchmark and self.model.kda.precision != "full_fp32":
-            raise ValueError(
-                "real training requires model.kda.precision=full_fp32; the guarded fused "
-                "Pallas backward is retained only for synthetic benchmarks after real-text "
-                "gradient failures in EXP-032"
-            )
         diagnostics = self.experiment.diagnostics
         if diagnostics.enabled:
             if not self.data.eval_interval:

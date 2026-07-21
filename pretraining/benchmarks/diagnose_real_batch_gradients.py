@@ -25,6 +25,11 @@ def _base_config(precision: str):
         experiment="climbmix_10b",
         overrides=[
             f"model.kda.precision={precision}",
+            # Mark the run as a qualification benchmark rather than a real
+            # token-budgeted training job. Production still fixes the solver
+            # policy inside kda_fused_pallas.py instead of exposing it here.
+            "experiment.benchmark=true",
+            "experiment.token_budget=null",
             "data.prefetch_batches=0",
             "data.eval_interval=0",
             "experiment.diagnostics.enabled=false",
@@ -155,6 +160,7 @@ def _run_mode(
     memory = compiled.memory_analysis()
     return {
         "precision": config.model.kda.precision,
+        "solve_method": kda_fused_pallas._SOLVE_METHOD,
         "kernel_highest_roles": list(highest_roles),
         "pairwise_row_block_size": kda_fused_pallas._PAIRWISE_ROW_BLOCK_SIZE,
         "pairwise_anchor": (

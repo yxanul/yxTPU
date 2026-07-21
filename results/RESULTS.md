@@ -1093,9 +1093,10 @@ runs:
 | KDA / loss | Tokens/update | Global tok/s | Compiled peak estimate | Result |
 | --- | ---: | ---: | ---: | --- |
 | guarded Pallas / standard | 2,097,152 | n/a | >31.25 GB physical | compile OOM |
-| guarded Pallas / fused | 2,097,152 | 566,328 | 31,989,071,680 bytes | **rejected: invalid gradients** |
+| guarded Pallas doubling / fused | 2,097,152 | 566,328 | 31,989,071,680 bytes | **rejected: invalid gradients** |
 | full FP32 autodiff / fused | 2,097,152 | 158,745 | 44,662,410,976 bytes | safe control |
-| full FP32 analytical / fused | 2,097,152 | **172,961** | **33,265,817,024 bytes** | selected real-training path |
+| full FP32 analytical / fused | 2,097,152 | 172,961 | 33,265,817,024 bytes | correctness fallback |
+| guarded Pallas substitution / fused | 2,097,152 | **472,668** | **31,989,071,680 bytes** | selected after EXP-034 |
 
 The initial guarded throughput number was the mean of the final two steps in a
 seven-step run; its post-first-step measurements lie between 566.18k and
@@ -1123,8 +1124,36 @@ failure is not covered by the earlier WY-solve precision gate.
 The full-FP32 analytical VJP passes the trigger and all 15 measured training
 steps with gradient norms between 1.81 and 2.33. It reaches 172,961 tok/s,
 9.0% above generic full-FP32 autodiff, while cutting the compiled estimate by
-11.40 GB. This is now the only permitted non-benchmark KDA path. The
-accelerator-only 10B-token estimate is about 16.1 hours before evaluation.
+11.40 GB. It served as the fail-closed production path until EXP-034 qualified
+substitution, and remains the correctness fallback.
+
+### Stable fused substitution
+
+The missing distinction was algorithmic, not merely operand precision.
+Recursive doubling explicitly materializes powers through `L^32`; correlated
+real-text keys make those intermediates reach roughly `1e12`, so their FP32
+nilpotent-series sum catastrophically cancels even when the unit-lower problem
+is well-conditioned and the true solution norm remains around 130--160.
+
+The production Pallas kernel now uses 16-row serial substitution and pins the
+off-diagonal block coupling to `HIGHEST`. On the exact update-7/microbatch-4
+trigger:
+
+| Path | Loss | Gradient norm | Max gradient element |
+| --- | ---: | ---: | ---: |
+| fused substitution | 11.382567 | **2.406645** | **0.054548** |
+| full-FP32 analytical | 11.382677 | 2.406825 | 0.054542 |
+
+The 15-step real ClimbMix run covers the previously observed spikes at updates
+7, 13, and 15. It remains finite, reaches step-15 loss `9.228992` against
+`9.228950` for the analytical path, and sustains 472,668 global tok/s. Its
+31,989,071,680-byte compiled estimate is 1.28 GB below the analytical path.
+This is 2.73x faster than the correctness fallback and puts 10B accelerator
+time near 5.9 hours before evaluation overhead.
+
+The batch-independent diagnostics fix was then exercised on the same fused
+path: held-out evaluation and diagnostics run at step 2, all diagnostic values
+are finite, and step 3 resumes at 472,679 tok/s.
 
 The initial full-stack smoke ran on all eight v6e chips and completed the fused
 optimizer step, held-out validation, diagnostics, every requested
@@ -1143,3 +1172,4 @@ Artifacts:
 
 - `v6e8-climbmix-10b-smoke-20260721/`
 - `v6e8-climbmix-realtext-precision-20260721/`
+- `v6e8-kda-substitution-realtext-20260721/`

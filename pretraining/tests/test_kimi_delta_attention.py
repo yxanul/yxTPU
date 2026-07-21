@@ -23,9 +23,13 @@ import numpy as np
 from yxtpu_pretrain.kernels.kda_fused_pallas import (
   _CHUNK_MATMUL_PRECISION,
   _SOLVE_APPLY_MATMUL_PRECISION,
+  _SOLVE_COUPLING_MATMUL_PRECISION,
   _SOLVE_MATMUL_PRECISION,
+  _SOLVE_METHOD,
   _solve_transposed_unit_lower_triangular_doubling,
+  _solve_transposed_unit_lower_triangular_substitution,
   _solve_unit_lower_triangular_doubling,
+  _solve_unit_lower_triangular_substitution,
 )
 from yxtpu_pretrain.layers.kimi_delta_attention import (
   _decayed_pairwise_dot,
@@ -51,8 +55,55 @@ def _inputs():
 
 def test_production_precision_policy_is_guarded():
   assert _CHUNK_MATMUL_PRECISION == jax.lax.Precision.DEFAULT
+  assert _SOLVE_METHOD == "substitution"
   assert _SOLVE_MATMUL_PRECISION == jax.lax.Precision.HIGHEST
   assert _SOLVE_APPLY_MATMUL_PRECISION == jax.lax.Precision.HIGHEST
+  assert _SOLVE_COUPLING_MATMUL_PRECISION == jax.lax.Precision.HIGHEST
+
+
+def test_substitution_solve_handles_correlated_key_growth():
+  """Exercise the real-text failure class instead of a tiny random lower matrix."""
+  key = jax.random.key(121)
+  base_key, noise_key, rhs_key = jax.random.split(key, 3)
+  rows = 64
+  channels = 128
+  correlation = 0.95
+  shared = jax.random.normal(base_key, (1, channels), dtype=jnp.float32)
+  noise = jax.random.normal(noise_key, (rows, channels), dtype=jnp.float32)
+  keys = jnp.sqrt(correlation) * shared + jnp.sqrt(1.0 - correlation) * noise
+  keys = keys / jnp.linalg.norm(keys, axis=-1, keepdims=True)
+  beta = jnp.full((rows,), 0.95, dtype=jnp.float32)
+  cumulative_decay = jnp.arange(rows, dtype=jnp.float32)[:, None] * -1.0e-3
+  decay_weight = jnp.exp(cumulative_decay - cumulative_decay.T)
+  system = jnp.tril(beta[:, None] * (keys @ keys.T) * decay_weight, k=-1)
+  rhs = jax.random.normal(rhs_key, (rows, 64), dtype=jnp.float32)
+  matrix = jnp.eye(rows, dtype=jnp.float32) + system
+
+  # This assertion gives the fixture teeth: a future edit cannot quietly turn
+  # it back into the rho~=0, 0.03*randn regime that missed the production bug.
+  power = -system
+  max_power_norm = jnp.asarray(0.0, dtype=jnp.float32)
+  for _ in range(5):
+    power = power @ power
+    max_power_norm = jnp.maximum(max_power_norm, jnp.linalg.norm(power))
+  assert float(max_power_norm) > 1.0e8
+
+  expected = jax.scipy.linalg.solve_triangular(
+      matrix,
+      rhs,
+      lower=True,
+      unit_diagonal=True,
+  )
+  actual = _solve_unit_lower_triangular_substitution(system, rhs)
+  expected_t = jax.scipy.linalg.solve_triangular(
+      matrix.T,
+      rhs,
+      lower=False,
+      unit_diagonal=True,
+  )
+  actual_t = _solve_transposed_unit_lower_triangular_substitution(system, rhs)
+  np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
+  np.testing.assert_allclose(actual_t, expected_t, rtol=2e-5, atol=2e-5)
 
 
 def test_blocked_unit_lower_solve_and_gradients_match_xla():
