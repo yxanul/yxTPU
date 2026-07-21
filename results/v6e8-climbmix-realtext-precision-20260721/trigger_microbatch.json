@@ -1,0 +1,16 @@
+{
+  "dataset": "karpathy/climbmix-400b-shuffle",
+  "model": "kda_hybrid_309m_gpt2",
+  "update_index": 7,
+  "microbatch_index": 4,
+  "guarded_fp32": {
+    "loss": 11.382854461669922,
+    "grad_norm": 3933.7099609375,
+    "grad_max_abs": 171.0
+  },
+  "full_fp32": {
+    "loss": 11.38267707824707,
+    "grad_norm": 2.4067695140838623,
+    "grad_max_abs": 0.05454240366816521
+  }
+}

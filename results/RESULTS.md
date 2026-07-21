@@ -1090,25 +1090,48 @@ microbatch-16/GA=8 operating point, standard projected-logit cross-entropy
 fails compilation with 36.29 GB of temporaries. The fused loss compiles and
 runs:
 
-| Model/loss | Tokens/update | Global tok/s | Compiled peak estimate | Result |
+| KDA / loss | Tokens/update | Global tok/s | Compiled peak estimate | Result |
 | --- | ---: | ---: | ---: | --- |
-| 309.1M, standard | 2,097,152 | n/a | >31.25 GB physical | compile OOM |
-| 309.1M, fused | 2,097,152 | **566,328** | 31,989,071,680 bytes | selected |
+| guarded Pallas / standard | 2,097,152 | n/a | >31.25 GB physical | compile OOM |
+| guarded Pallas / fused | 2,097,152 | 566,328 | 31,989,071,680 bytes | **rejected: invalid gradients** |
+| full FP32 autodiff / fused | 2,097,152 | 158,745 | 44,662,410,976 bytes | safe control |
+| full FP32 analytical / fused | 2,097,152 | **172,961** | **33,265,817,024 bytes** | selected real-training path |
 
-The throughput number is the mean of the final two steps in a seven-step real
-ClimbMix run; the six post-first-step measurements lie between 566.18k and
-566.48k tok/s. The executable reports 28,275,503,136 bytes of temporaries and
-uses buffer donation/aliasing to fit. A raw gradient-norm excursion on the last
-short run was finite and optimizer clipping remained at 1.0; the independent
-diagnostic gate on a held-out batch measured gradient norm 2.461, gradient max
-0.0666, hidden RMS 1.0000, hidden max 6.165, sampled-logit max 5.105, and all
-attention-head max logits below 7.0.
+The initial guarded throughput number was the mean of the final two steps in a
+seven-step run; its post-first-step measurements lie between 566.18k and
+566.48k tok/s. That run was too short to establish training validity. Extending
+it exposed a repeatable raw gradient norm of 601.4 at update 7 and non-finite
+loss and gradients at update 12. Gradient clipping delayed parameter corruption
+but could not turn an invalid backward into a usable estimator.
 
-The final full-stack smoke ran on all eight v6e chips and completed the fused
+An effectively frozen-weight control separated the data trigger from the
+optimizer: the same stream produced gradient norms 446.8 at update 7, 40.9 at
+13, and 11.2 at 15. Splitting update 7 across its eight accumulation
+microbatches isolated microbatch 4:
+
+| KDA backward | Loss | Gradient norm | Max gradient element |
+| --- | ---: | ---: | ---: |
+| guarded fused Pallas | 11.38285 | 3,933.710 | 171.0 |
+| full-FP32 reference | 11.38268 | **2.40677** | **0.05454** |
+
+The other seven microbatches agree closely at norms 2.33 to 2.46. Forward loss
+therefore stays near the reference while the fused backward alone explodes.
+Six-pass promotion of state, pairwise, chunk, and all ordinary matmul roles
+does not fix it; nor do row blocks 2, 4, or 8 or a midpoint decay anchor. The
+failure is not covered by the earlier WY-solve precision gate.
+
+The full-FP32 analytical VJP passes the trigger and all 15 measured training
+steps with gradient norms between 1.81 and 2.33. It reaches 172,961 tok/s,
+9.0% above generic full-FP32 autodiff, while cutting the compiled estimate by
+11.40 GB. This is now the only permitted non-benchmark KDA path. The
+accelerator-only 10B-token estimate is about 16.1 hours before evaluation.
+
+The initial full-stack smoke ran on all eight v6e chips and completed the fused
 optimizer step, held-out validation, diagnostics, every requested
 lm-evaluation-harness task at a two-example smoke limit, JSON provenance
 serialization, and W&B artifact upload. Those task scores are connectivity and
-correctness checks, not meaningful quality estimates. Production evaluation
+integration checks, not a fused-backward correctness gate or meaningful quality
+estimates. Production evaluation
 uses the full task sets every 1,250 updates, while held-out loss and diagnostics
 run every 250 updates.
 
@@ -1119,3 +1142,4 @@ preemption ends it rather than resuming or provisioning replacement capacity.
 Artifacts:
 
 - `v6e8-climbmix-10b-smoke-20260721/`
+- `v6e8-climbmix-realtext-precision-20260721/`

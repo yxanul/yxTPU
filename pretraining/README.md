@@ -6,9 +6,10 @@ and launchers. It imports modern leaf components from the vendored MaxText pin
 without importing MaxText's model registry or top-level trainer.
 
 The validated architecture is four `[KDA, KDA, KDA, NoPE-GQA]` cycles with
-RMSNorm and fused SwiGLU. KDA uses BF16 Q/K/V traffic and FP32 weights,
-chunk-boundary states, and guarded WY solves. `guarded_fp32` is the default;
-unsafe BF16 solve variants live only in `benchmarks/`.
+RMSNorm and fused SwiGLU. KDA uses BF16 Q/K/V traffic and FP32 weights and
+chunk-boundary states. Synthetic benchmarks retain the guarded fused Pallas
+kernel; real training is fail-closed to the full-FP32 analytical VJP after
+ClimbMix exposed a fused-backward gradient failure (EXP-032).
 
 ## Install
 
@@ -135,12 +136,19 @@ This profile deliberately has no checkpoints. It must be acknowledged by
 reaches the 10B-token budget (4,769 updates; 10,001,317,888 packed tokens), and
 cannot resume after Spot preemption.
 
-For this 309.1M GPT-2-vocabulary model, the fused loss is selected as a capacity
-requirement rather than a general throughput preference. Standard loss at
-microbatch 16/GA=8 exceeds v6e HBM during compilation. Fused loss compiles with
-a 31,989,071,680-byte executable estimate and sustained 566.3k tok/s after
-warmup on real ClimbMix batches. The smaller-vocabulary 272.9M benchmark still
-uses standard loss, as described above.
+For this 309.1M GPT-2-vocabulary model, the fused output loss remains selected
+as a capacity requirement: standard loss at microbatch 16/GA=8 exceeds v6e HBM
+during compilation. KDA itself uses `full_fp32` with the analytical VJP. That
+safe path compiles with a 33,265,817,024-byte executable estimate and sustains
+about 173.0k tok/s, putting the accelerator-only 10B-token time near 16.1 hours
+before evaluation overhead.
+
+The earlier guarded-Pallas measurement reached 566.3k tok/s but is rejected.
+With frozen weights, update 7 contained one microbatch whose gradient norm was
+3,933.7 instead of the full-FP32 reference's 2.407; the normal training run
+became non-finite at step 12. The trainer now fails immediately on non-finite
+loss or gradient norm, and non-benchmark configuration rejects the guarded
+kernel. See EXP-032 and `../results/v6e8-climbmix-realtext-precision-20260721/`.
 
 Training metrics are emitted after device synchronization, outside the timed
 and compiled update. Gradient, parameter, hidden-state, sampled-logit, and

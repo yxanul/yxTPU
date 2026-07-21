@@ -126,6 +126,18 @@ def test_climbmix_profile_is_explicit_streaming_no_checkpoint_run():
     assert config.experiment.harness_eval.interval == 5 * config.data.eval_interval
 
 
+def test_real_training_rejects_the_guarded_fused_kda_backward():
+    with pytest.raises(ValueError, match="real training requires.*full_fp32"):
+        load_config(
+            model="kda_hybrid_309m_gpt2",
+            optimizer="adamw_10b",
+            data="climbmix",
+            hardware="v6e-8",
+            experiment="climbmix_10b",
+            overrides=["model.kda.precision=guarded_fp32"],
+        )
+
+
 def test_pin_matches_imported_maxtext_commit():
     package_root = Path(__file__).resolve().parents[1]
     assert (package_root / "MAXTEXT_PIN").read_text().strip() == "dfd8d293"
