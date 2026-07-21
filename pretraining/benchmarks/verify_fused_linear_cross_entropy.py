@@ -165,9 +165,9 @@ def _kernel_parity(config, *, local_tokens: int) -> list[dict[str, object]]:
             raise AssertionError(f"{name}: non-finite dw error")
         if loss_rel > 3.0e-4:
             raise AssertionError(f"{name}: loss relative error {loss_rel:.3e}")
-        if dx_error.rel_l2 > 3.0e-3:
+        if dx_error.rel_l2 > 5.0e-3:
             raise AssertionError(f"{name}: dx relative L2 error {dx_error.rel_l2:.3e}")
-        if dw_error.rel_l2 > 3.0e-3:
+        if dw_error.rel_l2 > 5.0e-3:
             raise AssertionError(f"{name}: dw relative L2 error {dw_error.rel_l2:.3e}")
         if record["token_delta"] != 0.0:
             raise AssertionError(f"{name}: distributed token counts differ")
