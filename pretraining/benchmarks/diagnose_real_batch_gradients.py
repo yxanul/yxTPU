@@ -56,17 +56,31 @@ def _load_update(config, update_index: int):
     return batch
 
 
-def _run_mode(config, host_update):
+def _run_mode(config, host_update, *, highest_roles: tuple[str, ...], microbatches):
     import jax
     import jax.numpy as jnp
     from flax import nnx
     from maxtext.utils import max_utils
 
+    from yxtpu_pretrain.kernels import kda_fused_pallas
     from yxtpu_pretrain.model import HybridLanguageModel
     from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
     from yxtpu_pretrain.runtime.mesh import create_mesh
     from yxtpu_pretrain.runtime.sharding import logical_mesh_context
     from yxtpu_pretrain.train import _device_batch, _loss, _tree_max_abs
+
+    precision_attributes = {
+        "chunk": "_CHUNK_MATMUL_PRECISION",
+        "state": "_STATE_MATMUL_PRECISION",
+        "pairwise": "_PAIRWISE_MATMUL_PRECISION",
+        "solve_coupling": "_SOLVE_COUPLING_MATMUL_PRECISION",
+    }
+    for role in highest_roles:
+        setattr(
+            kda_fused_pallas,
+            precision_attributes[role],
+            jax.lax.Precision.HIGHEST,
+        )
 
     mesh = create_mesh(config.hardware)
     logical_axis_rules = make_leaf_config(config).logical_axis_rules
@@ -90,7 +104,14 @@ def _run_mode(config, host_update):
     microbatch_size = host_update["input_ids"].shape[0] // accumulation
     records = []
     compiled = None
-    for microbatch_index in range(accumulation):
+    selected_microbatches = (
+        tuple(range(accumulation)) if microbatches is None else microbatches
+    )
+    for microbatch_index in selected_microbatches:
+        if not 0 <= microbatch_index < accumulation:
+            raise ValueError(
+                f"microbatch index {microbatch_index} is outside [0, {accumulation})"
+            )
         start = microbatch_index * microbatch_size
         stop = start + microbatch_size
         microbatch = {
@@ -120,6 +141,7 @@ def _run_mode(config, host_update):
     memory = compiled.memory_analysis()
     return {
         "precision": config.model.kda.precision,
+        "kernel_highest_roles": list(highest_roles),
         "compiled_memory": {
             key: int(getattr(memory, key, 0) or 0)
             for key in (
@@ -143,6 +165,20 @@ def main() -> int:
         choices=("guarded_fp32", "full_fp32"),
         dest="precisions",
     )
+    parser.add_argument(
+        "--kernel-highest",
+        action="append",
+        choices=("chunk", "state", "pairwise", "solve_coupling"),
+        default=[],
+        help="promote one guarded Pallas matmul role to six-pass FP32",
+    )
+    parser.add_argument(
+        "--microbatch",
+        action="append",
+        type=int,
+        dest="microbatches",
+        help="restrict the comparison to one accumulation microbatch",
+    )
     args = parser.parse_args()
     precisions = args.precisions or ["guarded_fp32", "full_fp32"]
 
@@ -150,7 +186,14 @@ def main() -> int:
     apply_hardware_environment(first_config.hardware)
     host_update = _load_update(first_config, args.update_index)
     for precision in precisions:
-        result = _run_mode(_base_config(precision), host_update)
+        result = _run_mode(
+            _base_config(precision),
+            host_update,
+            highest_roles=tuple(args.kernel_highest),
+            microbatches=(
+                tuple(args.microbatches) if args.microbatches is not None else None
+            ),
+        )
         print(json.dumps({"update_index": args.update_index, **result}, sort_keys=True))
     return 0
 
