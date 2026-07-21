@@ -55,3 +55,13 @@ The analytical VJP is 9.0% faster and reduces the estimate by 11.40 GB. Its
 loss curve and gradients match generic full-FP32 autodiff through the trigger.
 Configuration now rejects guarded Pallas for non-benchmark experiments, and
 the trainer terminates on the first non-finite loss or gradient norm.
+
+## Safe full-stack smoke
+
+The selected analytical path also completes held-out validation, the separate
+gradient/parameter/activation/attention diagnostic, all ten requested lm-eval
+tasks at a two-example smoke limit, JSON serialization, and W&B artifact upload.
+The diagnostic reports gradient norm 2.4614, max gradient 0.06662, hidden RMS
+1.0000, and finite attention-head logits. The lm-eval smoke takes 27.6 seconds.
+
+W&B smoke: <https://wandb.ai/davidfranco2300-other/yxtpu-pretrain/runs/y4bgb72h>
