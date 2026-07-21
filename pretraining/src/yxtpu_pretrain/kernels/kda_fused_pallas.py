@@ -377,13 +377,25 @@ def _decayed_pairwise_backward(
         right_decay_product,
         axis=-2,
     )
-    left_decay_product = jnp.concatenate(
-        (
-            left_decay_product[..., :-1, :],
-            left_decay_product[..., -1:, :] + anchor_cotangent[..., None, :],
-        ),
-        axis=-2,
-    )
+    anchor_row = _pairwise_anchor_row(row_block_size) % row_block_size
+    if anchor_row == row_block_size - 1:
+      left_decay_product = jnp.concatenate(
+          (
+              left_decay_product[..., :-1, :],
+              left_decay_product[..., -1:, :] + anchor_cotangent[..., None, :],
+          ),
+          axis=-2,
+      )
+    else:
+      left_decay_product = jnp.concatenate(
+          (
+              left_decay_product[..., :anchor_row, :],
+              left_decay_product[..., anchor_row : anchor_row + 1, :]
+              + anchor_cotangent[..., None, :],
+              left_decay_product[..., anchor_row + 1 :, :],
+          ),
+          axis=-2,
+      )
     decay_cotangent_from_left_blocks.append(left_decay_product)
 
   return (

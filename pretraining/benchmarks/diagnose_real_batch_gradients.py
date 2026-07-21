@@ -63,6 +63,7 @@ def _run_mode(
     highest_roles: tuple[str, ...],
     microbatches,
     pairwise_row_block_size: int | None,
+    pairwise_anchor: str | None,
 ):
     import jax
     import jax.numpy as jnp
@@ -92,6 +93,8 @@ def _run_mode(
         if pairwise_row_block_size not in (1, 2, 4, 8):
             raise ValueError("pairwise row block size must be one of 1, 2, 4, or 8")
         kda_fused_pallas._PAIRWISE_ROW_BLOCK_SIZE = pairwise_row_block_size
+    if pairwise_anchor is not None:
+        kda_fused_pallas._PAIRWISE_ANCHOR_MIDPOINT = pairwise_anchor == "midpoint"
 
     mesh = create_mesh(config.hardware)
     logical_axis_rules = make_leaf_config(config).logical_axis_rules
@@ -154,6 +157,9 @@ def _run_mode(
         "precision": config.model.kda.precision,
         "kernel_highest_roles": list(highest_roles),
         "pairwise_row_block_size": kda_fused_pallas._PAIRWISE_ROW_BLOCK_SIZE,
+        "pairwise_anchor": (
+            "midpoint" if kda_fused_pallas._PAIRWISE_ANCHOR_MIDPOINT else "last"
+        ),
         "compiled_memory": {
             key: int(getattr(memory, key, 0) or 0)
             for key in (
@@ -198,6 +204,12 @@ def main() -> int:
         default=None,
         help="override the Pallas decay-rescaling row block",
     )
+    parser.add_argument(
+        "--pairwise-anchor",
+        choices=("last", "midpoint"),
+        default=None,
+        help="override the shared decay anchor within each pairwise row block",
+    )
     args = parser.parse_args()
     precisions = args.precisions or ["guarded_fp32", "full_fp32"]
 
@@ -213,6 +225,7 @@ def main() -> int:
                 tuple(args.microbatches) if args.microbatches is not None else None
             ),
             pairwise_row_block_size=args.pairwise_row_block_size,
+            pairwise_anchor=args.pairwise_anchor,
         )
         print(json.dumps({"update_index": args.update_index, **result}, sort_keys=True))
     return 0
