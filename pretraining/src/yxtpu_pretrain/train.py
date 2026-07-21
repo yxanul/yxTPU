@@ -183,19 +183,40 @@ def _make_diagnostics_step():
                 decoder_positions=batch["positions"],
                 record_max_logits=True,
             )
-            logits = current_model.project_logits(hidden)
-            targets = jax.nn.one_hot(batch["labels"], logits.shape[-1], dtype=jnp.float32)
-            cross_entropy, _ = max_utils.cross_entropy_with_logits(
-                logits,
-                targets,
-                z_loss=0.0,
-            )
             weights = batch["loss_mask"].astype(jnp.float32)
-            loss = jnp.sum(cross_entropy * weights) / jnp.maximum(jnp.sum(weights), 1.0)
+            if current_model.config.model.loss.implementation == "tokamax_fused":
+                loss, _ = data_parallel_linear_cross_entropy(
+                    hidden.reshape((-1, hidden.shape[-1])),
+                    batch["labels"].reshape((-1,)),
+                    weights.reshape((-1,)),
+                    current_model.output_projection_kernel(hidden.dtype),
+                    mesh=current_model.mesh,
+                    implementation="mosaic_tpu",
+                )
+            else:
+                logits = current_model.project_logits(hidden)
+                targets = jax.nn.one_hot(
+                    batch["labels"],
+                    logits.shape[-1],
+                    dtype=jnp.float32,
+                )
+                cross_entropy, _ = max_utils.cross_entropy_with_logits(
+                    logits,
+                    targets,
+                    z_loss=0.0,
+                )
+                loss = jnp.sum(cross_entropy * weights) / jnp.maximum(
+                    jnp.sum(weights),
+                    1.0,
+                )
+            # A single position per sequence is enough to catch output-head
+            # excursions without recreating the full [batch,sequence,vocab]
+            # tensor that the selected fused loss intentionally removes.
+            sampled_logits = current_model.project_logits(hidden[:, -1:, :])
             auxiliary = {
                 "hidden_rms": jnp.sqrt(jnp.mean(jnp.square(hidden.astype(jnp.float32)))),
                 "hidden_max_abs": jnp.max(jnp.abs(hidden.astype(jnp.float32))),
-                "logits_max_abs": jnp.max(jnp.abs(logits)),
+                "sampled_logits_max_abs": jnp.max(jnp.abs(sampled_logits)),
             }
             return loss, auxiliary
 
@@ -212,7 +233,7 @@ def _make_diagnostics_step():
             "param_max_abs": _tree_max_abs(parameters),
             "hidden_rms": auxiliary["hidden_rms"],
             "hidden_max_abs": auxiliary["hidden_max_abs"],
-            "logits_max_abs": auxiliary["logits_max_abs"],
+            "sampled_logits_max_abs": auxiliary["sampled_logits_max_abs"],
             "attention_max_logits": attention_logit_intermediates(model),
         }
 

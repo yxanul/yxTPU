@@ -45,6 +45,8 @@ harness_eval:
   use_cache: true
 model_overrides:
   remat_policy: save_dot_except_mlp
+  loss:
+    implementation: tokamax_fused
 data_overrides:
   sequence_length: 2048
   per_device_batch_size: 16
