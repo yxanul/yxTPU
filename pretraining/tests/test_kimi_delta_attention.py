@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from yxtpu_pretrain.kernels import kda_fused_pallas
 from yxtpu_pretrain.kernels.kda_fused_pallas import (
   _CHUNK_MATMUL_PRECISION,
   _SOLVE_APPLY_MATMUL_PRECISION,
@@ -30,6 +31,9 @@ from yxtpu_pretrain.kernels.kda_fused_pallas import (
   _solve_transposed_unit_lower_triangular_substitution,
   _solve_unit_lower_triangular_doubling,
   _solve_unit_lower_triangular_substitution,
+  _solve_transposed_unit_lower_triangular_inverse,
+  _solve_unit_lower_triangular_inverse,
+  _unit_lower_inverse,
 )
 from yxtpu_pretrain.layers.kimi_delta_attention import (
   _decayed_pairwise_dot,
@@ -55,7 +59,8 @@ def _inputs():
 
 def test_production_precision_policy_is_guarded():
   assert _CHUNK_MATMUL_PRECISION == jax.lax.Precision.DEFAULT
-  assert _SOLVE_METHOD == "substitution"
+  assert _SOLVE_METHOD == "inverse"
+  assert kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE == 2
   assert _SOLVE_MATMUL_PRECISION == jax.lax.Precision.HIGHEST
   assert _SOLVE_APPLY_MATMUL_PRECISION == jax.lax.Precision.HIGHEST
   assert _SOLVE_COUPLING_MATMUL_PRECISION == jax.lax.Precision.HIGHEST
@@ -102,6 +107,84 @@ def test_substitution_solve_handles_correlated_key_growth():
       unit_diagonal=True,
   )
   actual_t = _solve_transposed_unit_lower_triangular_substitution(system, rhs)
+  np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
+  np.testing.assert_allclose(actual_t, expected_t, rtol=2e-5, atol=2e-5)
+
+
+def test_inverse_solve_handles_correlated_key_growth():
+  """The explicit-inverse solver must survive the same real-text failure class."""
+  key = jax.random.key(121)
+  base_key, noise_key, rhs_key = jax.random.split(key, 3)
+  rows = 64
+  channels = 128
+  correlation = 0.95
+  shared = jax.random.normal(base_key, (1, channels), dtype=jnp.float32)
+  noise = jax.random.normal(noise_key, (rows, channels), dtype=jnp.float32)
+  keys = jnp.sqrt(correlation) * shared + jnp.sqrt(1.0 - correlation) * noise
+  keys = keys / jnp.linalg.norm(keys, axis=-1, keepdims=True)
+  beta = jnp.full((rows,), 0.95, dtype=jnp.float32)
+  cumulative_decay = jnp.arange(rows, dtype=jnp.float32)[:, None] * -1.0e-3
+  decay_weight = jnp.exp(cumulative_decay - cumulative_decay.T)
+  system = jnp.tril(beta[:, None] * (keys @ keys.T) * decay_weight, k=-1)
+  rhs = jax.random.normal(rhs_key, (rows, 64), dtype=jnp.float32)
+  matrix = jnp.eye(rows, dtype=jnp.float32) + system
+
+  power = -system
+  max_power_norm = jnp.asarray(0.0, dtype=jnp.float32)
+  for _ in range(5):
+    power = power @ power
+    max_power_norm = jnp.maximum(max_power_norm, jnp.linalg.norm(power))
+  assert float(max_power_norm) > 1.0e8
+
+  expected = jax.scipy.linalg.solve_triangular(
+      matrix,
+      rhs,
+      lower=True,
+      unit_diagonal=True,
+  )
+  expected_t = jax.scipy.linalg.solve_triangular(
+      matrix.T,
+      rhs,
+      lower=False,
+      unit_diagonal=True,
+  )
+  original_base = kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE
+  try:
+    for base in (2, 4, 16):
+      kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE = base
+      inverse = _unit_lower_inverse(system)
+      np.testing.assert_allclose(
+          inverse @ matrix,
+          jnp.eye(rows, dtype=jnp.float32),
+          atol=5e-5,
+      )
+      actual = _solve_unit_lower_triangular_inverse(system, rhs)
+      actual_t = _solve_transposed_unit_lower_triangular_inverse(system, rhs)
+      np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
+      np.testing.assert_allclose(actual_t, expected_t, rtol=2e-5, atol=2e-5)
+  finally:
+    kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE = original_base
+
+
+def test_inverse_solve_matches_xla_on_batched_streams():
+  """The kernel calls the solver with a leading head axis; cover that layout."""
+  keys = jax.random.split(jax.random.key(29), 2)
+  system = jnp.tril(
+      0.1 * jax.random.normal(keys[0], (3, 64, 64), dtype=jnp.float32),
+      k=-1,
+  )
+  rhs = jax.random.normal(keys[1], (3, 64, 256), dtype=jnp.float32)
+  matrix = jnp.eye(64, dtype=jnp.float32) + system
+  expected = jax.vmap(
+      lambda a, b: jax.scipy.linalg.solve_triangular(a, b, lower=True, unit_diagonal=True)
+  )(matrix, rhs)
+  expected_t = jax.vmap(
+      lambda a, b: jax.scipy.linalg.solve_triangular(
+          jnp.swapaxes(a, -1, -2), b, lower=False, unit_diagonal=True
+      )
+  )(matrix, rhs)
+  actual = _solve_unit_lower_triangular_inverse(system, rhs)
+  actual_t = _solve_transposed_unit_lower_triangular_inverse(system, rhs)
   np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
   np.testing.assert_allclose(actual_t, expected_t, rtol=2e-5, atol=2e-5)
 

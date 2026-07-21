@@ -344,7 +344,7 @@ def _production_benchmark(args):
           tokens,
       ),
       _measure(
-          "Pallas fused forward, doubling solve + boundary states",
+          f"Pallas fused forward, {_SOLVE_METHOD} solve + boundary states",
           _fused_forward,
           inputs,
           args.repetitions,
