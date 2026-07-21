@@ -83,12 +83,15 @@ def test_fused_loss_rejects_vocabulary_parallel_meshes():
 def test_all_required_profiles_exist():
     expected = {
         "models/kda_hybrid_273m.yml",
+        "models/kda_hybrid_309m_gpt2.yml",
         "optimizers/adamw.yml",
+        "optimizers/adamw_10b.yml",
         "optimizers/muon.yml",
         "optimizers/muonclip.yml",
         "data/synthetic.yml",
         "data/huggingface.yml",
         "data/grain.yml",
+        "data/climbmix.yml",
         "hardware/v6e-8.yml",
         "hardware/v6e-64.yml",
         "hardware/v5e-16.yml",
@@ -97,9 +100,29 @@ def test_all_required_profiles_exist():
         "experiments/selected.yml",
         "experiments/max_throughput.yml",
         "experiments/sequence_sweep.yml",
+        "experiments/climbmix_10b.yml",
     }
     found = {str(path.relative_to(CONFIG_ROOT)) for path in CONFIG_ROOT.rglob("*.yml")}
     assert expected <= found
+
+
+def test_climbmix_profile_is_explicit_streaming_no_checkpoint_run():
+    config = load_config(
+        model="kda_hybrid_309m_gpt2",
+        optimizer="adamw_10b",
+        data="climbmix",
+        hardware="v6e-8",
+        experiment="climbmix_10b",
+    )
+    assert config.model.vocab_size == 50_432
+    assert config.data.dataset_name == "karpathy/climbmix-400b-shuffle"
+    assert config.data.streaming is True
+    assert config.data.validation_fraction == 0.01
+    assert config.data.prefetch_batches == 3
+    assert config.experiment.token_budget == 10_000_000_000
+    assert config.experiment.checkpoint.enabled is False
+    assert config.experiment.acknowledge_no_checkpoint is True
+    assert config.experiment.harness_eval.interval == 5 * config.data.eval_interval
 
 
 def test_pin_matches_imported_maxtext_commit():

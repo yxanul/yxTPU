@@ -14,10 +14,12 @@ dependencies = [
   "jax==0.10.2",
   "jaxlib==0.10.2",
   "libtpu==0.0.42.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "lm-eval==0.4.12",
   "maxtext[tpu]",
   "pydantic>=2.13.4",
   "pyyaml>=6.0.3",
   "tokamax==0.0.12",
+  "wandb>=0.21,<1",
 ]
 
 [project.optional-dependencies]

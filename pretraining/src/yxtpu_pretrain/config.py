@@ -140,6 +140,30 @@ class DataConfig(StrictModel):
     eval_split: str = "validation"
     shuffle_seed: int = 42
     reuse_example_batch: bool = True
+    streaming: bool = False
+    validation_fraction: float = 0.0
+    validation_seed: int = 17
+    shuffle_buffer_size: int = 10_000
+    tokenize_batch_size: int = 256
+    prefetch_batches: int = 0
+    append_eos: bool = True
+    text_field: str = "text"
+
+    @model_validator(mode="after")
+    def validate_streaming(self) -> DataConfig:
+        if not 0.0 <= self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be in [0, 1)")
+        if self.streaming and self.type != "huggingface":
+            raise ValueError("streaming is currently supported only for Hugging Face data")
+        if self.streaming and not self.dataset_name:
+            raise ValueError("streaming Hugging Face data requires dataset_name")
+        if self.validation_fraction and not self.streaming:
+            raise ValueError("validation_fraction is reserved for streaming datasets")
+        if self.prefetch_batches < 0:
+            raise ValueError("prefetch_batches must be non-negative")
+        if self.shuffle_buffer_size < 1 or self.tokenize_batch_size < 1:
+            raise ValueError("shuffle and tokenize batch sizes must be positive")
+        return self
 
 
 class MeshConfig(StrictModel):
@@ -191,6 +215,44 @@ class CheckpointConfig(StrictModel):
         return self
 
 
+class WandbConfig(StrictModel):
+    enabled: bool = False
+    project: str = "yxtpu-pretrain"
+    entity: str | None = None
+    group: str | None = None
+    tags: tuple[str, ...] = ()
+    mode: Literal["online", "offline", "disabled"] = "online"
+
+
+class DiagnosticsConfig(StrictModel):
+    enabled: bool = False
+    interval: int = 0
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> DiagnosticsConfig:
+        if self.enabled and self.interval <= 0:
+            raise ValueError("enabled diagnostics require a positive interval")
+        return self
+
+
+class HarnessEvalConfig(StrictModel):
+    enabled: bool = False
+    interval: int = 0
+    tasks: tuple[str, ...] = ()
+    batch_size_per_device: int = 1
+    num_fewshot: int = 0
+    limit: int | float | None = None
+    use_cache: bool = True
+
+    @model_validator(mode="after")
+    def validate_harness(self) -> HarnessEvalConfig:
+        if self.enabled and (self.interval <= 0 or not self.tasks):
+            raise ValueError("enabled lm-eval requires a positive interval and at least one task")
+        if self.batch_size_per_device < 1:
+            raise ValueError("lm-eval batch_size_per_device must be positive")
+        return self
+
+
 class ExperimentConfig(StrictModel):
     name: str
     steps: int = 30
@@ -200,7 +262,12 @@ class ExperimentConfig(StrictModel):
     log_interval: int = 1
     profile_steps: tuple[int, ...] = ()
     benchmark: bool = True
+    token_budget: int | None = None
+    acknowledge_no_checkpoint: bool = False
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    wandb: WandbConfig = Field(default_factory=WandbConfig)
+    diagnostics: DiagnosticsConfig = Field(default_factory=DiagnosticsConfig)
+    harness_eval: HarnessEvalConfig = Field(default_factory=HarnessEvalConfig)
     model_overrides: dict[str, Any] = Field(default_factory=dict)
     data_overrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -208,8 +275,19 @@ class ExperimentConfig(StrictModel):
     def validate_checkpoint_policy(self) -> ExperimentConfig:
         if self.benchmark and self.checkpoint.enabled:
             raise ValueError("benchmark profiles must keep checkpointing disabled")
-        if not self.benchmark and not self.checkpoint.enabled:
-            raise ValueError("real-training profiles require an explicit checkpoint destination")
+        if (
+            not self.benchmark
+            and not self.checkpoint.enabled
+            and not self.acknowledge_no_checkpoint
+        ):
+            raise ValueError(
+                "real-training profiles require a checkpoint destination or an explicit "
+                "acknowledge_no_checkpoint=true"
+            )
+        if self.checkpoint.enabled and self.acknowledge_no_checkpoint:
+            raise ValueError("checkpointing and acknowledge_no_checkpoint are mutually exclusive")
+        if self.token_budget is not None and self.token_budget <= 0:
+            raise ValueError("token_budget must be positive")
         return self
 
 
