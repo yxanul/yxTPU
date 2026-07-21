@@ -310,6 +310,29 @@ class ResolvedConfig(StrictModel):
                     "(fsdp=tensor=sequence=1); vocabulary parallelism needs explicit "
                     "global softmax collectives"
                 )
+        if self.data.streaming and self.experiment.checkpoint.enabled:
+            raise ValueError(
+                "the streaming packed iterator is not checkpointable; disable prefetch/streaming "
+                "only after implementing an exact stream-state restore"
+            )
+        if self.data.streaming and self.data.eval_interval and not self.data.validation_fraction:
+            raise ValueError("streaming validation requires a nonzero validation_fraction")
+        diagnostics = self.experiment.diagnostics
+        if diagnostics.enabled:
+            if not self.data.eval_interval:
+                raise ValueError("diagnostics require validation batches")
+            if diagnostics.interval % self.data.eval_interval:
+                raise ValueError("diagnostics interval must be a multiple of data.eval_interval")
+        if self.experiment.token_budget is not None:
+            tokens_available = (
+                self.experiment.steps
+                * self.data.sequence_length
+                * self.data.per_device_batch_size
+                * self.experiment.gradient_accumulation_steps
+                * self.hardware.device_count
+            )
+            if tokens_available < self.experiment.token_budget:
+                raise ValueError("configured steps cannot reach the requested token_budget")
         return self
 
     def as_dict(self) -> dict[str, Any]:

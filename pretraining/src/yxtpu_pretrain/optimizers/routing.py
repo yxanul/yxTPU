@@ -107,11 +107,8 @@ def _muon_dimension_tree(parameters, routes: list[Route]):
     return dimensions_for
 
 
-def build_optimizer(model: nnx.Module, config: OptimizerConfig):
-    """Builds an Optax transform and its audited route table."""
-    parameters = nnx.state(model, nnx.Param)
-    routes = classify_parameters(parameters)
-    clipping = optax.clip_by_global_norm(config.gradient_clip_norm)
+def build_learning_rate_schedule(config: OptimizerConfig):
+    """Builds the shared warmup/cosine schedule for the optimizer and telemetry."""
     warmup = optax.linear_schedule(
         init_value=0.0,
         end_value=config.learning_rate,
@@ -122,10 +119,18 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
         decay_steps=config.schedule_steps - config.warmup_steps,
         alpha=config.final_learning_rate_fraction,
     )
-    learning_rate = optax.join_schedules(
+    return optax.join_schedules(
         schedules=(warmup, decay),
         boundaries=(config.warmup_steps,),
     )
+
+
+def build_optimizer(model: nnx.Module, config: OptimizerConfig):
+    """Builds an Optax transform and its audited route table."""
+    parameters = nnx.state(model, nnx.Param)
+    routes = classify_parameters(parameters)
+    clipping = optax.clip_by_global_norm(config.gradient_clip_norm)
+    learning_rate = build_learning_rate_schedule(config)
     if config.name == "adamw":
         routes = [replace(route, optimizer="adamw") for route in routes]
         transform = optax.chain(
