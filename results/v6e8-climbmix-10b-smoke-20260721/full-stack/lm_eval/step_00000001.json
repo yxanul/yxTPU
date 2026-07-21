@@ -1,0 +1,713 @@
+{
+  "config": {
+    "batch_size": null,
+    "batch_sizes": [],
+    "bootstrap_iters": 0,
+    "device": null,
+    "fewshot_seed": 42,
+    "gen_kwargs": null,
+    "limit": 2,
+    "model": "JaxHarnessLM",
+    "model_args": null,
+    "numpy_seed": 42,
+    "random_seed": 42,
+    "torch_seed": 42,
+    "use_cache": null
+  },
+  "configs": {
+    "arc_challenge": {
+      "dataset_name": "ARC-Challenge",
+      "dataset_path": "allenai/ai2_arc",
+      "description": "",
+      "doc_to_choice": "{{choices.text}}",
+      "doc_to_decontamination_query": "Question: {{question}}\nAnswer:",
+      "doc_to_target": "{{choices.label.index(answerKey)}}",
+      "doc_to_text": "Question: {{question}}\nAnswer:",
+      "fewshot_config": {
+        "doc_to_choice": "{{choices.text}}",
+        "doc_to_target": "{{choices.label.index(answerKey)}}",
+        "doc_to_text": "Question: {{question}}\nAnswer:",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/arc/arc_challenge.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc_norm"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "arc_challenge",
+      "test_split": "test",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "arc_easy": {
+      "dataset_name": "ARC-Easy",
+      "dataset_path": "allenai/ai2_arc",
+      "description": "",
+      "doc_to_choice": "{{choices.text}}",
+      "doc_to_decontamination_query": "Question: {{question}}\nAnswer:",
+      "doc_to_target": "{{choices.label.index(answerKey)}}",
+      "doc_to_text": "Question: {{question}}\nAnswer:",
+      "fewshot_config": {
+        "doc_to_choice": "{{choices.text}}",
+        "doc_to_target": "{{choices.label.index(answerKey)}}",
+        "doc_to_text": "Question: {{question}}\nAnswer:",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/arc/arc_easy.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc_norm"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "arc_easy",
+      "test_split": "test",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "boolq": {
+      "dataset_name": "boolq",
+      "dataset_path": "aps/super_glue",
+      "description": "",
+      "doc_to_choice": [
+        "no",
+        "yes"
+      ],
+      "doc_to_decontamination_query": "passage",
+      "doc_to_target": "label",
+      "doc_to_text": "{{passage}}\nQuestion: {{question}}?\nAnswer:",
+      "fewshot_config": {
+        "doc_to_choice": [
+          "no",
+          "yes"
+        ],
+        "doc_to_target": "label",
+        "doc_to_text": "{{passage}}\nQuestion: {{question}}?\nAnswer:",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/super_glue/boolq/default.yaml",
+        "version": 2.0
+      },
+      "metric_list": [
+        {
+          "metric": "acc"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "boolq",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "commonsense_qa": {
+      "dataset_path": "tau/commonsense_qa",
+      "description": "",
+      "doc_to_choice": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E"
+      ],
+      "doc_to_target": "answerKey",
+      "doc_to_text": "Question: {{ question.strip() }}\nA. {{choices['text'][0]}}\nB. {{choices['text'][1]}}\nC. {{choices['text'][2]}}\nD. {{choices['text'][3]}}\nE. {{choices['text'][4]}}\nAnswer:",
+      "fewshot_config": {
+        "doc_to_choice": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E"
+        ],
+        "doc_to_target": "answerKey",
+        "doc_to_text": "Question: {{ question.strip() }}\nA. {{choices['text'][0]}}\nB. {{choices['text'][1]}}\nC. {{choices['text'][2]}}\nD. {{choices['text'][3]}}\nE. {{choices['text'][4]}}\nAnswer:",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/commonsense_qa/default.yaml"
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": false,
+      "target_delimiter": " ",
+      "task": "commonsense_qa",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "copa": {
+      "dataset_name": "copa",
+      "dataset_path": "aps/super_glue",
+      "description": "",
+      "doc_to_choice": "def doc_to_choice(doc):\n    return [\" \" + convert_choice(doc[\"choice1\"]), \" \" + convert_choice(doc[\"choice2\"])]\n",
+      "doc_to_target": "def doc_to_target(doc):\n    correct_choice = doc[\"choice1\"] if doc[\"label\"] == 0 else doc[\"choice2\"]\n    # Connect the sentences\n    return \" \" + convert_choice(correct_choice)\n",
+      "doc_to_text": "def doc_to_text(doc):\n    # Drop the period\n    connector = {\n        \"cause\": \"because\",\n        \"effect\": \"therefore\",\n    }[doc[\"question\"]]\n    return doc[\"premise\"].strip()[:-1] + f\" {connector}\"\n",
+      "fewshot_config": {
+        "doc_to_choice": {
+          "callable": "lm_eval.tasks.super_glue.copa.utils.doc_to_choice"
+        },
+        "doc_to_target": {
+          "callable": "lm_eval.tasks.super_glue.copa.utils.doc_to_target"
+        },
+        "doc_to_text": {
+          "callable": "lm_eval.tasks.super_glue.copa.utils.doc_to_text"
+        },
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/super_glue/copa/default.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "metric": "acc"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": false,
+      "target_delimiter": " ",
+      "task": "copa",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "hellaswag": {
+      "dataset_path": "Rowan/hellaswag",
+      "description": "",
+      "doc_to_choice": "choices",
+      "doc_to_target": "{{label}}",
+      "doc_to_text": "{{query}}",
+      "fewshot_config": {
+        "doc_to_choice": "choices",
+        "doc_to_target": "{{label}}",
+        "doc_to_text": "{{query}}",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": {
+          "callable": "lm_eval.tasks.hellaswag.utils.process_docs"
+        },
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/hellaswag/hellaswag.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc_norm"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "process_docs": "def process_docs(dataset: datasets.Dataset) -> datasets.Dataset:\n    def _process_doc(doc):\n        ctx = doc[\"ctx_a\"] + \" \" + doc[\"ctx_b\"].capitalize()\n        out_doc = {\n            \"query\": preprocess(doc[\"activity_label\"] + \": \" + ctx),\n            \"choices\": [preprocess(ending) for ending in doc[\"endings\"]],\n            \"gold\": int(doc[\"label\"]),\n        }\n        return out_doc\n\n    return dataset.map(_process_doc)\n",
+      "repeats": 1,
+      "should_decontaminate": false,
+      "target_delimiter": " ",
+      "task": "hellaswag",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "lambada_openai": {
+      "dataset_name": "default",
+      "dataset_path": "EleutherAI/lambada_openai",
+      "description": "",
+      "doc_to_decontamination_query": "{{text}}",
+      "doc_to_target": "{{' '+text.split(' ')[-1]}}",
+      "doc_to_text": "{{text.split(' ')[:-1]|join(' ')}}",
+      "fewshot_config": {
+        "doc_to_choice": null,
+        "doc_to_target": "{{' '+text.split(' ')[-1]}}",
+        "doc_to_text": "{{text.split(' ')[:-1]|join(' ')}}",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/lambada/lambada_openai.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "perplexity",
+          "higher_is_better": false,
+          "metric": "perplexity"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "loglikelihood",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "lambada_openai",
+      "test_split": "test",
+      "unsafe_code": false
+    },
+    "openbookqa": {
+      "dataset_name": "main",
+      "dataset_path": "allenai/openbookqa",
+      "description": "",
+      "doc_to_choice": "{{choices.text}}",
+      "doc_to_decontamination_query": "question_stem",
+      "doc_to_target": "{{choices.label.index(answerKey.lstrip())}}",
+      "doc_to_text": "question_stem",
+      "fewshot_config": {
+        "doc_to_choice": "{{choices.text}}",
+        "doc_to_target": "{{choices.label.index(answerKey.lstrip())}}",
+        "doc_to_text": "question_stem",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/openbookqa/openbookqa.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc_norm"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "openbookqa",
+      "test_split": "test",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "piqa": {
+      "dataset_path": "baber/piqa",
+      "description": "",
+      "doc_to_choice": "{{[sol1, sol2]}}",
+      "doc_to_decontamination_query": "goal",
+      "doc_to_target": "label",
+      "doc_to_text": "Question: {{goal}}\nAnswer:",
+      "fewshot_config": {
+        "doc_to_choice": "{{[sol1, sol2]}}",
+        "doc_to_target": "label",
+        "doc_to_text": "Question: {{goal}}\nAnswer:",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/piqa/piqa.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc_norm"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "piqa",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    },
+    "sciq": {
+      "dataset_path": "allenai/sciq",
+      "description": "",
+      "doc_to_choice": "{{[distractor1, distractor2, distractor3, correct_answer]}}",
+      "doc_to_decontamination_query": "{{support}} {{question}}",
+      "doc_to_target": 3,
+      "doc_to_text": "{{support.lstrip()}}\nQuestion: {{question}}\nAnswer:",
+      "fewshot_config": {
+        "doc_to_choice": "{{[distractor1, distractor2, distractor3, correct_answer]}}",
+        "doc_to_target": 3,
+        "doc_to_text": "{{support.lstrip()}}\nQuestion: {{question}}\nAnswer:",
+        "fewshot_delimiter": "\n\n",
+        "fewshot_indices": null,
+        "gen_prefix": null,
+        "process_docs": null,
+        "sampler": "default",
+        "samples": null,
+        "split": null,
+        "target_delimiter": " "
+      },
+      "fewshot_delimiter": "\n\n",
+      "metadata": {
+        "config_source": "/home/a1111/yxTPU-git/pretraining/.venv/lib/python3.12/site-packages/lm_eval/tasks/sciq/sciq.yaml",
+        "version": 1.0
+      },
+      "metric_list": [
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc"
+        },
+        {
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "metric": "acc_norm"
+        }
+      ],
+      "num_fewshot": 0,
+      "output_type": "multiple_choice",
+      "repeats": 1,
+      "should_decontaminate": true,
+      "target_delimiter": " ",
+      "task": "sciq",
+      "test_split": "test",
+      "training_split": "train",
+      "unsafe_code": false,
+      "validation_split": "validation"
+    }
+  },
+  "date": 1784598453.583915,
+  "eot_token_id": 50256,
+  "git_hash": "05d4810",
+  "group_subtasks": {},
+  "higher_is_better": {
+    "arc_challenge": {
+      "acc": true,
+      "acc_norm": true
+    },
+    "arc_easy": {
+      "acc": true,
+      "acc_norm": true
+    },
+    "boolq": {
+      "acc": true
+    },
+    "commonsense_qa": {
+      "acc": true
+    },
+    "copa": {
+      "acc": true
+    },
+    "hellaswag": {
+      "acc": true,
+      "acc_norm": true
+    },
+    "lambada_openai": {
+      "acc": true,
+      "perplexity": false
+    },
+    "openbookqa": {
+      "acc": true,
+      "acc_norm": true
+    },
+    "piqa": {
+      "acc": true,
+      "acc_norm": true
+    },
+    "sciq": {
+      "acc": true,
+      "acc_norm": true
+    }
+  },
+  "lm_eval_version": "0.4.12",
+  "max_length": 2048,
+  "n-samples": {
+    "arc_challenge": {
+      "effective": 2,
+      "original": 1172
+    },
+    "arc_easy": {
+      "effective": 2,
+      "original": 2376
+    },
+    "boolq": {
+      "effective": 2,
+      "original": 3270
+    },
+    "commonsense_qa": {
+      "effective": 2,
+      "original": 1221
+    },
+    "copa": {
+      "effective": 2,
+      "original": 100
+    },
+    "hellaswag": {
+      "effective": 2,
+      "original": 10042
+    },
+    "lambada_openai": {
+      "effective": 2,
+      "original": 5153
+    },
+    "openbookqa": {
+      "effective": 2,
+      "original": 500
+    },
+    "piqa": {
+      "effective": 2,
+      "original": 1838
+    },
+    "sciq": {
+      "effective": 2,
+      "original": 1000
+    }
+  },
+  "n-shot": {
+    "arc_challenge": 0,
+    "arc_easy": 0,
+    "boolq": 0,
+    "commonsense_qa": 0,
+    "copa": 0,
+    "hellaswag": 0,
+    "lambada_openai": 0,
+    "openbookqa": 0,
+    "piqa": 0,
+    "sciq": 0
+  },
+  "pretty_env_info": "N/A (torch not installed)",
+  "results": {
+    "arc_challenge": {
+      "acc,none": 0.0,
+      "acc_norm,none": 0.0,
+      "acc_norm_stderr,none": "N/A",
+      "acc_stderr,none": "N/A",
+      "alias": "arc_challenge",
+      "name": "arc_challenge",
+      "sample_len": 2
+    },
+    "arc_easy": {
+      "acc,none": 0.0,
+      "acc_norm,none": 0.5,
+      "acc_norm_stderr,none": "N/A",
+      "acc_stderr,none": "N/A",
+      "alias": "arc_easy",
+      "name": "arc_easy",
+      "sample_len": 2
+    },
+    "boolq": {
+      "acc,none": 0.0,
+      "acc_stderr,none": "N/A",
+      "alias": "boolq",
+      "name": "boolq",
+      "sample_len": 2
+    },
+    "commonsense_qa": {
+      "acc,none": 0.0,
+      "acc_stderr,none": "N/A",
+      "alias": "commonsense_qa",
+      "name": "commonsense_qa",
+      "sample_len": 2
+    },
+    "copa": {
+      "acc,none": 0.5,
+      "acc_stderr,none": "N/A",
+      "alias": "copa",
+      "name": "copa",
+      "sample_len": 2
+    },
+    "hellaswag": {
+      "acc,none": 0.0,
+      "acc_norm,none": 0.5,
+      "acc_norm_stderr,none": "N/A",
+      "acc_stderr,none": "N/A",
+      "alias": "hellaswag",
+      "name": "hellaswag",
+      "sample_len": 2
+    },
+    "lambada_openai": {
+      "acc,none": 0.0,
+      "acc_stderr,none": "N/A",
+      "alias": "lambada_openai",
+      "name": "lambada_openai",
+      "perplexity,none": 52748.01809015368,
+      "perplexity_stderr,none": "N/A",
+      "sample_len": 2
+    },
+    "openbookqa": {
+      "acc,none": 0.0,
+      "acc_norm,none": 0.0,
+      "acc_norm_stderr,none": "N/A",
+      "acc_stderr,none": "N/A",
+      "alias": "openbookqa",
+      "name": "openbookqa",
+      "sample_len": 2
+    },
+    "piqa": {
+      "acc,none": 0.0,
+      "acc_norm,none": 0.0,
+      "acc_norm_stderr,none": "N/A",
+      "acc_stderr,none": "N/A",
+      "alias": "piqa",
+      "name": "piqa",
+      "sample_len": 2
+    },
+    "sciq": {
+      "acc,none": 0.0,
+      "acc_norm,none": 0.0,
+      "acc_norm_stderr,none": "N/A",
+      "acc_stderr,none": "N/A",
+      "alias": "sciq",
+      "name": "sciq",
+      "sample_len": 2
+    }
+  },
+  "tokenizer_bos_token": [
+    "<|endoftext|>",
+    "50256"
+  ],
+  "tokenizer_eos_token": [
+    "<|endoftext|>",
+    "50256"
+  ],
+  "tokenizer_pad_token": [
+    "<|endoftext|>",
+    "50256"
+  ],
+  "transformers_version": "5.14.1",
+  "upper_git_hash": "05d4810e5e10b4f33f5de03a4690af352eb57897",
+  "versions": {
+    "arc_challenge": 1.0,
+    "arc_easy": 1.0,
+    "boolq": 2.0,
+    "commonsense_qa": "Yaml",
+    "copa": 1.0,
+    "hellaswag": 1.0,
+    "lambada_openai": 1.0,
+    "openbookqa": 1.0,
+    "piqa": 1.0,
+    "sciq": 1.0
+  }
+}
