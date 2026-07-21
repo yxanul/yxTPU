@@ -17,10 +17,8 @@ class MetricsWriter:
         self.run_dir = run_dir
         self.path = run_dir / "metrics.jsonl"
         self.handle = self.path.open("a", encoding="utf-8")
-        self.records: list[dict[str, Any]] = []
 
     def write(self, record: dict[str, Any]) -> None:
-        self.records.append(record)
         self.handle.write(json.dumps(record, sort_keys=True) + "\n")
         self.handle.flush()
 
@@ -30,6 +28,17 @@ class MetricsWriter:
             json.dumps(summary, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+
+
+class NullMetricsWriter:
+    """Metrics sink for non-primary processes: metrics are replicated, so one
+    written copy is the record and the rest would be per-host duplicates."""
+
+    def write(self, record: dict[str, Any]) -> None:
+        del record
+
+    def close(self, summary: dict[str, Any]) -> None:
+        del summary
 
 
 def _flatten_metrics(value: dict[str, Any], *, prefix: str = "") -> dict[str, Any]:

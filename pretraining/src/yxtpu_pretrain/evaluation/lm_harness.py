@@ -67,7 +67,10 @@ class JaxHarnessLM(TemplateLM):
     def __init__(self, config: ResolvedConfig, model, mesh, logical_axis_rules):
         super().__init__()
         if jax.process_count() != 1:
-            raise ValueError("the in-process lm-eval adapter is currently single-host only")
+            raise ValueError(
+                "the in-process lm-eval adapter is single-host only; set "
+                "experiment.harness_eval.enabled=false on multi-host slices"
+            )
         if config.data.tokenizer is None:
             raise ValueError("lm-eval requires data.tokenizer")
         self.config = config

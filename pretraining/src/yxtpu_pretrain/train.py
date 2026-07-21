@@ -33,7 +33,7 @@ from yxtpu_pretrain.runtime.checkpoints import CheckpointIO
 from yxtpu_pretrain.runtime.data import create_data_iterator
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
-from yxtpu_pretrain.runtime.metrics import MetricsWriter, WandbTracker
+from yxtpu_pretrain.runtime.metrics import MetricsWriter, NullMetricsWriter, WandbTracker
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 
@@ -370,24 +370,31 @@ def run(
     del benchmark_only
     if config.hardware.multi_host and not jax.distributed.is_initialized():
         jax.distributed.initialize()
-    if config.data.streaming and jax.process_count() > 1:
-        # Each process would open its own reshuffled copy of the same stream
-        # and train on overlapping documents. Sharding the stream by process
-        # has to exist before streaming data can scale past one host.
-        raise ValueError("streaming data is not sharded across processes yet")
     mesh = create_mesh(config.hardware)
     logical_axis_rules = make_leaf_config(config).logical_axis_rules
     train_process_batch, eval_process_batch = _process_batch_sizes(
         config,
         local_device_count=jax.local_device_count(),
     )
-    process_data = config.data.model_copy(
-        update={"shuffle_seed": config.data.shuffle_seed + 1_000_003 * jax.process_index()}
+    # The streaming source shards one identically-shuffled stream disjointly by
+    # process, so it must keep the shared seed; the offline and synthetic
+    # sources instead decorrelate processes through a per-process seed offset.
+    process_data = (
+        config.data
+        if config.data.streaming
+        else config.data.model_copy(
+            update={
+                "shuffle_seed": config.data.shuffle_seed
+                + 1_000_003 * jax.process_index()
+            }
+        )
     )
     data_iterator = create_data_iterator(
         process_data,
         global_batch_size=train_process_batch,
         vocab_size=config.model.vocab_size,
+        process_index=jax.process_index(),
+        process_count=jax.process_count(),
     )
     eval_iterator = (
         create_data_iterator(
@@ -395,6 +402,8 @@ def run(
             global_batch_size=eval_process_batch,
             vocab_size=config.model.vocab_size,
             validation=config.data.streaming,
+            process_index=jax.process_index(),
+            process_count=jax.process_count(),
         )
         if config.data.eval_interval
         else None
@@ -405,32 +414,38 @@ def run(
         optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
         state = TrainStateNNX(model, optimizer)
 
+    is_primary = jax.process_index() == 0
     run_name = _run_name(config)
     run_dir = Path(config.experiment.run_dir).expanduser().resolve() / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "resolved_config.yml").write_text(config.to_yaml(), encoding="utf-8")
-    (run_dir / "optimizer_routes.json").write_text(
-        json.dumps(
-            [
-                {
-                    **route.__dict__,
-                    "path": list(route.path),
-                    "role": str(route.role),
-                    "shape": list(route.shape),
-                }
-                for route in routes
-            ],
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
     data_metadata = dict(getattr(data_iterator, "metadata", {}))
-    (run_dir / "data_metadata.json").write_text(
-        json.dumps(data_metadata, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    metrics_writer = MetricsWriter(run_dir)
+    if is_primary:
+        (run_dir / "resolved_config.yml").write_text(config.to_yaml(), encoding="utf-8")
+        (run_dir / "optimizer_routes.json").write_text(
+            json.dumps(
+                [
+                    {
+                        **route.__dict__,
+                        "path": list(route.path),
+                        "role": str(route.role),
+                        "shape": list(route.shape),
+                    }
+                    for route in routes
+                ],
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (run_dir / "data_metadata.json").write_text(
+            json.dumps(data_metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    metrics_writer = MetricsWriter(run_dir) if is_primary else NullMetricsWriter()
+
+    def emit(payload) -> None:
+        if is_primary:
+            print(json.dumps(payload, sort_keys=True), flush=True)
     checkpoint_io = CheckpointIO(
         config,
         run_name=f"{config.model.name}-{config.optimizer.name}-{config.experiment.name}",
@@ -465,7 +480,7 @@ def run(
         from yxtpu_pretrain.evaluation import JaxHarnessLM
 
         harness_adapter = JaxHarnessLM(config, state.model, mesh, logical_axis_rules)
-    print(json.dumps({"compiled_memory": compiled_memory}, sort_keys=True), flush=True)
+    emit({"compiled_memory": compiled_memory})
     metrics_writer.write({"compiled_memory": compiled_memory})
     throughputs = []
     losses = []
@@ -513,7 +528,7 @@ def run(
                     "grad_norm": grad_norm,
                 }
                 metrics_writer.write(failure)
-                print(json.dumps(failure, sort_keys=True), flush=True)
+                emit(failure)
                 raise FloatingPointError(
                     f"non-finite training metrics at step {step}: "
                     f"loss={loss}, grad_norm={grad_norm}"
@@ -540,7 +555,7 @@ def run(
                     "clipped_heads": host_metrics["muonclip_clipped_heads"].tolist(),
                 }
             metrics_writer.write(record)
-            print(json.dumps(record, sort_keys=True), flush=True)
+            emit(record)
             if step % config.experiment.log_interval == 0:
                 tracker.log(
                     {
@@ -606,7 +621,7 @@ def run(
                     "evaluation_fixed_batches": bool(config.data.eval_fixed_batches),
                 }
                 metrics_writer.write(evaluation_record)
-                print(json.dumps(evaluation_record, sort_keys=True), flush=True)
+                emit(evaluation_record)
                 tracker.log(
                     {
                         "eval": {
@@ -632,7 +647,7 @@ def run(
                     host_diagnostics = _host_diagnostics(diagnostic_metrics)
                     diagnostics_record = {"step": step, "diagnostics": host_diagnostics}
                     metrics_writer.write(diagnostics_record)
-                    print(json.dumps(diagnostics_record, sort_keys=True), flush=True)
+                    emit(diagnostics_record)
                     tracker.log(
                         {"diagnostics": host_diagnostics},
                         step=step,
@@ -657,7 +672,7 @@ def run(
                     "artifact": str(harness_path),
                 }
                 metrics_writer.write(harness_record)
-                print(json.dumps(harness_record, sort_keys=True), flush=True)
+                emit(harness_record)
                 tracker.log(
                     {"lm_eval": harness_metrics},
                     step=step,
@@ -723,5 +738,6 @@ def run(
     }
     metrics_writer.close(summary)
     tracker.finish(summary=summary)
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    if is_primary:
+        print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
