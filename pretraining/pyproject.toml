@@ -17,6 +17,7 @@ dependencies = [
   "maxtext[tpu]",
   "pydantic>=2.13.4",
   "pyyaml>=6.0.3",
+  "tokamax==0.0.12",
 ]
 
 [project.optional-dependencies]

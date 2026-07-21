@@ -34,4 +34,5 @@ attention:
   block_q_dkv: 2048
   fused_qkv: true
   rope: false
-
+loss:
+  implementation: standard

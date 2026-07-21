@@ -18,6 +18,7 @@ from maxtext.common.train_state_nnx import TrainStateNNX
 from maxtext.utils import max_utils
 
 from yxtpu_pretrain.config import ResolvedConfig
+from yxtpu_pretrain.losses import data_parallel_linear_cross_entropy
 from yxtpu_pretrain.model import HybridLanguageModel, attention_logit_intermediates
 from yxtpu_pretrain.optimizers import apply_gqa_muonclip, build_optimizer
 from yxtpu_pretrain.runtime.checkpoints import CheckpointIO
@@ -29,16 +30,32 @@ from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 
 def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
-    logits = model(
+    hidden_states = model.hidden_states(
         batch["input_ids"],
         decoder_segment_ids=batch["segment_ids"],
         decoder_positions=batch["positions"],
         record_max_logits=record_max_logits,
     )
-    targets = jax.nn.one_hot(batch["labels"], logits.shape[-1], dtype=jnp.float32)
-    cross_entropy, _ = max_utils.cross_entropy_with_logits(logits, targets, z_loss=0.0)
     weights = batch["loss_mask"].astype(jnp.float32)
-    loss = jnp.sum(cross_entropy * weights) / jnp.maximum(jnp.sum(weights), 1.0)
+    if model.config.model.loss.implementation == "tokamax_fused":
+        hidden_flat = hidden_states.reshape((-1, hidden_states.shape[-1]))
+        labels_flat = batch["labels"].reshape((-1,))
+        weights_flat = weights.reshape((-1,))
+        output_kernel = model.output_projection_kernel(hidden_states.dtype)
+        loss, token_count = data_parallel_linear_cross_entropy(
+            hidden_flat,
+            labels_flat,
+            weights_flat,
+            output_kernel,
+            mesh=model.mesh,
+            implementation="mosaic_tpu",
+        )
+    else:
+        logits = model.project_logits(hidden_states)
+        targets = jax.nn.one_hot(batch["labels"], logits.shape[-1], dtype=jnp.float32)
+        cross_entropy, _ = max_utils.cross_entropy_with_logits(logits, targets, z_loss=0.0)
+        loss = jnp.sum(cross_entropy * weights) / jnp.maximum(jnp.sum(weights), 1.0)
+        token_count = jnp.sum(weights)
     logits_max = (
         attention_logit_intermediates(model)
         if record_max_logits
@@ -47,7 +64,7 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
             dtype=jnp.float32,
         )
     )
-    return loss, {"max_logits": logits_max, "tokens": jnp.sum(weights)}
+    return loss, {"max_logits": logits_max, "tokens": token_count}
 
 
 def _make_train_step(config: ResolvedConfig):
@@ -166,6 +183,28 @@ def _memory_summary() -> dict[str, int | float | None]:
     return {"peak_bytes_in_use": peak}
 
 
+def _compiled_memory_summary(compiled) -> dict[str, int | None]:
+    """Returns XLA's per-executable buffer assignment, including aliases."""
+    stats = compiled.memory_analysis()
+    if stats is None:
+        return {"estimated_peak_bytes": None}
+    fields = (
+        "argument_size_in_bytes",
+        "output_size_in_bytes",
+        "alias_size_in_bytes",
+        "temp_size_in_bytes",
+        "generated_code_size_in_bytes",
+    )
+    values = {field: int(getattr(stats, field, 0) or 0) for field in fields}
+    values["estimated_peak_bytes"] = (
+        values["argument_size_in_bytes"]
+        + values["output_size_in_bytes"]
+        + values["temp_size_in_bytes"]
+        - values["alias_size_in_bytes"]
+    )
+    return values
+
+
 def _run_name(config: ResolvedConfig) -> str:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{timestamp}-{config.model.name}-{config.optimizer.name}-{config.experiment.name}"
@@ -260,6 +299,11 @@ def run(
         )
         train_step = _make_train_step(config)
         eval_step = _make_eval_step()
+        first_batch = _device_batch(next(data_iterator), mesh)
+        compiled_train_step = train_step.lower(state, first_batch).compile()
+        compiled_memory = _compiled_memory_summary(compiled_train_step)
+    print(json.dumps({"compiled_memory": compiled_memory}, sort_keys=True), flush=True)
+    metrics_writer.write({"compiled_memory": compiled_memory})
     throughputs = []
     losses = []
     trace_active = False
@@ -268,10 +312,14 @@ def run(
             if profile and step == min(config.experiment.profile_steps):
                 jax.profiler.start_trace(str(run_dir / "profile"))
                 trace_active = True
-            batch = _device_batch(next(data_iterator), mesh)
+            batch = (
+                first_batch
+                if step == start_step + 1
+                else _device_batch(next(data_iterator), mesh)
+            )
             started = time.perf_counter()
             with logical_mesh_context(mesh, logical_axis_rules):
-                metrics = train_step(state, batch)
+                metrics = compiled_train_step(state, batch)
                 jax.block_until_ready(metrics)
             elapsed = time.perf_counter() - started
             tokens = float(metrics["tokens"])
@@ -336,6 +384,7 @@ def run(
         "mean_tokens_per_second": statistics.mean(throughputs) if throughputs else None,
         "max_tokens_per_second": max(throughputs) if throughputs else None,
         "memory": _memory_summary(),
+        "compiled_memory": compiled_memory,
         "jax_process_count": jax.process_count(),
         "jax_device_count": jax.device_count(),
         "microbatch_size_per_device": config.data.per_device_batch_size,

@@ -299,7 +299,7 @@ class HybridLanguageModel(nnx.Module):
         nnx.update(self.cycles, scanned_state)
         return hidden_states
 
-    def __call__(
+    def hidden_states(
         self,
         token_ids,
         *,
@@ -325,7 +325,31 @@ class HybridLanguageModel(nnx.Module):
             self.final_norm(hidden_states),
             ACTIVATION_LOGICAL_AXES,
         )
+        return hidden_states
+
+    def project_logits(self, hidden_states):
+        """Materializes FP32 logits for evaluation and the reference loss."""
         return self.logits(hidden_states).astype(jnp.float32)
+
+    def output_projection_kernel(self, dtype):
+        """Returns the FP32 master LM head converted to its MXU traffic dtype."""
+        return jnp.asarray(self.logits.kernel[...], dtype=dtype)
+
+    def __call__(
+        self,
+        token_ids,
+        *,
+        decoder_segment_ids=None,
+        decoder_positions=None,
+        record_max_logits: bool = False,
+    ):
+        hidden_states = self.hidden_states(
+            token_ids,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            record_max_logits=record_max_logits,
+        )
+        return self.project_logits(hidden_states)
 
 
 def count_parameters(model: nnx.Module) -> int:

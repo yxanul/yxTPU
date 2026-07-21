@@ -58,6 +58,10 @@ class AttentionConfig(StrictModel):
         return self
 
 
+class LossConfig(StrictModel):
+    implementation: Literal["standard", "tokamax_fused"] = "standard"
+
+
 class ModelConfig(StrictModel):
     name: str
     vocab_size: int = 32768
@@ -79,6 +83,7 @@ class ModelConfig(StrictModel):
     dropout_rate: float = 0.0
     kda: KDAConfig = Field(default_factory=KDAConfig)
     attention: AttentionConfig = Field(default_factory=AttentionConfig)
+    loss: LossConfig = Field(default_factory=LossConfig)
 
     @model_validator(mode="after")
     def validate_layout(self) -> ModelConfig:
@@ -219,6 +224,14 @@ class ResolvedConfig(StrictModel):
     def apply_profile_overrides(self) -> ResolvedConfig:
         # Overrides are applied before validation by load_config. They remain in the
         # resolved document as provenance, rather than being silently discarded.
+        if self.model.loss.implementation == "tokamax_fused":
+            mesh = self.hardware.mesh
+            if mesh.fsdp != 1 or mesh.tensor != 1 or mesh.sequence != 1:
+                raise ValueError(
+                    "tokamax_fused currently requires pure data parallelism "
+                    "(fsdp=tensor=sequence=1); vocabulary parallelism needs explicit "
+                    "global softmax collectives"
+                )
         return self
 
     def as_dict(self) -> dict[str, Any]:
