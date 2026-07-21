@@ -14,11 +14,16 @@
 
 """Production fused TPU Pallas kernel for Kimi Delta Attention.
 
-The production path assigns one ordered chunk stream to each ``(batch, head)``
-pair. A ``K x V`` FP32 fast-weight state remains in VMEM while the ordered grid
-walks through the sequence. Each invocation consumes one BF16 Q/K/V chunk,
-recomputes compact intra-chunk quantities, emits BF16 output, and stores only
-the FP32 state after that chunk for a future custom backward.
+The production path assigns one ordered chunk stream to each batch element,
+advancing every head at once. A ``K x V`` FP32 fast-weight state per head
+remains in VMEM while the ordered grid walks through the sequence. Each
+invocation consumes one raw BF16 QKV chunk in the projection's natural
+``[B, T, 3, H, D]`` layout and owns the whole mixer from there: the short
+causal depthwise convolution (whose raw-history tail rides along in VMEM
+scratch exactly like the state), SiLU, Q/K normalization, and the chunked KDA
+recurrence, emitting BF16 output in ``[B, T, H, D]`` and storing only the FP32
+state after each chunk for the custom backward. The XLA graph therefore never
+materializes a convolved, activated, split, or head-transposed QKV copy.
 
 This module deliberately fixes the validated precision and solver policy:
 one-pass BF16-operand matmuls for ordinary KDA work and a full-pass FP32
@@ -100,14 +105,6 @@ _PAIRWISE_ROW_BLOCK_SIZE = 8
 # evenly and therefore tolerates twice the row block at equal worst-case
 # exponent.
 _PAIRWISE_ANCHOR_MIDPOINT = False
-
-# Independent ``(batch, head)`` streams advanced by a single Pallas program.
-# The chunk axis carries the only real sequential dependency, so batching
-# streams into one program amortizes per-iteration grid and DMA cost over
-# proportionally more work. Mosaic's ``tpu.matmul`` accepts a single batch
-# dimension, so batch and head are merged into one stream axis rather than
-# kept as two leading block axes.
-_DEFAULT_STREAMS_PER_PROGRAM = 8
 
 # MXU precision for the in-kernel matmuls. FP32 operands on TPU are evaluated
 # by decomposing into BF16 passes: HIGHEST is six passes, HIGH is three (which
@@ -279,6 +276,36 @@ def _l2_normalize_backward(
 def _pairwise_anchor_row(row_block_size: int) -> int:
   """Row within a pairwise block whose decay both operands are rescaled by."""
   return row_block_size // 2 if _PAIRWISE_ANCHOR_MIDPOINT else -1
+
+
+def _silu(values: jax.Array) -> jax.Array:
+  sigmoid = jax.nn.sigmoid(values)
+  return values * sigmoid
+
+
+def _silu_grad(values: jax.Array) -> jax.Array:
+  sigmoid = jax.nn.sigmoid(values)
+  return sigmoid * (1.0 + values * (1.0 - sigmoid))
+
+
+def _causal_conv_chunk(
+    padded: jax.Array,
+    weight: jax.Array,
+    chunk_size: int,
+) -> jax.Array:
+  """Applies the short causal depthwise mixer to one padded chunk.
+
+  ``padded`` is ``[chunk + width - 1, 3, H, D]`` with the previous chunk's
+  raw tail (or zeros) prepended; ``weight`` is ``[width, 3, H, D]``. Tap ``k``
+  is a static slice, so the whole convolution is ``width`` elementwise
+  multiply-adds on values already resident in VMEM.
+  """
+  width = weight.shape[0]
+  output = None
+  for tap in range(width):
+    term = padded[tap : tap + chunk_size] * weight[tap]
+    output = term if output is None else output + term
+  return output
 
 
 def _decayed_pairwise(
@@ -703,54 +730,63 @@ def _solve_transposed_unit_lower_triangular_doubling(
 
 
 def _kda_fused_forward_kernel(
-    query_ref,
-    key_ref,
-    value_ref,
+    qkv_ref,
+    conv_weight_ref,
     log_decay_ref,
     beta_ref,
     initial_state_ref,
     output_ref,
     state_after_ref,
     state_scratch_ref,
+    conv_tail_ref,
     *,
     chunk_size: int,
     key_dim: int,
     value_dim: int,
+    conv_width: int,
     use_qk_norm: bool,
     solve_method: str,
     profile_stage: str,
-    chunk_axis: int = 2,
+    chunk_axis: int = 1,
 ):
-  """Consumes one chunk of every in-block head while retaining the
-  fast-weight state in VMEM.
+  """Consumes one raw-QKV chunk of every head of one batch element.
 
-  Every reference carries a leading head axis so that one Pallas program can
-  advance several ``(batch, head)`` streams at once. The single-stream layout
-  is the same code path with a head axis of one.
+  The kernel owns the whole QKV mixer: the short causal depthwise
+  convolution, SiLU, Q/K normalization, and the chunked KDA recurrence. The
+  convolution needs ``width - 1`` tokens of raw history, which the ordered
+  chunk grid carries in a VMEM scratch exactly like the fast-weight state, so
+  the XLA graph never materializes a convolved, activated, split, or
+  head-transposed copy of the QKV tensor.
   """
   chunk_index = pl.program_id(chunk_axis)
-  query = query_ref[0]
-  key = key_ref[0]
-  value = value_ref[0].astype(jnp.float32)
-  log_decay = log_decay_ref[0].astype(jnp.float32)
-  beta = beta_ref[0][..., 0].astype(jnp.float32)
+  raw_qkv = qkv_ref[0].astype(jnp.float32)
+  conv_weight = conv_weight_ref[...].astype(jnp.float32)
+  log_decay = jnp.swapaxes(log_decay_ref[0].astype(jnp.float32), 0, 1)
+  beta = jnp.swapaxes(beta_ref[0][..., 0].astype(jnp.float32), 0, 1)
 
   @pl.when(chunk_index == 0)
   def _initialize_state():
     state_scratch_ref[...] = initial_state_ref[0].astype(jnp.float32)
+    conv_tail_ref[...] = jnp.zeros_like(conv_tail_ref)
+
+  padded = jnp.concatenate((conv_tail_ref[...], raw_qkv), axis=0)
+  conv_tail_ref[...] = raw_qkv[chunk_size - (conv_width - 1) :]
+  activated = _silu(_causal_conv_chunk(padded, conv_weight, chunk_size))
+  query = jnp.swapaxes(activated[:, 0], 0, 1)
+  key = jnp.swapaxes(activated[:, 1], 0, 1)
+  value = jnp.swapaxes(activated[:, 2], 0, 1)
 
   if use_qk_norm:
     query = _l2_normalize(query, scale=1.0 / math.sqrt(key_dim))
     key = _l2_normalize(key)
   else:
-    query = query.astype(jnp.float32) * (1.0 / math.sqrt(key_dim))
-    key = key.astype(jnp.float32)
+    query = query * (1.0 / math.sqrt(key_dim))
 
   cumulative_decay = _inclusive_cumsum(log_decay)
   if profile_stage == "preprocess":
     diagnostic = query + key + 1e-3 * cumulative_decay
-    output_ref[0] = diagnostic.astype(output_ref.dtype)
-    state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
+    output_ref[0] = jnp.swapaxes(diagnostic, 0, 1).astype(output_ref.dtype)
+    state_after_ref[0, 0] = state_scratch_ref[...].astype(jnp.float32)
     return
 
   key_beta = key * beta[..., None]
@@ -767,8 +803,9 @@ def _kda_fused_forward_kernel(
       include_diagonal=True,
   )
   if profile_stage == "pairwise":
-    output_ref[0] = jnp.concatenate((system, intra), axis=-1).astype(output_ref.dtype)
-    state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
+    diagnostic = jnp.concatenate((system, intra), axis=-1)
+    output_ref[0] = jnp.swapaxes(diagnostic, 0, 1).astype(output_ref.dtype)
+    state_after_ref[0, 0] = state_scratch_ref[...].astype(jnp.float32)
     return
 
   value_beta = value * beta[..., None]
@@ -787,8 +824,8 @@ def _kda_fused_forward_kernel(
   u = solved[..., :value_dim]
   w = solved[..., value_dim : value_dim + key_dim]
   if profile_stage == "solve":
-    output_ref[0] = (u + w).astype(output_ref.dtype)
-    state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
+    output_ref[0] = jnp.swapaxes(u + w, 0, 1).astype(output_ref.dtype)
+    state_after_ref[0, 0] = state_scratch_ref[...].astype(jnp.float32)
     return
 
   state = state_scratch_ref[...].astype(jnp.float32)
@@ -803,64 +840,82 @@ def _kda_fused_forward_kernel(
   state = state + _state_matmul(_transpose(key_for_state), corrected_value)
   state_scratch_ref[...] = state
 
-  output_ref[0] = output.astype(output_ref.dtype)
-  state_after_ref[0, :, 0] = state
+  output_ref[0] = jnp.swapaxes(output, 0, 1).astype(output_ref.dtype)
+  state_after_ref[0, 0] = state
 
 
 def _kda_fused_backward_kernel(
-    query_ref,
-    key_ref,
-    value_ref,
+    qkv_ref,
+    qkv_previous_ref,
+    conv_weight_ref,
     log_decay_ref,
     beta_ref,
     initial_state_ref,
     previous_state_after_ref,
     output_cotangent_ref,
     final_state_cotangent_ref,
-    query_cotangent_ref,
-    key_cotangent_ref,
-    value_cotangent_ref,
+    qkv_cotangent_ref,
+    conv_weight_cotangent_ref,
     log_decay_cotangent_ref,
     beta_cotangent_ref,
     state_before_cotangent_ref,
     state_cotangent_scratch_ref,
+    conv_head_cotangent_scratch_ref,
     *,
     chunk_size: int,
     key_dim: int,
     value_dim: int,
     num_chunks: int,
+    conv_width: int,
     use_qk_norm: bool,
     profile_stage: str,
-    chunk_axis: int = 2,
+    chunk_axis: int = 1,
 ):
-  """Recomputes one chunk of every in-block head and carries the state
-  cotangent in reverse order."""
+  """Recomputes one raw-QKV chunk of every head and carries the state
+  cotangent in reverse order.
+
+  The convolution's raw history is recomputed from the previous chunk's raw
+  block, and the ``width - 1`` future convolution-output cotangent rows the
+  input gradient needs arrive through a VMEM scratch written by the previous
+  reverse step, which processed the chronologically later chunk. Conv weight
+  gradients accumulate into one revisited per-batch output block."""
   reverse_chunk_index = pl.program_id(chunk_axis)
   chunk_index = num_chunks - 1 - reverse_chunk_index
-  query_input = query_ref[0]
-  key_input = key_ref[0]
-  value = value_ref[0].astype(jnp.float32)
-  log_decay = log_decay_ref[0].astype(jnp.float32)
-  beta = beta_ref[0][..., 0].astype(jnp.float32)
-  output_cotangent = output_cotangent_ref[0].astype(jnp.float32)
+  raw_qkv = qkv_ref[0].astype(jnp.float32)
+  previous_raw_tail = qkv_previous_ref[0].astype(jnp.float32)[
+      chunk_size - (conv_width - 1) :
+  ]
+  conv_weight = conv_weight_ref[...].astype(jnp.float32)
+  log_decay = jnp.swapaxes(log_decay_ref[0].astype(jnp.float32), 0, 1)
+  beta = jnp.swapaxes(beta_ref[0][..., 0].astype(jnp.float32), 0, 1)
+  output_cotangent = jnp.swapaxes(output_cotangent_ref[0].astype(jnp.float32), 0, 1)
 
   @pl.when(reverse_chunk_index == 0)
   def _initialize_state_cotangent():
     state_cotangent_scratch_ref[...] = final_state_cotangent_ref[0].astype(jnp.float32)
+    conv_head_cotangent_scratch_ref[...] = jnp.zeros_like(conv_head_cotangent_scratch_ref)
 
   state = lax.cond(
       chunk_index == 0,
       lambda: initial_state_ref[0].astype(jnp.float32),
-      lambda: previous_state_after_ref[0, :, 0].astype(jnp.float32),
+      lambda: previous_state_after_ref[0, 0].astype(jnp.float32),
   )
+
+  history = jnp.where(chunk_index == 0, jnp.zeros_like(previous_raw_tail), previous_raw_tail)
+  padded = jnp.concatenate((history, raw_qkv), axis=0)
+  convolved = _causal_conv_chunk(padded, conv_weight, chunk_size)
+  activated = _silu(convolved)
+  query_input = jnp.swapaxes(activated[:, 0], 0, 1)
+  key_input = jnp.swapaxes(activated[:, 1], 0, 1)
+  value = jnp.swapaxes(activated[:, 2], 0, 1)
 
   if use_qk_norm:
     query_normalized, query_inverse_norm = _l2_normalize_with_inverse(query_input)
     key, key_inverse_norm = _l2_normalize_with_inverse(key_input)
     query = query_normalized * (1.0 / math.sqrt(key_dim))
   else:
-    query_normalized = query_input.astype(jnp.float32)
-    key = key_input.astype(jnp.float32)
+    query_normalized = query_input
+    key = key_input
     query_inverse_norm = jnp.ones_like(query_normalized[..., :1])
     key_inverse_norm = jnp.ones_like(key[..., :1])
     query = query_normalized * (1.0 / math.sqrt(key_dim))
@@ -925,7 +980,7 @@ def _kda_fused_backward_kernel(
       _transpose(w), corrected_value_cotangent
   )
   state_cotangent_scratch_ref[...] = state_cotangent
-  state_before_cotangent_ref[0, :, 0] = state_cotangent
+  state_before_cotangent_ref[0, 0] = state_cotangent
 
   query_cotangent = query_with_decay_cotangent * cumulative_decay_exp
   cumulative_decay_cotangent = query_with_decay_cotangent * query_with_decay
@@ -936,11 +991,22 @@ def _kda_fused_backward_kernel(
   final_decay_cotangent = final_decay_cotangent + final_decay_exp_cotangent * final_decay_exp
 
   def write_profile_outputs(query_bar, key_bar, value_bar, decay_bar, beta_bar):
-    query_cotangent_ref[0] = query_bar.astype(query_cotangent_ref.dtype)
-    key_cotangent_ref[0] = key_bar.astype(key_cotangent_ref.dtype)
-    value_cotangent_ref[0] = value_bar.astype(value_cotangent_ref.dtype)
-    log_decay_cotangent_ref[0] = decay_bar.astype(log_decay_cotangent_ref.dtype)
-    beta_cotangent_ref[0, ..., 0] = beta_bar.astype(beta_cotangent_ref.dtype)
+    stacked = jnp.stack(
+        (
+            jnp.swapaxes(query_bar, 0, 1),
+            jnp.swapaxes(key_bar, 0, 1),
+            jnp.swapaxes(value_bar, 0, 1),
+        ),
+        axis=1,
+    )
+    qkv_cotangent_ref[0] = stacked.astype(qkv_cotangent_ref.dtype)
+    conv_weight_cotangent_ref[0] = jnp.zeros_like(conv_weight_cotangent_ref[0])
+    log_decay_cotangent_ref[0] = jnp.swapaxes(decay_bar, 0, 1).astype(
+        log_decay_cotangent_ref.dtype
+    )
+    beta_cotangent_ref[0, ..., 0] = jnp.swapaxes(beta_bar, 0, 1).astype(
+        beta_cotangent_ref.dtype
+    )
 
   if profile_stage == "reverse_state":
     write_profile_outputs(
@@ -1053,11 +1119,48 @@ def _kda_fused_backward_kernel(
   else:
     query_cotangent = query_normalized_cotangent
 
-  query_cotangent_ref[0] = query_cotangent.astype(query_cotangent_ref.dtype)
-  key_cotangent_ref[0] = key_cotangent.astype(key_cotangent_ref.dtype)
-  value_cotangent_ref[0] = value_cotangent.astype(value_cotangent_ref.dtype)
-  log_decay_cotangent_ref[0] = log_decay_cotangent
-  beta_cotangent_ref[0, ..., 0] = beta_cotangent
+  activation_cotangent = jnp.stack(
+      (
+          jnp.swapaxes(query_cotangent, 0, 1),
+          jnp.swapaxes(key_cotangent, 0, 1),
+          jnp.swapaxes(value_cotangent, 0, 1),
+      ),
+      axis=1,
+  )
+  conv_output_cotangent = activation_cotangent * _silu_grad(convolved)
+
+  # The input gradient at token t needs the convolution-output cotangents of
+  # the next width - 1 tokens; for the trailing rows those live in the next
+  # chunk, which the reverse grid already processed and left in scratch.
+  extended = jnp.concatenate(
+      (conv_output_cotangent, conv_head_cotangent_scratch_ref[...]),
+      axis=0,
+  )
+  conv_head_cotangent_scratch_ref[...] = conv_output_cotangent[: conv_width - 1]
+  raw_cotangent = None
+  for offset in range(conv_width):
+    term = conv_weight[conv_width - 1 - offset] * extended[offset : offset + chunk_size]
+    raw_cotangent = term if raw_cotangent is None else raw_cotangent + term
+  qkv_cotangent_ref[0] = raw_cotangent.astype(qkv_cotangent_ref.dtype)
+
+  weight_cotangent = jnp.stack(
+      [
+          jnp.sum(conv_output_cotangent * padded[tap : tap + chunk_size], axis=0)
+          for tap in range(conv_width)
+      ],
+      axis=0,
+  )
+
+  @pl.when(reverse_chunk_index == 0)
+  def _initialize_weight_cotangent():
+    conv_weight_cotangent_ref[0] = weight_cotangent
+
+  @pl.when(reverse_chunk_index > 0)
+  def _accumulate_weight_cotangent():
+    conv_weight_cotangent_ref[0] += weight_cotangent
+
+  log_decay_cotangent_ref[0] = jnp.swapaxes(log_decay_cotangent, 0, 1)
+  beta_cotangent_ref[0, ..., 0] = jnp.swapaxes(beta_cotangent, 0, 1)
 
 
 @functools.partial(
@@ -1067,13 +1170,11 @@ def _kda_fused_backward_kernel(
         "use_qk_norm",
         "solve_method",
         "profile_stage",
-        "streams_per_program",
     ),
 )
 def _pallas_kda_fused_forward(
-    query: jax.Array,
-    key: jax.Array,
-    value: jax.Array,
+    qkv: jax.Array,
+    conv_weight: jax.Array,
     log_decay: jax.Array,
     beta: jax.Array,
     initial_state: jax.Array,
@@ -1082,23 +1183,29 @@ def _pallas_kda_fused_forward(
     use_qk_norm: bool = True,
     solve_method: str = _SOLVE_METHOD,
     profile_stage: str = "full",
-    streams_per_program: int = _DEFAULT_STREAMS_PER_PROGRAM,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Runs the fixed-layout fused KDA forward on TPU.
 
-  Inputs use ``[B,T,H,D]`` layout. The returned state history contains the
-  state *after* each chunk as ``[B,NC,H,K,V]``. The public final state is the
-  final history entry.
+  ``qkv`` is the raw fused projection output ``[B, T, 3, H, D]``, before the
+  causal depthwise convolution and SiLU, both of which run inside the kernel;
+  ``conv_weight`` is ``[width, 3, H, D]``. One program owns all heads of one
+  batch element, so a chunk block arrives in the tensor's natural layout and
+  the head-major transposes happen on values already resident in VMEM. The
+  returned state history contains the state *after* each chunk as
+  ``[B, NC, H, K, V]``; the public final state is the final history entry.
   """
   if jax.default_backend() != "tpu":
     raise RuntimeError("pallas_kda_fused_forward requires a TPU backend")
-  if query.shape != key.shape or query.ndim != 4:
-    raise ValueError(f"expected matching [B,T,H,K] Q/K, got {query.shape}, {key.shape}")
-  batch, sequence_length, heads, key_dim = query.shape
-  value_dim = value.shape[-1]
-  if value.shape[:3] != (batch, sequence_length, heads):
-    raise ValueError(f"incompatible value shape: {value.shape}")
-  if log_decay.shape != query.shape:
+  if qkv.ndim != 5 or qkv.shape[2] != 3:
+    raise ValueError(f"expected raw [B,T,3,H,D] QKV, got {qkv.shape}")
+  batch, sequence_length, _, heads, key_dim = qkv.shape
+  value_dim = key_dim
+  conv_width = conv_weight.shape[0]
+  if conv_weight.shape != (conv_width, 3, heads, key_dim):
+    raise ValueError(f"incompatible conv weight shape: {conv_weight.shape}")
+  if conv_width < 2 or conv_width > chunk_size:
+    raise ValueError(f"conv width {conv_width} must lie in [2, {chunk_size}]")
+  if log_decay.shape != (batch, sequence_length, heads, key_dim):
     raise ValueError(f"incompatible log-decay shape: {log_decay.shape}")
   if beta.shape != (batch, sequence_length, heads):
     raise ValueError(f"incompatible beta shape: {beta.shape}")
@@ -1120,62 +1227,41 @@ def _pallas_kda_fused_forward(
   if profile_stage not in ("preprocess", "pairwise", "solve", "full"):
     raise ValueError(f"unknown forward profile stage: {profile_stage}")
 
-  streams = batch * heads
-  streams_per_program = math.gcd(streams, streams_per_program)
   num_chunks = sequence_length // chunk_size
-  stream_groups = streams // streams_per_program
   qkv_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, chunk_size, key_dim),
-      index_map=lambda batch_group, head_group, chunk_index: (
-          batch_group,
-          head_group,
-          chunk_index,
-          0,
-      ),
+      block_shape=(1, chunk_size, 3, heads, key_dim),
+      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0, 0),
   )
-  value_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, chunk_size, value_dim),
-      index_map=lambda batch_group, head_group, chunk_index: (
-          batch_group,
-          head_group,
-          chunk_index,
-          0,
-      ),
+  conv_weight_spec = pl.BlockSpec(
+      block_shape=(conv_width, 3, heads, key_dim),
+      index_map=lambda batch_index, chunk_index: (0, 0, 0, 0),
+  )
+  decay_spec = pl.BlockSpec(
+      block_shape=(1, chunk_size, heads, key_dim),
+      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0),
   )
   beta_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, chunk_size, 1),
-      index_map=lambda batch_group, head_group, chunk_index: (
-          batch_group,
-          head_group,
-          chunk_index,
-          0,
-      ),
+      block_shape=(1, chunk_size, heads, 1),
+      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0),
   )
   initial_state_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, key_dim, value_dim),
-      index_map=lambda batch_group, head_group, chunk_index: (
-          batch_group,
-          head_group,
-          0,
-          0,
-      ),
+      block_shape=(1, heads, key_dim, value_dim),
+      index_map=lambda batch_index, chunk_index: (batch_index, 0, 0, 0),
+  )
+  output_spec = pl.BlockSpec(
+      block_shape=(1, chunk_size, heads, value_dim),
+      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0),
   )
   state_history_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, 1, key_dim, value_dim),
-      index_map=lambda batch_group, head_group, chunk_index: (
-          batch_group,
-          head_group,
-          chunk_index,
-          0,
-          0,
-      ),
+      block_shape=(1, 1, heads, key_dim, value_dim),
+      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0, 0),
   )
   output_shape = jax.ShapeDtypeStruct(
-      (1, streams, sequence_length, value_dim),
-      value.dtype,
+      (batch, sequence_length, heads, value_dim),
+      qkv.dtype,
   )
   state_history_shape = jax.ShapeDtypeStruct(
-      (1, streams, num_chunks, key_dim, value_dim),
+      (batch, num_chunks, heads, key_dim, value_dim),
       jnp.float32,
   )
   output, state_history = pl.pallas_call(
@@ -1184,50 +1270,46 @@ def _pallas_kda_fused_forward(
           chunk_size=chunk_size,
           key_dim=key_dim,
           value_dim=value_dim,
+          conv_width=conv_width,
           use_qk_norm=use_qk_norm,
           solve_method=solve_method,
           profile_stage=profile_stage,
-          chunk_axis=2,
+          chunk_axis=1,
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
-          grid=(1, stream_groups, num_chunks),
+          grid=(batch, num_chunks),
           in_specs=(
               qkv_spec,
-              qkv_spec,
-              value_spec,
-              qkv_spec,
+              conv_weight_spec,
+              decay_spec,
               beta_spec,
               initial_state_spec,
           ),
           out_specs=(
-              value_spec,
+              output_spec,
               state_history_spec,
           ),
           scratch_shapes=(
-              pltpu.VMEM((streams_per_program, key_dim, value_dim), jnp.float32),
+              pltpu.VMEM((heads, key_dim, value_dim), jnp.float32),
+              pltpu.VMEM((conv_width - 1, 3, heads, key_dim), jnp.float32),
           ),
       ),
       out_shape=(output_shape, state_history_shape),
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=("parallel", "parallel", "arbitrary"),
+          dimension_semantics=("parallel", "arbitrary"),
           disable_bounds_checks=True,
       ),
-      name=f"kda_fused_forward_{solve_method}_{profile_stage}_s{streams_per_program}",
+      name=f"kda_fused_forward_{solve_method}_{profile_stage}",
   )(
-      query.transpose(0, 2, 1, 3).reshape(1, streams, sequence_length, key_dim),
-      key.transpose(0, 2, 1, 3).reshape(1, streams, sequence_length, key_dim),
-      value.transpose(0, 2, 1, 3).reshape(1, streams, sequence_length, value_dim),
-      log_decay.astype(jnp.float32)
-      .transpose(0, 2, 1, 3)
-      .reshape(1, streams, sequence_length, key_dim),
-      beta.astype(jnp.float32).transpose(0, 2, 1).reshape(1, streams, sequence_length, 1),
-      initial_state.astype(jnp.float32).reshape(1, streams, key_dim, value_dim),
+      qkv,
+      conv_weight.astype(jnp.float32),
+      log_decay.astype(jnp.float32),
+      beta.astype(jnp.float32)[..., None],
+      initial_state.astype(jnp.float32),
   )
-  output = output.reshape(batch, heads, sequence_length, value_dim).transpose(0, 2, 1, 3)
-  state_history = state_history.reshape(batch, heads, num_chunks, key_dim, value_dim)
-  final_state = state_history[:, :, -1]
-  return output, final_state, state_history.transpose(0, 2, 1, 3, 4)
+  final_state = state_history[:, -1]
+  return output, final_state, state_history
 
 
 @functools.partial(
@@ -1236,13 +1318,11 @@ def _pallas_kda_fused_forward(
         "chunk_size",
         "use_qk_norm",
         "profile_stage",
-        "streams_per_program",
     ),
 )
 def _pallas_kda_fused_backward(
-    query: jax.Array,
-    key: jax.Array,
-    value: jax.Array,
+    qkv: jax.Array,
+    conv_weight: jax.Array,
     log_decay: jax.Array,
     beta: jax.Array,
     initial_state: jax.Array,
@@ -1253,11 +1333,11 @@ def _pallas_kda_fused_backward(
     chunk_size: int = 64,
     use_qk_norm: bool = True,
     profile_stage: str = "full",
-    streams_per_program: int = _DEFAULT_STREAMS_PER_PROGRAM,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Runs the fused reverse chunk stream and returns all six input gradients."""
-  batch, sequence_length, heads, key_dim = query.shape
-  value_dim = value.shape[-1]
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Runs the fused reverse chunk stream and returns all five input gradients."""
+  batch, sequence_length, _, heads, key_dim = qkv.shape
+  value_dim = key_dim
+  conv_width = conv_weight.shape[0]
   num_chunks = sequence_length // chunk_size
   expected_history_shape = (batch, num_chunks, heads, key_dim, value_dim)
   if state_history.shape != expected_history_shape:
@@ -1265,103 +1345,109 @@ def _pallas_kda_fused_backward(
   if profile_stage not in ("reverse_state", "solve_vjp", "pairwise_vjp", "full"):
     raise ValueError(f"unknown backward profile stage: {profile_stage}")
 
-  streams = batch * heads
-  streams_per_program = math.gcd(streams, streams_per_program)
-  stream_groups = streams // streams_per_program
   reverse_qkv_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, chunk_size, key_dim),
-      index_map=lambda batch_group, head_group, reverse_chunk_index: (
-          batch_group,
-          head_group,
+      block_shape=(1, chunk_size, 3, heads, key_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
           num_chunks - 1 - reverse_chunk_index,
+          0,
+          0,
           0,
       ),
   )
-  reverse_value_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, chunk_size, value_dim),
-      index_map=lambda batch_group, head_group, reverse_chunk_index: (
-          batch_group,
-          head_group,
+  previous_qkv_spec = pl.BlockSpec(
+      block_shape=(1, chunk_size, 3, heads, key_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
+          jnp.maximum(num_chunks - 2 - reverse_chunk_index, 0),
+          0,
+          0,
+          0,
+      ),
+  )
+  conv_weight_spec = pl.BlockSpec(
+      block_shape=(conv_width, 3, heads, key_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (0, 0, 0, 0),
+  )
+  reverse_decay_spec = pl.BlockSpec(
+      block_shape=(1, chunk_size, heads, key_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
           num_chunks - 1 - reverse_chunk_index,
+          0,
           0,
       ),
   )
   reverse_beta_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, chunk_size, 1),
-      index_map=lambda batch_group, head_group, reverse_chunk_index: (
-          batch_group,
-          head_group,
+      block_shape=(1, chunk_size, heads, 1),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
           num_chunks - 1 - reverse_chunk_index,
+          0,
+          0,
+      ),
+  )
+  reverse_output_spec = pl.BlockSpec(
+      block_shape=(1, chunk_size, heads, value_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
+          num_chunks - 1 - reverse_chunk_index,
+          0,
           0,
       ),
   )
   state_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, key_dim, value_dim),
-      index_map=lambda batch_group, head_group, reverse_chunk_index: (
-          batch_group,
-          head_group,
-          0,
-          0,
-      ),
+      block_shape=(1, heads, key_dim, value_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (batch_index, 0, 0, 0),
   )
   previous_state_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, 1, key_dim, value_dim),
-      index_map=lambda batch_group, head_group, reverse_chunk_index: (
-          batch_group,
-          head_group,
+      block_shape=(1, 1, heads, key_dim, value_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
           jnp.maximum(num_chunks - 2 - reverse_chunk_index, 0),
+          0,
           0,
           0,
       ),
   )
   state_before_cotangent_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, 1, key_dim, value_dim),
-      index_map=lambda batch_group, head_group, reverse_chunk_index: (
-          batch_group,
-          head_group,
+      block_shape=(1, 1, heads, key_dim, value_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (
+          batch_index,
           num_chunks - 1 - reverse_chunk_index,
+          0,
           0,
           0,
       ),
   )
-
-  stream_shape = (1, streams, sequence_length)
-  query_t = query.transpose(0, 2, 1, 3).reshape(*stream_shape, key_dim)
-  key_t = key.transpose(0, 2, 1, 3).reshape(*stream_shape, key_dim)
-  value_t = value.transpose(0, 2, 1, 3).reshape(*stream_shape, value_dim)
-  log_decay_t = (
-      log_decay.astype(jnp.float32).transpose(0, 2, 1, 3).reshape(*stream_shape, key_dim)
-  )
-  beta_t = beta.astype(jnp.float32).transpose(0, 2, 1).reshape(*stream_shape, 1)
-  state_history_t = state_history.transpose(0, 2, 1, 3, 4).reshape(
-      1, streams, num_chunks, key_dim, value_dim
-  )
-  output_cotangent_t = output_cotangent.transpose(0, 2, 1, 3).reshape(
-      *stream_shape, value_dim
-  )
-  initial_state_t = initial_state.astype(jnp.float32).reshape(
-      1, streams, key_dim, value_dim
-  )
-  final_state_cotangent_t = final_state_cotangent.astype(jnp.float32).reshape(
-      1, streams, key_dim, value_dim
+  conv_weight_cotangent_spec = pl.BlockSpec(
+      block_shape=(1, conv_width, 3, heads, key_dim),
+      index_map=lambda batch_index, reverse_chunk_index: (batch_index, 0, 0, 0, 0),
   )
 
-  query_cotangent_shape = jax.ShapeDtypeStruct(query_t.shape, query.dtype)
-  key_cotangent_shape = jax.ShapeDtypeStruct(key_t.shape, key.dtype)
-  value_cotangent_shape = jax.ShapeDtypeStruct(value_t.shape, value.dtype)
-  log_decay_cotangent_shape = jax.ShapeDtypeStruct(log_decay_t.shape, log_decay.dtype)
-  beta_cotangent_shape = jax.ShapeDtypeStruct(beta_t.shape, beta.dtype)
+  qkv_cotangent_shape = jax.ShapeDtypeStruct(qkv.shape, qkv.dtype)
+  conv_weight_cotangent_shape = jax.ShapeDtypeStruct(
+      (batch, conv_width, 3, heads, key_dim),
+      jnp.float32,
+  )
+  log_decay_cotangent_shape = jax.ShapeDtypeStruct(
+      (batch, sequence_length, heads, key_dim),
+      log_decay.dtype,
+  )
+  beta_cotangent_shape = jax.ShapeDtypeStruct(
+      (batch, sequence_length, heads, 1),
+      beta.dtype,
+  )
   state_before_cotangent_shape = jax.ShapeDtypeStruct(
-      state_history_t.shape,
+      state_history.shape,
       jnp.float32,
   )
   (
-      query_cotangent_t,
-      key_cotangent_t,
-      value_cotangent_t,
-      log_decay_cotangent_t,
-      beta_cotangent_t,
-      state_before_cotangent_t,
+      qkv_cotangent,
+      conv_weight_cotangent,
+      log_decay_cotangent,
+      beta_cotangent,
+      state_before_cotangent,
   ) = pl.pallas_call(
       functools.partial(
           _kda_fused_backward_kernel,
@@ -1369,90 +1455,82 @@ def _pallas_kda_fused_backward(
           key_dim=key_dim,
           value_dim=value_dim,
           num_chunks=num_chunks,
+          conv_width=conv_width,
           use_qk_norm=use_qk_norm,
           profile_stage=profile_stage,
-          chunk_axis=2,
+          chunk_axis=1,
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
-          grid=(1, stream_groups, num_chunks),
+          grid=(batch, num_chunks),
           in_specs=(
               reverse_qkv_spec,
-              reverse_qkv_spec,
-              reverse_value_spec,
-              reverse_qkv_spec,
+              previous_qkv_spec,
+              conv_weight_spec,
+              reverse_decay_spec,
               reverse_beta_spec,
               state_spec,
               previous_state_spec,
-              reverse_value_spec,
+              reverse_output_spec,
               state_spec,
           ),
           out_specs=(
               reverse_qkv_spec,
-              reverse_qkv_spec,
-              reverse_value_spec,
-              reverse_qkv_spec,
+              conv_weight_cotangent_spec,
+              reverse_decay_spec,
               reverse_beta_spec,
               state_before_cotangent_spec,
           ),
           scratch_shapes=(
-              pltpu.VMEM((streams_per_program, key_dim, value_dim), jnp.float32),
+              pltpu.VMEM((heads, key_dim, value_dim), jnp.float32),
+              pltpu.VMEM((conv_width - 1, 3, heads, key_dim), jnp.float32),
           ),
       ),
       out_shape=(
-          query_cotangent_shape,
-          key_cotangent_shape,
-          value_cotangent_shape,
+          qkv_cotangent_shape,
+          conv_weight_cotangent_shape,
           log_decay_cotangent_shape,
           beta_cotangent_shape,
           state_before_cotangent_shape,
       ),
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=("parallel", "parallel", "arbitrary"),
+          dimension_semantics=("parallel", "arbitrary"),
           disable_bounds_checks=True,
       ),
       name=f"kda_fused_backward_{profile_stage}",
   )(
-      query_t,
-      key_t,
-      value_t,
-      log_decay_t,
-      beta_t,
-      initial_state_t,
-      state_history_t,
-      output_cotangent_t,
-      final_state_cotangent_t,
+      qkv,
+      qkv,
+      conv_weight.astype(jnp.float32),
+      log_decay.astype(jnp.float32),
+      beta.astype(jnp.float32)[..., None],
+      initial_state.astype(jnp.float32),
+      state_history,
+      output_cotangent,
+      final_state_cotangent.astype(jnp.float32),
   )
 
-  def unstream(values, channels):
-    return values.reshape(batch, heads, sequence_length, channels).transpose(0, 2, 1, 3)
-
   return (
-      unstream(query_cotangent_t, key_dim),
-      unstream(key_cotangent_t, key_dim),
-      unstream(value_cotangent_t, value_dim),
-      unstream(log_decay_cotangent_t, key_dim),
-      unstream(beta_cotangent_t, 1)[..., 0],
-      state_before_cotangent_t.reshape(batch, heads, num_chunks, key_dim, value_dim)[
-          :, :, 0
-      ],
+      qkv_cotangent,
+      jnp.sum(conv_weight_cotangent, axis=0).astype(conv_weight.dtype),
+      log_decay_cotangent,
+      beta_cotangent[..., 0],
+      state_before_cotangent[:, 0],
   )
 
 
 @jax.custom_vjp
 def pallas_kda_fused(
-    query: jax.Array,
-    key: jax.Array,
-    value: jax.Array,
+    qkv: jax.Array,
+    conv_weight: jax.Array,
     log_decay: jax.Array,
     beta: jax.Array,
     initial_state: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
   """Differentiable fixed-shape fused KDA operation for TPU training."""
   output, final_state, _ = _pallas_kda_fused_forward(
-      query,
-      key,
-      value,
+      qkv,
+      conv_weight,
       log_decay,
       beta,
       initial_state,
@@ -1463,11 +1541,10 @@ def pallas_kda_fused(
   return output, final_state
 
 
-def _pallas_kda_fused_fwd(query, key, value, log_decay, beta, initial_state):
+def _pallas_kda_fused_fwd(qkv, conv_weight, log_decay, beta, initial_state):
   output, final_state, state_history = _pallas_kda_fused_forward(
-      query,
-      key,
-      value,
+      qkv,
+      conv_weight,
       log_decay,
       beta,
       initial_state,
@@ -1476,9 +1553,8 @@ def _pallas_kda_fused_fwd(query, key, value, log_decay, beta, initial_state):
       solve_method=_SOLVE_METHOD,
   )
   return (output, final_state), (
-      query,
-      key,
-      value,
+      qkv,
+      conv_weight,
       log_decay,
       beta,
       initial_state,
@@ -1487,12 +1563,11 @@ def _pallas_kda_fused_fwd(query, key, value, log_decay, beta, initial_state):
 
 
 def _pallas_kda_fused_bwd(residual, output_cotangents):
-  query, key, value, log_decay, beta, initial_state, state_history = residual
+  qkv, conv_weight, log_decay, beta, initial_state, state_history = residual
   output_cotangent, final_state_cotangent = output_cotangents
   return _pallas_kda_fused_backward(
-      query,
-      key,
-      value,
+      qkv,
+      conv_weight,
       log_decay,
       beta,
       initial_state,

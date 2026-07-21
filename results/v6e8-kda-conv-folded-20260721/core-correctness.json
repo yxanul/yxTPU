@@ -1,0 +1,52 @@
+{
+  "backend": "tpu",
+  "device": "TPU_0(process=0,(0,0,0,0))",
+  "correctness": {
+    "output": {
+      "max_abs": 0.000732421875,
+      "rmse": 2.2226817236514762e-05,
+      "reference_rms": 0.003855923656374216,
+      "all_finite": true
+    },
+    "final_state": {
+      "max_abs": 0.006452739238739014,
+      "rmse": 0.00015216358588077128,
+      "reference_rms": 0.03141695261001587,
+      "all_finite": true
+    },
+    "loss_abs_difference": 1.282751327380538e-08,
+    "gradients": {
+      "raw_qkv": {
+        "max_abs": 3.4924596548080444e-10,
+        "rmse": 3.544214184289518e-12,
+        "reference_rms": 5.055390550623429e-10,
+        "all_finite": true
+      },
+      "conv_weight": {
+        "max_abs": 8.239169346779818e-10,
+        "rmse": 7.66565283472076e-11,
+        "reference_rms": 1.9084613001041362e-08,
+        "all_finite": true
+      },
+      "log_decay": {
+        "max_abs": 1.507990954330296e-10,
+        "rmse": 2.838295787635503e-12,
+        "reference_rms": 4.349292107019842e-11,
+        "all_finite": true
+      },
+      "beta": {
+        "max_abs": 1.774708380253287e-09,
+        "rmse": 1.38948408334727e-10,
+        "reference_rms": 2.5812790127588414e-08,
+        "all_finite": true
+      },
+      "initial_state": {
+        "max_abs": 4.115985330344074e-12,
+        "rmse": 4.4217681274306975e-14,
+        "reference_rms": 6.77476868007898e-12,
+        "all_finite": true
+      }
+    },
+    "failures": []
+  }
+}

@@ -1258,19 +1258,28 @@ class KimiDeltaAttention(nnx.Module):
       raise NotImplementedError("The TPU KDA prototype currently supports training only.")
 
     batch, sequence_length, _ = hidden_states.shape
+    use_fused_kernel = self.config.kda_use_fused_pallas_kernel
     qkv = self.in_proj_qkv(hidden_states)
-    qkv = qkv.transpose(0, 1, 3, 2, 4).reshape(batch, sequence_length, -1)
-    if _USE_SHIFTED_QKV_CONV:
-      qkv = _causal_depthwise_conv(
-          qkv,
-          self.conv1d.kernel.value.astype(qkv.dtype),
-      )
+    if use_fused_kernel:
+      # The fused Pallas kernel owns the causal depthwise convolution and
+      # SiLU, consuming the projection output directly as [B, T, 3, H, D].
+      # The convolution parameter keeps its (head, qkv, dim) channel order, so
+      # only the tiny weight is transposed to the kernel's [width, 3, H, D].
+      raw_qkv = qkv
+      query = key = value = None
     else:
-      qkv = jnp.pad(qkv, ((0, 0), (self.config.gdn_conv_kernel_dim - 1, 0), (0, 0)))
-      qkv = self.conv1d(qkv)[:, -sequence_length:]
-    qkv = jax.nn.silu(qkv.astype(jnp.float32)).astype(self.config.dtype)
-    qkv = qkv.reshape(batch, sequence_length, self.num_heads, 3, self.head_dim)
-    query, key, value = (qkv[..., i, :] for i in range(3))
+      qkv = qkv.transpose(0, 1, 3, 2, 4).reshape(batch, sequence_length, -1)
+      if _USE_SHIFTED_QKV_CONV:
+        qkv = _causal_depthwise_conv(
+            qkv,
+            self.conv1d.kernel.value.astype(qkv.dtype),
+        )
+      else:
+        qkv = jnp.pad(qkv, ((0, 0), (self.config.gdn_conv_kernel_dim - 1, 0), (0, 0)))
+        qkv = self.conv1d(qkv)[:, -sequence_length:]
+      qkv = jax.nn.silu(qkv.astype(jnp.float32)).astype(self.config.dtype)
+      qkv = qkv.reshape(batch, sequence_length, self.num_heads, 3, self.head_dim)
+      query, key, value = (qkv[..., i, :] for i in range(3))
 
     decay_input = self.decay_up(self.decay_down(hidden_states))
     raw_decay = decay_input.astype(jnp.float32) + jnp.asarray(self.dt_bias[...], dtype=jnp.float32)
@@ -1286,9 +1295,15 @@ class KimiDeltaAttention(nnx.Module):
 
     if decoder_segment_ids is not None:
       valid = decoder_segment_ids != 0
-      query = jnp.where(valid[..., None, None], query, 0)
-      key = jnp.where(valid[..., None, None], key, 0)
-      value = jnp.where(valid[..., None, None], value, 0)
+      if use_fused_kernel:
+        # The fused path masks the raw projection output before the in-kernel
+        # convolution. Under the dense packing this trainer uses the segment
+        # mask is all ones, where both orderings are exactly the identity.
+        raw_qkv = jnp.where(valid[..., None, None, None], raw_qkv, 0)
+      else:
+        query = jnp.where(valid[..., None, None], query, 0)
+        key = jnp.where(valid[..., None, None], key, 0)
+        value = jnp.where(valid[..., None, None], value, 0)
       log_decay = jnp.where(valid[..., None, None], log_decay, 0)
       beta = jnp.where(valid[..., None], beta, 0)
 
@@ -1312,35 +1327,63 @@ class KimiDeltaAttention(nnx.Module):
         rules=self.config.logical_axis_rules,
     )
 
-    @functools.partial(
-        jax.shard_map,
-        mesh=self.mesh,
-        in_specs=(qkv_spec, qkv_spec, qkv_spec, qkv_spec, beta_spec, state_spec),
-        out_specs=(qkv_spec, state_spec),
-        check_vma=False,
-    )
-    def sharded_kda(q, k, v, g, b, state):
-      if self.config.kda_use_fused_pallas_kernel:
-        return pallas_kda_fused(q, k, v, g, b, state)
-      kda_impl = functools.partial(
-          chunk_kda,
-          chunk_size=self.config.gdn_chunk_size,
-          use_qk_norm=self.config.use_qk_norm_in_gdn,
-          compute_dtype=(
-              jnp.float32
-              if self.config.kda_precision == "full_fp32"
-              else self.config.dtype
-          ),
-          use_pallas_blocked_solve=self.config.kda_use_pallas_blocked_solve,
-          use_analytical_custom_vjp=self.config.kda_use_analytical_custom_vjp,
+    if use_fused_kernel:
+      raw_qkv_spec = logical_to_mesh_axes(
+          (KV_BATCH, None, None, KV_HEAD, None),
+          mesh=self.mesh,
+          rules=self.config.logical_axis_rules,
       )
-      # KDA's channel-wise decay makes the autodiff tape of the two causal
-      # pairwise scans substantially larger than GDN's scalar-decay tape.
-      # Recompute the chunk recurrence in the backward pass instead of keeping
-      # those scan intermediates resident for every hybrid layer.
-      return jax.checkpoint(kda_impl)(q, k, v, g, b, initial_state=state)
+      conv_weight_spec = logical_to_mesh_axes(
+          (None, None, KV_HEAD, None),
+          mesh=self.mesh,
+          rules=self.config.logical_axis_rules,
+      )
+      width = self.config.gdn_conv_kernel_dim
+      conv_weight = (
+          self.conv1d.kernel.value.reshape(width, self.num_heads, 3, self.head_dim)
+          .transpose(0, 2, 1, 3)
+      )
 
-    output, _ = sharded_kda(query, key, value, log_decay, beta, initial_state)
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=(raw_qkv_spec, conv_weight_spec, qkv_spec, beta_spec, state_spec),
+          out_specs=(qkv_spec, state_spec),
+          check_vma=False,
+      )
+      def sharded_fused_kda(raw, conv_w, g, b, state):
+        return pallas_kda_fused(raw, conv_w, g, b, state)
+
+      output, _ = sharded_fused_kda(raw_qkv, conv_weight, log_decay, beta, initial_state)
+    else:
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=(qkv_spec, qkv_spec, qkv_spec, qkv_spec, beta_spec, state_spec),
+          out_specs=(qkv_spec, state_spec),
+          check_vma=False,
+      )
+      def sharded_kda(q, k, v, g, b, state):
+        kda_impl = functools.partial(
+            chunk_kda,
+            chunk_size=self.config.gdn_chunk_size,
+            use_qk_norm=self.config.use_qk_norm_in_gdn,
+            compute_dtype=(
+                jnp.float32
+                if self.config.kda_precision == "full_fp32"
+                else self.config.dtype
+            ),
+            use_pallas_blocked_solve=self.config.kda_use_pallas_blocked_solve,
+            use_analytical_custom_vjp=self.config.kda_use_analytical_custom_vjp,
+        )
+        # KDA's channel-wise decay makes the autodiff tape of the two causal
+        # pairwise scans substantially larger than GDN's scalar-decay tape.
+        # Recompute the chunk recurrence in the backward pass instead of keeping
+        # those scan intermediates resident for every hybrid layer.
+        return jax.checkpoint(kda_impl)(q, k, v, g, b, initial_state=state)
+
+      output, _ = sharded_kda(query, key, value, log_decay, beta, initial_state)
     output_gate = self.output_gate_up(self.output_gate_down(hidden_states))
     output = self.output_norm(output) * jax.nn.sigmoid(output_gate.astype(jnp.float32))
     output = self.out_proj(output.astype(self.config.dtype))

@@ -1272,3 +1272,61 @@ core-benchmark JSONs predates a benchmark-script fix; the timings follow the
 Artifacts:
 
 - `v6e8-kda-inverse-solve-20260721/`
+
+### Folding the QKV mixer into the kernel
+
+A fresh profile of the 616k configuration first had to fix its own tooling:
+the Chrome-trace export truncates at about one million events, and host
+python threads plus counters consume nearly the whole budget, so exported
+traces had been silently dropping most device ops, including the entire
+backward. Reading the raw `.xplane.pb` through xprof's `hlo_stats` instead
+showed the "convolution fusion" category (26.7%) is dominated by ordinary
+MLP and projection GEMMs — XLA canonicalizes TPU dots into convolutions —
+with the actual depthwise QKV convolution near 2.5%. EXP-023's suspicion
+that this category overstated the convolution was itself understated, and
+its shifted-multiply rewrite had attacked the wrong thing.
+
+What was genuinely reducible was the mixer *region* between the QKV
+projection and the fused kernel: activation-layout copies, Q/K/V split
+copies, the FP32 SiLU cast round-trip, the kernel-boundary stream
+transposes, the convolution, and its weight gradient — together roughly 19%
+of device time, nearly all of it HBM traffic between ops.
+
+The fused kernel now consumes the raw projection output `[B, T, 3, H, D]`
+and the conv weight directly and owns the whole mixer. One program advances
+all heads of one batch element, so blocks arrive in the tensor's natural
+layout; the convolution's three-token raw history rides across the ordered
+chunk grid in VMEM scratch exactly like the fast-weight state; the backward
+takes the future conv-output cotangent rows it needs from a scratch written
+by the previous reverse step, and accumulates conv weight gradients into one
+revisited per-batch output block. The XLA graph no longer materializes any
+convolved, activated, split, or transposed QKV copy.
+
+Native v6e core (`B=8`, `T=2048`, `H=8`): folded forward 1.847 ms and
+forward+backward 4.931 ms, against 2.192 / 5.033 ms for the unfolded kernel
+*excluding* the XLA mixer work it left outside. All five gradients,
+including the new conv-weight gradient, match the XLA-mixer + analytical
+reference at or below `1.8e-9`.
+
+The real-text gates all pass: trigger gradient norm 2.4068875 against the
+reference 2.4068251; exhaustive vector comparison 1.9792% relative L2 at
+cosine 0.999805 with bit-identical parameters (the movement from 1.8622%
+reflects the FP32 in-kernel convolution against the reference's BF16
+convolution, and the `3e-4` gate keeps failing only for the pre-existing
+one-pass BF16 policy reason); and 15 real-text steps finite with per-step
+losses matching the unfolded run within about `1e-4`:
+
+| ClimbMix profile, microbatch 16/GA=8 | Global tok/s | Compiled peak |
+| --- | ---: | ---: |
+| fused substitution (morning baseline) | 472,668 | 31.99 GB |
+| fused inverse solve (EXP-036) | 616,303 | 31.99 GB |
+| **fused inverse + folded mixer (selected)** | **735,658** | **29.96 GB** |
+
+That is +19.4% over EXP-036 and +55.7% cumulative for the day, with 2.03 GB
+of compiled peak returned. The gap to the matched global-attention control
+at sequence length 2048 narrows to about 1.47x, and projected 10B
+accelerator time falls to about 3.8 hours before evaluation overhead.
+
+Artifacts:
+
+- `v6e8-kda-conv-folded-20260721/`

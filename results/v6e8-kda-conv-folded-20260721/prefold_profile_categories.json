@@ -1,0 +1,86 @@
+{
+ "note": "inverse-config pre-fold profile, self-time shares across cores",
+ "total_self_time_us": 108638044.26000074,
+ "categories": {
+  "custom-call": {
+   "ms": 48216.6,
+   "percent": 44.38
+  },
+  "convolution fusion": {
+   "ms": 29037.1,
+   "percent": 26.73
+  },
+  "data formatting": {
+   "ms": 13622.5,
+   "percent": 12.54
+  },
+  "loop fusion": {
+   "ms": 13460.5,
+   "percent": 12.39
+  },
+  "all-reduce": {
+   "ms": 2074.7,
+   "percent": 1.91
+  },
+  "non-fusion elementwise": {
+   "ms": 931.7,
+   "percent": 0.86
+  },
+  "reduce": {
+   "ms": 521.5,
+   "percent": 0.48
+  },
+  "broadcast": {
+   "ms": 359.5,
+   "percent": 0.33
+  },
+  "custom fusion": {
+   "ms": 340.0,
+   "percent": 0.31
+  },
+  "copy-done": {
+   "ms": 38.7,
+   "percent": 0.04
+  },
+  "all-to-all": {
+   "ms": 13.1,
+   "percent": 0.01
+  },
+  "while": {
+   "ms": 8.1,
+   "percent": 0.01
+  },
+  "dynamic-update-slice": {
+   "ms": 5.8,
+   "percent": 0.01
+  },
+  "sort": {
+   "ms": 3.1,
+   "percent": 0.0
+  },
+  "async-done": {
+   "ms": 2.3,
+   "percent": 0.0
+  },
+  "copy-start": {
+   "ms": 1.7,
+   "percent": 0.0
+  },
+  "collective-permute-start": {
+   "ms": 0.9,
+   "percent": 0.0
+  },
+  "iota": {
+   "ms": 0.2,
+   "percent": 0.0
+  },
+  "collective-permute-done": {
+   "ms": 0.1,
+   "percent": 0.0
+  },
+  "async-start": {
+   "ms": 0.0,
+   "percent": 0.0
+  }
+ }
+}
