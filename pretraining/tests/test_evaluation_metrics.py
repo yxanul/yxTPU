@@ -5,7 +5,11 @@ import jax.numpy as jnp
 from flax import nnx
 
 from yxtpu_pretrain.config import load_config
-from yxtpu_pretrain.evaluation.lm_harness import JaxHarnessLM, flatten_harness_metrics
+from yxtpu_pretrain.evaluation.lm_harness import (
+    JaxHarnessLM,
+    _json_safe,
+    flatten_harness_metrics,
+)
 from yxtpu_pretrain.model import HybridLanguageModel
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.metrics import _flatten_metrics
@@ -30,6 +34,26 @@ def test_harness_uses_normalized_completion_metrics_and_arc_gap():
     assert metrics["arc_easy_challenge_gap"] == 0.25
     assert metrics["boolq/primary"] == 0.55
     assert metrics["lambada_openai/primary"] == 0.2
+
+
+def test_harness_artifact_serializes_task_callables_by_provenance():
+    safe = _json_safe(
+        {
+            "config": {
+                "process_docs": test_harness_scoring_mask_selects_only_continuation
+            }
+        }
+    )
+    assert safe == {
+        "config": {
+            "process_docs": {
+                "callable": (
+                    "test_evaluation_metrics."
+                    "test_harness_scoring_mask_selects_only_continuation"
+                )
+            }
+        }
+    }
 
 
 def test_harness_scoring_mask_selects_only_continuation():

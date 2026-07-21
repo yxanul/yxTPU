@@ -214,6 +214,23 @@ def flatten_harness_metrics(results: dict[str, Any]) -> dict[str, float]:
     return flattened
 
 
+def _json_safe(value: Any):
+    """Preserves harness provenance without trying to serialize task callables."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if callable(value):
+        module = getattr(value, "__module__", type(value).__module__)
+        name = getattr(value, "__qualname__", getattr(value, "__name__", type(value).__name__))
+        return {"callable": f"{module}.{name}"}
+    return str(value)
+
+
 def run_harness_evaluation(
     adapter: JaxHarnessLM,
     config: ResolvedConfig,
@@ -223,8 +240,6 @@ def run_harness_evaluation(
 ) -> tuple[dict[str, float], Path]:
     """Runs the pinned harness and persists its complete comparable result."""
     import lm_eval
-    from lm_eval.utils import EnhancedJSONEncoder
-
     harness = config.experiment.harness_eval
     results = lm_eval.simple_evaluate(
         model=adapter,
@@ -245,7 +260,7 @@ def run_harness_evaluation(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"step_{step:08d}.json"
     output_path.write_text(
-        json.dumps(results, cls=EnhancedJSONEncoder, indent=2, sort_keys=True) + "\n",
+        json.dumps(_json_safe(results), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return flatten_harness_metrics(results), output_path
