@@ -1,0 +1,107 @@
+{
+  "experiment_id": "EXP-030",
+  "hardware": "v6e-8",
+  "devices": 8,
+  "sequence_length": 2048,
+  "model_parameters": 272935520,
+  "correctness": {
+    "status": "PASS",
+    "hidden_size": 1024,
+    "vocabulary_size": 32768,
+    "regimes": 4,
+    "max_loss_relative_error": 8.9985e-8,
+    "max_dx_relative_l2": 0.00286276,
+    "max_dw_relative_l2": 0.00460770,
+    "one_step_loss_relative_error": 0.0000021032,
+    "one_step_gradient_norm_relative_error": 0.0000070889,
+    "one_step_optimizer_state_relative_l2": 0.000857881,
+    "one_step_final_parameters_relative_l2": 0.0000758484
+  },
+  "runs": [
+    {
+      "loss": "standard",
+      "microbatch_per_device": 8,
+      "gradient_accumulation": 1,
+      "remat": "minimal_with_context",
+      "tokens_per_second": 545528.7823669905,
+      "compiled_estimated_peak_bytes": 16289117536,
+      "allocator_peak_bytes": 3885205504
+    },
+    {
+      "loss": "tokamax_fused",
+      "microbatch_per_device": 8,
+      "gradient_accumulation": 1,
+      "remat": "minimal_with_context",
+      "tokens_per_second": 537190.6280685092,
+      "compiled_estimated_peak_bytes": 17328661952,
+      "allocator_peak_bytes": 3744672256
+    },
+    {
+      "loss": "standard",
+      "microbatch_per_device": 16,
+      "gradient_accumulation": 8,
+      "remat": "save_dot_except_mlp",
+      "tokens_per_second": 598542.851348899,
+      "compiled_estimated_peak_bytes": 36947479968,
+      "allocator_peak_bytes": 4727986176
+    },
+    {
+      "loss": "tokamax_fused",
+      "microbatch_per_device": 16,
+      "gradient_accumulation": 8,
+      "remat": "save_dot_except_mlp",
+      "tokens_per_second": 582996.7900647272,
+      "compiled_estimated_peak_bytes": 31838273152,
+      "allocator_peak_bytes": 4717874176
+    },
+    {
+      "loss": "standard",
+      "microbatch_per_device": 32,
+      "gradient_accumulation": 4,
+      "remat": "save_dot_except_mlp",
+      "tokens_per_second": 582498.2181527568,
+      "compiled_estimated_peak_bytes": 40437342624,
+      "allocator_peak_bytes": 3744689664
+    },
+    {
+      "loss": "tokamax_fused",
+      "microbatch_per_device": 32,
+      "gradient_accumulation": 4,
+      "remat": "save_dot_except_mlp",
+      "tokens_per_second": 572776.3475439255,
+      "compiled_estimated_peak_bytes": 39662719712,
+      "allocator_peak_bytes": 4106312704
+    },
+    {
+      "loss": "tokamax_fused",
+      "microbatch_per_device": 64,
+      "gradient_accumulation": 2,
+      "remat": "full",
+      "tokens_per_second": 550038.8073156897,
+      "compiled_estimated_peak_bytes": 37709894912,
+      "allocator_peak_bytes": 3885204992
+    }
+  ],
+  "compile_failures": [
+    {
+      "loss": "tokamax_fused",
+      "microbatch_per_device": 64,
+      "gradient_accumulation": 2,
+      "remat": "save_dot_except_mlp"
+    },
+    {
+      "loss": "standard",
+      "microbatch_per_device": 64,
+      "gradient_accumulation": 2,
+      "remat": "full",
+      "used_bytes_over_available": 84630000
+    }
+  ],
+  "selection": {
+    "loss": "standard",
+    "microbatch_per_device": 16,
+    "gradient_accumulation": 8,
+    "remat": "save_dot_except_mlp",
+    "tokens_per_second": 598542.851348899
+  }
+}

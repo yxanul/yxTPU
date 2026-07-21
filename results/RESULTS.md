@@ -1011,3 +1011,65 @@ accumulation step, the standalone processes 2,097,152 tokens/update and reaches
 Artifacts:
 
 - `v6e8-standalone-sharding-parity-20260721/`
+
+### Fused linear cross-entropy: capacity win, throughput loss
+
+The standalone trainer now has an opt-in Tokamax Mosaic TPU implementation
+that consumes final hidden states and the output-projection weight directly,
+without materializing logits in the owned training graph. Its distributed
+contract is explicit: vocabulary remains replicated, each device computes its
+local token sum, and a data-axis `psum` produces the global loss and valid-token
+count. Padding is applied before the primitive so masked rows contribute zero
+to both `dx` and `dw`; their constant `log(vocab_size)` loss is removed before
+the collective.
+
+The native eight-device gate used the production hidden size 1,024 and
+vocabulary 32,768. It covers all-valid tokens, uneven padding with one entirely
+masked TPU, labels at both vocabulary edges, and scaled hidden states. Loss
+relative error is at most `9.0e-8`; `dx` relative L2 is at most `2.86e-3`; and
+`dw` relative L2 is at most `4.61e-3`. The full 272.9M model then passes one
+AdamW step: loss relative error `2.10e-6`, gradient-norm relative error
+`7.09e-6`, optimizer-state relative L2 `8.58e-4`, and final-parameter relative
+L2 `7.58e-5`. The raw first-step update relative error is retained as a
+diagnostic, not a gate, because AdamW sign-normalizes gradients near zero on
+its first update.
+
+Thirty-step full-model measurements follow, with five warmup steps excluded.
+`Compiled estimate` is the consistent JAX executable-memory estimate
+`arguments + output + temporaries - aliases`; it is conservative and can
+exceed physical HBM for a successfully executing program, so compile success
+or the compiler's OOM report remains authoritative at the boundary.
+
+| Loss | Microbatch/chip | GA | Remat | Global tok/s | Compiled estimate | Result |
+| --- | ---: | ---: | --- | ---: | ---: | --- |
+| standard | 8 | 1 | `minimal_with_context` | 545,529 | 16.289 GB | selected matched-batch control |
+| fused | 8 | 1 | `minimal_with_context` | 537,191 | 17.329 GB | -1.53%; memory also worse |
+| standard | 16 | 8 | `save_dot_except_mlp` | **598,543** | 36.947 GB | throughput selection |
+| fused | 16 | 8 | `save_dot_except_mlp` | 582,997 | **31.838 GB** | -2.60%; saves 5.109 GB |
+| standard | 32 | 4 | `save_dot_except_mlp` | 582,498 | 40.437 GB | fits without fused loss |
+| fused | 32 | 4 | `save_dot_except_mlp` | 572,776 | 39.663 GB | -1.67%; saves 0.775 GB |
+| fused | 64 | 2 | `save_dot_except_mlp` | compile OOM | n/a | rejected at this remat policy |
+| standard | 64 | 2 | `full` | compile OOM | >31.25 GB physical | misses by 84.6 MB |
+| fused | 64 | 2 | `full` | 550,039 | 37.710 GB | only batch-64 path that fits |
+
+The fused primitive therefore answers the memory question narrowly rather
+than generally. It does unlock batch 64 under full rematerialization, and at
+batch 16 it substantially reduces the compiled estimate. It does not unlock
+batch 32, and at batch 8 the estimate moves in the wrong direction. In every
+shape that can be compared head-to-head, recomputing the projection inside
+the primitive costs 1.5% to 2.6% full-model throughput.
+
+The best operating point remains standard loss at microbatch 16/GA=8. The
+fused batch-64 configuration is retained as a capacity-qualified option, not
+the default. Its larger microbatch does not compensate for full
+rematerialization and the fused-loss recomputation.
+
+One Trillium flag candidate was also tested at the selected standard
+batch-16/GA=8 point. Adding async all-reduce fusion plus the data-parallel
+all-reduce optimizer reached 594,260 tok/s and a 42.579 GB compiled estimate:
+0.72% slower and 5.63 GB larger than the existing profile. The bundle is
+rejected, and the current v6e-8 flags remain unchanged.
+
+Artifacts:
+
+- `v6e8-fused-linear-ce-20260721/`
