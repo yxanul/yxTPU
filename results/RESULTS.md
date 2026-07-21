@@ -1202,3 +1202,73 @@ Artifacts:
 - `v6e8-climbmix-realtext-precision-20260721/`
 - `v6e8-kda-substitution-realtext-20260721/`
 - `v6e8-climbmix-1b-substitution-20260721/`
+
+### Divide-and-conquer inverse solve: substitution's stability at less than doubling's cost
+
+Substitution closed the numerical gate but reopened the throughput one: its
+16-row serial base case chains roughly sixty dependent six-pass matmuls per
+solve, the backward runs that chain twice, and the earlier profile had already
+shown the solve is bound by matmul latency rather than FLOPs. The replacement
+computes the exact unit-lower inverse bottom-up. Base 2×2 diagonal blocks
+invert as `I - L` with no matmul at all, and each dyadic merge level joins two
+already inverted halves with `inv = M - M @ C @ M`. That identity is exact,
+not a truncation: premultiplied by the block-diagonal inverse, the coupling
+between two inverted halves is nilpotent of index two, so the two-term
+expansion terminates. The full 64×64 inverse forms in ten uniform `[64, 64]`
+matmuls, one dense MXU matmul applies it to the combined 256-wide right-hand
+side, and the backward reuses one formation for both its forward recompute and
+its transposed solve. No matrix power and no series sum appears anywhere, so
+the method inherits substitution's stability class, and every solve matmul
+keeps the full six-pass FP32 decomposition.
+
+Native v6e core, production shape (`B=8`, `T=2048`, `H=8`, chunk 64):
+
+| Fused core | Substitution | Inverse |
+| --- | ---: | ---: |
+| Forward | 3.269 ms | 2.192 ms |
+| Forward+backward | 9.240 ms | **5.033 ms** |
+
+The rejected doubling path measured 6.44 ms, so the inverse is not merely a
+recovery: it beats the unstable algorithm it replaced the replacement for.
+
+Every real-text gate was rerun on native v6e-8. The exact
+update-7/microbatch-4 trigger:
+
+| Path | Loss | Gradient norm | Max gradient element |
+| --- | ---: | ---: | ---: |
+| fused inverse | 11.382546 | **2.406743** | **0.054526** |
+| full-FP32 analytical | 11.382677 | 2.406825 | 0.054542 |
+
+The exhaustive on-device gradient-vector comparison measures relative L2
+`0.018622` at cosine `0.999827` with bit-identical parameters, statistically
+indistinguishable from substitution's `0.018656` at `0.999827`. The solver
+change therefore neither adds error nor removes the known 1.8% discrepancy,
+which the earlier all-roles-HIGHEST control already attributed to the one-pass
+BF16 chunk/state/pairwise policy. The `3e-4` analytical-equivalence gate
+continues to fail for that pre-existing reason.
+
+The 15-step real ClimbMix run covers the known spike updates 7, 13, and 15,
+remains finite throughout, and matches the reference trajectory: step-15 loss
+`9.228989` against substitution's `9.228992` and the analytical `9.228950`,
+step-15 gradient norm `1.990424` against the analytical `1.990441`. Mean
+throughput is **616,303 global tok/s** at the unchanged 31,989,071,680-byte
+compiled estimate:
+
+| ClimbMix profile, microbatch 16/GA=8 | Global tok/s |
+| --- | ---: |
+| full-FP32 analytical fallback | 172,961 |
+| fused substitution (previous selection) | 472,668 |
+| fused doubling (numerically invalid) | 566,328 |
+| **fused inverse (selected)** | **616,303** |
+
+This is +30.4% over the previous selection, above every recorded operating
+point of this model, and narrows the gap to the matched global-attention
+control from about 2.3x to about 1.76x at sequence length 2048. Projected 10B
+accelerator time falls from about 5.9 to about 4.5 hours before evaluation
+overhead. The stale "doubling solve" label inside the two archived
+core-benchmark JSONs predates a benchmark-script fix; the timings follow the
+`KDA_SOLVE_METHOD` environment selection recorded alongside them.
+
+Artifacts:
+
+- `v6e8-kda-inverse-solve-20260721/`

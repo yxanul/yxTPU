@@ -21,10 +21,10 @@ recomputes compact intra-chunk quantities, emits BF16 output, and stores only
 the FP32 state after that chunk for a future custom backward.
 
 This module deliberately fixes the validated precision and solver policy:
-one-pass BF16-operand matmuls for ordinary KDA work and 16-row serial
-substitution with full-pass FP32 inter-block coupling for the WY solve and its
-transpose. Recursive doubling, stage exits, and unsafe precision controls live
-under ``pretraining/benchmarks/kda_fused_experimental.py``.
+one-pass BF16-operand matmuls for ordinary KDA work and a full-pass FP32
+divide-and-conquer explicit inverse for the WY solve and its transpose.
+Recursive doubling, stage exits, and unsafe precision controls live under
+``pretraining/benchmarks/kda_fused_experimental.py``.
 """
 
 from __future__ import annotations
@@ -44,31 +44,49 @@ _SOLVE_BLOCK_SIZE = 16
 # repeated squaring and is retained only as an experimental control. Correlated
 # real-text keys make its explicit L^2 ... L^32 intermediates grow to roughly
 # 1e12 even when the unit-lower system and its true solution are benign. The
-# resulting FP32 cancellation invalidates the backward. Production therefore
-# uses 16-row blocked substitution, which never forms global powers.
+# resulting FP32 cancellation invalidates the backward.
+#
+# "substitution", the fail-closed replacement, is stable but latency-bound:
+# its 16-row serial base case chains roughly sixty tiny six-pass matmuls per
+# solve, and the backward runs that chain twice. It measured 9.24 ms in the
+# fused core and 472,668 tok/s in the ClimbMix model.
+#
+# Production uses "inverse": a divide-and-conquer explicit unit-lower inverse
+# whose merge step ``inv = M - M @ C @ M`` is exact because the premultiplied
+# coupling between two inverted halves is nilpotent of index two. It forms no
+# matrix power and no series sum, so it keeps substitution's stability class,
+# while the whole 64x64 inverse forms in ten uniform matmuls and one dense
+# apply solves the 256-wide right-hand side. The backward reuses one formation
+# for both its forward recompute and its transposed solve. Measured: 5.02 ms
+# fused core forward+backward (substitution 9.24, rejected doubling 6.44) and
+# 616,303 tok/s over the 15-step real-text gate, +30.4% over substitution,
+# with every trigger step finite. On the exact update-7/microbatch-4 trigger
+# it matches the full-FP32 analytical reference at least as closely as
+# substitution did: gradient norm 2.406743 vs reference 2.406825, exhaustive
+# vector comparison 1.8622% relative L2 at cosine 0.999827 (substitution:
+# 1.8656% at 0.999827; the residual is the one-pass BF16 chunk/state/pairwise
+# policy, not the solver).
 #
 # The stress harness established that condition number, power
 # growth, and solution-path cancellation are complementary diagnostics, but
 # none orders every regime correctly. Production therefore gates precision on
 # measured BF16-versus-full-pass solve and gradient error, not on a proxy.
-# See benchmarks/diagnose_wy_conditioning.py and EXP-034 in EXPERIMENTS.md.
-#
-# The earlier model result used BF16 inter-block coupling. Real ClimbMix
-# qualification instead selects HIGHEST coupling: 472,668 tok/s on the 309.1M
-# model, with the exact update-7 trigger matching the analytical reference and
-# all 15 known-trigger steps remaining finite.
-#
-# An earlier rejection of substitution was measured through a bug: both custom
-# VJP call sites hardcoded solve_method="doubling", so the forward never used
-# the selected method and the base case was itself a nilpotent series. Those
-# runs compared doubling-forward against doubling-forward.
-_SOLVE_METHOD = "substitution"
+# See benchmarks/diagnose_wy_conditioning.py and EXP-034/EXP-036 in
+# EXPERIMENTS.md.
+_SOLVE_METHOD = "inverse"
 
 # Base case for the substitution solve. "serial" forms no power of the
 # diagonal block at all and is the stable limit; "doubling" runs the same
 # nilpotent series on the 16x16 block, where the growth exponent is 15 rather
 # than 63 and full passes are cheap because the block is small.
 _SOLVE_BASE_CASE = "serial"
+
+# Diagonal block size at which the "inverse" solve stops recursing and reads
+# the block inverse directly. At 2 the base case is ``I - L`` with no matmul at
+# all, which minimizes the sequential matmul chain: the whole 64x64 inverse
+# forms in 2*log2(64/2) = 10 uniform matmuls. Larger bases trade chain length
+# for fewer, equally stable masked-row steps and exist only for measurement.
+_SOLVE_INVERSE_BASE_BLOCK_SIZE = 2
 
 # Rows of the decayed pairwise matrix built per MXU matmul. Each row block
 # rescales both operands around a shared per-channel anchor, so the block size
@@ -570,6 +588,95 @@ def _solve_transposed_unit_lower_triangular_substitution(
   return jnp.concatenate(solved_blocks, axis=-2)
 
 
+def _iota_rows_cols(size: int) -> tuple[jax.Array, jax.Array]:
+  """Row and column index planes, built with iota so Pallas traces them as ops
+  instead of rejecting them as captured array constants."""
+  rows = lax.broadcasted_iota(jnp.int32, (size, size), 0)
+  cols = lax.broadcasted_iota(jnp.int32, (size, size), 1)
+  return rows, cols
+
+
+def _blockdiag_strictly_lower_mask(size: int, block: int) -> jax.Array:
+  """Selects strictly-lower entries that stay inside ``block``-sized diagonal blocks."""
+  rows, cols = _iota_rows_cols(size)
+  return ((rows // block == cols // block) & (rows > cols)).astype(jnp.float32)
+
+
+def _block_row_mask(size: int, block: int, row: int) -> jax.Array:
+  """Selects every row whose index within its ``block``-sized block is ``row``."""
+  rows = lax.broadcasted_iota(jnp.int32, (size, 1), 0)
+  return (rows % block == row).astype(jnp.float32)
+
+
+def _half_coupling_mask(size: int, half: int) -> jax.Array:
+  """Selects the lower-left ``half x half`` coupling block of each ``2*half`` pair."""
+  rows, cols = _iota_rows_cols(size)
+  same_pair = rows // (2 * half) == cols // (2 * half)
+  row_in_lower_half = rows % (2 * half) >= half
+  column_in_upper_half = cols % (2 * half) < half
+  return (same_pair & row_in_lower_half & column_in_upper_half).astype(jnp.float32)
+
+
+def _unit_lower_inverse(system: jax.Array) -> jax.Array:
+  """Exact inverse of ``I + tril(system, -1)`` without forming matrix powers.
+
+  Base diagonal blocks are inverted by masked serial substitution; at base 2
+  the block inverse is literally ``I - L`` with no matmul. Each merge level
+  then joins adjacent inverted blocks with the exact identity
+  ``inv = M - M @ C @ M``: the coupling ``C`` between two inverted halves is
+  nilpotent of index two once premultiplied by the block-diagonal inverse, so
+  the two-term expansion is not a truncation. Every matmul multiplies already
+  inverted, conditioning-bounded quantities; no ``L^2 ... L^32`` intermediate
+  and no series cancellation exists anywhere, which is what invalidated
+  recursive doubling on correlated real-text keys.
+
+  The full 64x64 inverse forms in ``base - 2`` masked-row matmuls plus two
+  matmuls per level: ten sequential ``[64, 64]`` matmuls at base 2, against
+  roughly sixty-six chained row/coupling matmuls for row-serial substitution.
+  Applying the inverse to a right-hand side is then one dense MXU matmul, and
+  the backward pass reuses one formation for both its forward recompute and
+  its transposed solve.
+  """
+  rows = system.shape[-1]
+  base = _SOLVE_INVERSE_BASE_BLOCK_SIZE
+  if rows & (rows - 1):
+    raise ValueError(f"triangular dimension must be a power of two, got {rows}")
+  if base < 2 or base & (base - 1) or rows % base:
+    raise ValueError(f"invalid inverse base block size {base} for dimension {rows}")
+  lower = jnp.tril(system.astype(jnp.float32), k=-1)
+  index_rows, index_cols = _iota_rows_cols(rows)
+  identity = (index_rows == index_cols).astype(jnp.float32)
+  base_lower = lower * _blockdiag_strictly_lower_mask(rows, base)
+
+  inverse = identity - base_lower * _block_row_mask(rows, base, 1)
+  for row in range(2, base):
+    row_update = base_lower * _block_row_mask(rows, base, row)
+    inverse = inverse - _solve_matmul(row_update, inverse)
+
+  half = base
+  while half < rows:
+    coupling = lower * _half_coupling_mask(rows, half)
+    inverse = inverse - _solve_matmul(_solve_matmul(inverse, coupling), inverse)
+    half *= 2
+  return inverse
+
+
+def _solve_unit_lower_triangular_inverse(system: jax.Array, rhs: jax.Array) -> jax.Array:
+  """Solves ``(I + tril(system, -1)) X = rhs`` through the explicit inverse."""
+  return _solve_apply_matmul(_unit_lower_inverse(system), rhs.astype(jnp.float32))
+
+
+def _solve_transposed_unit_lower_triangular_inverse(
+    system: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+  """Solves ``(I + tril(system, -1)).T X = rhs`` through the explicit inverse."""
+  return _solve_apply_matmul(
+      _transpose(_unit_lower_inverse(system)),
+      rhs.astype(jnp.float32),
+  )
+
+
 def _nilpotent_series_solve(power: jax.Array, rhs: jax.Array) -> jax.Array:
   """Applies ``(I - power)^-1`` when ``power`` is strictly triangular."""
   rows = rhs.shape[-2]
@@ -673,6 +780,8 @@ def _kda_fused_forward_kernel(
     solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
   elif solve_method == "substitution":
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
+  elif solve_method == "inverse":
+    solved = _solve_unit_lower_triangular_inverse(system, combined_rhs)
   else:
     raise ValueError(f"unknown solve method: {solve_method}")
   u = solved[..., :value_dim]
@@ -773,16 +882,18 @@ def _kda_fused_backward_kernel(
       include_diagonal=True,
   )
   w_input = key_beta * cumulative_decay_exp
-  if _SOLVE_METHOD == "substitution":
-    solved = _solve_unit_lower_triangular_substitution(
-        system,
-        jnp.concatenate((value_beta, w_input), axis=-1),
-    )
+  combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
+  if _SOLVE_METHOD == "inverse":
+    # One formation serves both the forward recompute here and the transposed
+    # solve below; the transpose of the inverse is free inside the matmul.
+    system_inverse = _unit_lower_inverse(system)
+    solved = _solve_apply_matmul(system_inverse, combined_rhs)
+  elif _SOLVE_METHOD == "substitution":
+    system_inverse = None
+    solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
   else:
-    solved = _solve_unit_lower_triangular_doubling(
-        system,
-        jnp.concatenate((value_beta, w_input), axis=-1),
-    )
+    system_inverse = None
+    solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
   u = solved[..., :value_dim]
   w = solved[..., value_dim : value_dim + key_dim]
 
@@ -842,7 +953,12 @@ def _kda_fused_backward_kernel(
     return
 
   solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
-  if _SOLVE_METHOD == "substitution":
+  if _SOLVE_METHOD == "inverse":
+    combined_rhs_cotangent = _solve_apply_matmul(
+        _transpose(system_inverse),
+        solved_cotangent,
+    )
+  elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
         system,
         solved_cotangent,
@@ -997,8 +1113,10 @@ def _pallas_kda_fused_forward(
         "the first production kernel is specialized to chunk=64 and K=V=128, "
         f"got chunk={chunk_size}, K={key_dim}, V={value_dim}"
     )
-  if solve_method not in ("blocked", "doubling", "substitution"):
-    raise ValueError(f"solve_method must be blocked or doubling, got {solve_method}")
+  if solve_method not in ("blocked", "doubling", "substitution", "inverse"):
+    raise ValueError(
+        f"solve_method must be blocked, doubling, substitution, or inverse, got {solve_method}"
+    )
   if profile_stage not in ("preprocess", "pairwise", "solve", "full"):
     raise ValueError(f"unknown forward profile stage: {profile_stage}")
 

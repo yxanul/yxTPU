@@ -58,6 +58,7 @@ and status here. Detailed measurements and profile interpretation live in
 | EXP-033 | Keep attention-logit diagnostics batch-independent across donated NNX train state | The step-250 failure was a telemetry shape leak, not a model failure: both GQA intermediates changed from `[cycles,1,heads]` to `[cycles,batch,heads]`. Reducing over batch in both attention paths and keeping the accumulator at `[cycles,1,heads]` passes 47 CPU tests and a native v6e-8 step-2 validation/diagnostics -> step-3 transition with finite diagnostics | `results/v6e8-climbmix-diagnostics-shape-20260721/` |
 | EXP-034 | Replace recursive doubling with correlated-key-qualified blocked substitution | Doubling explicitly formed `L^2...L^32`; correlated real-text keys drove intermediate norms to ~1e12 and catastrophic FP32 cancellation. Sixteen-row serial substitution with HIGHEST inter-block coupling matches the aggregate norm/max statistics on the exact bad ClimbMix microbatch: 2.406645/0.054548 versus 2.406825/0.054542 from the analytical reference. A 15-step native v6e-8 run covers all known triggers, stays finite, matches the reference loss within 4.2e-5 at step 15, and reaches 472,668 tok/s at a 31,989,071,680-byte compiled estimate—2.73x the safe analytical path. EXP-035 adds the missing whole-gradient comparison | `results/v6e8-kda-substitution-realtext-20260721/` |
 | EXP-035 | Run fused substitution for 1B real tokens and execute the exact-trigger vector gate | The AdamW ClimbMix run completes 1,000,341,504 tokens with every loss/gradient finite, final loss 4.23895, mean 472,463 tok/s, and unchanged 31,989,071,680-byte compiled peak. This closes the long-run stability gate. The strengthened on-device trigger comparison exposes what aggregate norms hid: production substitution differs from the analytical gradient by 1.8655% relative L2 at cosine 0.9998266; promoting every fused matmul role still gives 1.7893%. Parameters are bit-identical. The path is workload stability-qualified but fails a few-times-1e-4 analytical-equivalence criterion, so it is not yet an unconditional 10B default | `results/v6e8-climbmix-1b-substitution-20260721/`; W&B run `g4gaekvg` |
+| EXP-036 | Replace serial substitution with a divide-and-conquer explicit inverse for the WY solve | Substitution was latency-bound: ~60 chained six-pass matmuls per solve, run twice in backward. The exact inverse instead forms bottom-up — 2×2 base blocks are `I - L`, and each dyadic merge is the exact two-matmul identity `inv = M - M @ C @ M` because the premultiplied coupling is nilpotent of index two — ten uniform matmuls total, one dense apply, one formation shared by backward's recompute and transposed solve, no matrix powers or series sums anywhere. Core forward+backward falls from 9.240 to 5.033 ms, beating even rejected doubling's 6.44 ms. All real-text gates rerun: the update-7 trigger matches the analytical reference at least as closely as substitution (norm 2.406743 vs 2.406825), the exhaustive vector gate is unchanged (1.8622% vs 1.8656% relative L2, cosine 0.999827), and the 15-step ClimbMix run stays finite with matching losses at **616,303 tok/s** (+30.4%) and an unchanged 31,989,071,680-byte compiled peak. The attention gap at 2048 narrows from ~2.3x to ~1.76x | `results/v6e8-kda-inverse-solve-20260721/` |
 
 ## Open experiments
 
@@ -74,23 +75,29 @@ These are recorded so the reasoning is not lost. None has been run.
 ## Precision policy
 
 Recursive doubling is rejected and is not selectable through the training
-configuration. The production fused kernel fixes the solve to 16-row serial
-substitution with HIGHEST inter-block coupling; the `guarded_fp32` name refers
-to that policy, not to doubling.
+configuration. The production fused kernel fixes the solve to the
+divide-and-conquer explicit inverse of EXP-036, with every solve matmul at the
+full six-pass FP32 decomposition; the `guarded_fp32` name refers to that
+policy, not to doubling. Like substitution, the inverse forms no matrix power
+and no series sum, so it sits in the stable algorithm class; 16-row serial
+substitution remains implemented in the kernel as the slower stable control.
 
-Substitution has two distinct qualification results. It is strongly
-workload-stability-qualified by the exact trigger, the 15-step spike sweep, and
-a finite 1B-token real ClimbMix run. It is not yet analytically equivalent
-under a few-times-`1e-4` whole-gradient criterion: the exact trigger measures
-1.8655% relative L2 error at cosine 0.9998266, and promoting every fused matmul
-role still measures 1.7893%. Aggregate norm/max agreement must not be presented
-as vector agreement.
+The inverse path has two distinct qualification results, inherited unchanged
+from substitution. It is workload-stability-qualified by the exact trigger,
+the 15-step spike sweep, and (for the equal-numerics substitution
+predecessor) a finite 1B-token real ClimbMix run. It is not analytically
+equivalent under a few-times-`1e-4` whole-gradient criterion: the exact
+trigger measures 1.8622% relative L2 error at cosine 0.999827 (substitution:
+1.8656%), and EXP-035 showed the discrepancy is carried by the one-pass BF16
+chunk/state/pairwise policy, not the solver. Aggregate norm/max agreement
+must not be presented as vector agreement.
 
-The ClimbMix profile currently selects substitution, while `full_fp32` remains
-the correctness reference. A 10B launch therefore needs an explicit decision
-that the measured BF16 gradient discrepancy is acceptable, or a further
-experiment that explains/reduces it against an appropriate BF16 baseline. The
-1B stability result alone does not license the phrase "reference-equivalent."
+The ClimbMix profile currently selects the inverse solve, while `full_fp32`
+remains the correctness reference. A 10B launch therefore needs an explicit
+decision that the measured BF16 gradient discrepancy is acceptable, or a
+further experiment that explains/reduces it against an appropriate BF16
+baseline. Stability results alone do not license the phrase
+"reference-equivalent."
 
 ## Selection rule
 

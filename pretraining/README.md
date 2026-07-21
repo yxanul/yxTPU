@@ -7,9 +7,10 @@ without importing MaxText's model registry or top-level trainer.
 
 The validated architecture is four `[KDA, KDA, KDA, NoPE-GQA]` cycles with
 RMSNorm and fused SwiGLU. KDA uses BF16 Q/K/V traffic and FP32 weights and
-chunk-boundary states. The fused Pallas path uses blocked WY substitution with
-full-pass FP32 inter-block coupling; recursive doubling is confined to
-benchmarks after ClimbMix exposed its catastrophic cancellation (EXP-032/034).
+chunk-boundary states. The fused Pallas path solves the WY system through a
+full-pass FP32 divide-and-conquer explicit inverse that forms no matrix
+powers (EXP-036); recursive doubling is confined to benchmarks after ClimbMix
+exposed its catastrophic cancellation (EXP-032/034).
 
 ## Install
 
@@ -138,27 +139,31 @@ cannot resume after Spot preemption.
 
 For this 309.1M GPT-2-vocabulary model, the fused output loss remains selected
 as a capacity requirement: standard loss at microbatch 16/GA=8 exceeds v6e HBM
-during compilation. KDA uses the fused substitution VJP. It compiles with a
-31,989,071,680-byte executable estimate and sustains about 472.7k tok/s,
-putting the accelerator-only 10B-token time near 5.9 hours before evaluation
-overhead.
+during compilation. KDA uses the fused divide-and-conquer inverse VJP
+(EXP-036). It compiles with a 31,989,071,680-byte executable estimate and
+sustains about 616.3k tok/s, putting the accelerator-only 10B-token time near
+4.5 hours before evaluation overhead.
 
 The earlier recursive-doubling Pallas measurement reached 566.3k tok/s but is
 rejected. With frozen weights, update 7 contained one microbatch whose gradient
-norm was 3,933.7 instead of the full-FP32 reference's 2.407. Substitution with
-HIGHEST coupling gives 2.406645 on that trigger and stays finite through all 15
-known-trigger steps. It also completes 1,000,341,504 streamed ClimbMix tokens
-with final loss 4.23895 and mean throughput 472.5k tok/s. The analytical 173.0k
-path remains the debug fallback.
+norm was 3,933.7 instead of the full-FP32 reference's 2.407. The stable-class
+solvers match the reference on that trigger: substitution gives 2.406645, the
+selected inverse gives 2.406743, and both stay finite through all 15
+known-trigger steps. Substitution additionally completed 1,000,341,504
+streamed ClimbMix tokens with final loss 4.23895 at 472.5k tok/s before being
+superseded on throughput; it remains the slower stable control. The analytical
+173.0k path remains the debug fallback.
 
 That stability result is not the same as analytical gradient equivalence. A
-whole-gradient comparison on the exact trigger measures 1.8655% relative L2
-error at cosine 0.9998266; promoting every fused matmul role still measures
-1.7893%. The current profile is therefore workload stability-qualified, but it
-must not be called an unconditional reference-equivalent 10B default without
-an explicit BF16 tolerance decision or further reduction of that discrepancy.
-See EXP-032/034/035 and
-`../results/v6e8-climbmix-1b-substitution-20260721/`.
+whole-gradient comparison on the exact trigger measures 1.8622% relative L2
+error at cosine 0.999827 for the inverse (substitution: 1.8656%); promoting
+every fused matmul role still measures 1.7893%. The current profile is
+therefore workload stability-qualified, but it must not be called an
+unconditional reference-equivalent 10B default without an explicit BF16
+tolerance decision or further reduction of that discrepancy.
+See EXP-032/034/035/036,
+`../results/v6e8-climbmix-1b-substitution-20260721/`, and
+`../results/v6e8-kda-inverse-solve-20260721/`.
 
 Training metrics are emitted after device synchronization, outside the timed
 and compiled update. Gradient, parameter, hidden-state, sampled-logit, and

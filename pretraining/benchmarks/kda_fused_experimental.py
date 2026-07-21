@@ -67,6 +67,10 @@ _SOLVE_METHOD = os.environ.get("KDA_SOLVE_METHOD", "doubling")
 # than 63 and full passes are cheap because the block is small.
 _SOLVE_BASE_CASE = os.environ.get("KDA_SOLVE_BASE_CASE", "serial")
 
+# Diagonal block size at which the "inverse" solve stops recursing and reads
+# the block inverse directly; see the production kernel for the derivation.
+_SOLVE_INVERSE_BASE_BLOCK_SIZE = int(os.environ.get("KDA_SOLVE_INVERSE_BASE", "2"))
+
 # Rows of the decayed pairwise matrix built per MXU matmul. Each row block
 # rescales both operands around a shared per-channel anchor, so the block size
 # is bounded by how much channel decay may accumulate across it before the FP32
@@ -566,6 +570,84 @@ def _solve_transposed_unit_lower_triangular_substitution(
   return jnp.concatenate(solved_blocks, axis=-2)
 
 
+def _iota_rows_cols(size: int) -> tuple[jax.Array, jax.Array]:
+  """Row and column index planes, built with iota so Pallas traces them as ops
+  instead of rejecting them as captured array constants."""
+  rows = lax.broadcasted_iota(jnp.int32, (size, size), 0)
+  cols = lax.broadcasted_iota(jnp.int32, (size, size), 1)
+  return rows, cols
+
+
+def _blockdiag_strictly_lower_mask(size: int, block: int) -> jax.Array:
+  """Selects strictly-lower entries that stay inside ``block``-sized diagonal blocks."""
+  rows, cols = _iota_rows_cols(size)
+  return ((rows // block == cols // block) & (rows > cols)).astype(jnp.float32)
+
+
+def _block_row_mask(size: int, block: int, row: int) -> jax.Array:
+  """Selects every row whose index within its ``block``-sized block is ``row``."""
+  rows = lax.broadcasted_iota(jnp.int32, (size, 1), 0)
+  return (rows % block == row).astype(jnp.float32)
+
+
+def _half_coupling_mask(size: int, half: int) -> jax.Array:
+  """Selects the lower-left ``half x half`` coupling block of each ``2*half`` pair."""
+  rows, cols = _iota_rows_cols(size)
+  same_pair = rows // (2 * half) == cols // (2 * half)
+  row_in_lower_half = rows % (2 * half) >= half
+  column_in_upper_half = cols % (2 * half) < half
+  return (same_pair & row_in_lower_half & column_in_upper_half).astype(jnp.float32)
+
+
+def _unit_lower_inverse(system: jax.Array) -> jax.Array:
+  """Exact inverse of ``I + tril(system, -1)`` without forming matrix powers.
+
+  Masked serial substitution inverts the base diagonal blocks (at base 2 the
+  block inverse is ``I - L`` with no matmul); each merge level then joins
+  adjacent inverted blocks with the exact identity ``inv = M - M @ C @ M``.
+  No nilpotent power or series sum appears anywhere. See the production
+  kernel's docstring for the full derivation.
+  """
+  rows = system.shape[-1]
+  base = _SOLVE_INVERSE_BASE_BLOCK_SIZE
+  if rows & (rows - 1):
+    raise ValueError(f"triangular dimension must be a power of two, got {rows}")
+  if base < 2 or base & (base - 1) or rows % base:
+    raise ValueError(f"invalid inverse base block size {base} for dimension {rows}")
+  lower = jnp.tril(system.astype(jnp.float32), k=-1)
+  index_rows, index_cols = _iota_rows_cols(rows)
+  identity = (index_rows == index_cols).astype(jnp.float32)
+  base_lower = lower * _blockdiag_strictly_lower_mask(rows, base)
+
+  inverse = identity - base_lower * _block_row_mask(rows, base, 1)
+  for row in range(2, base):
+    row_update = base_lower * _block_row_mask(rows, base, row)
+    inverse = inverse - _solve_matmul(row_update, inverse)
+
+  half = base
+  while half < rows:
+    coupling = lower * _half_coupling_mask(rows, half)
+    inverse = inverse - _solve_matmul(_solve_matmul(inverse, coupling), inverse)
+    half *= 2
+  return inverse
+
+
+def _solve_unit_lower_triangular_inverse(system: jax.Array, rhs: jax.Array) -> jax.Array:
+  """Solves ``(I + tril(system, -1)) X = rhs`` through the explicit inverse."""
+  return _solve_apply_matmul(_unit_lower_inverse(system), rhs.astype(jnp.float32))
+
+
+def _solve_transposed_unit_lower_triangular_inverse(
+    system: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+  """Solves ``(I + tril(system, -1)).T X = rhs`` through the explicit inverse."""
+  return _solve_apply_matmul(
+      _transpose(_unit_lower_inverse(system)),
+      rhs.astype(jnp.float32),
+  )
+
+
 def _nilpotent_series_solve(power: jax.Array, rhs: jax.Array) -> jax.Array:
   """Applies ``(I - power)^-1`` when ``power`` is strictly triangular."""
   rows = rhs.shape[-2]
@@ -669,6 +751,8 @@ def _kda_fused_forward_kernel(
     solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
   elif solve_method == "substitution":
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
+  elif solve_method == "inverse":
+    solved = _solve_unit_lower_triangular_inverse(system, combined_rhs)
   else:
     raise ValueError(f"unknown solve method: {solve_method}")
   u = solved[..., :value_dim]
@@ -769,16 +853,16 @@ def _kda_fused_backward_kernel(
       include_diagonal=True,
   )
   w_input = key_beta * cumulative_decay_exp
-  if _SOLVE_METHOD == "substitution":
-    solved = _solve_unit_lower_triangular_substitution(
-        system,
-        jnp.concatenate((value_beta, w_input), axis=-1),
-    )
+  combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
+  if _SOLVE_METHOD == "inverse":
+    system_inverse = _unit_lower_inverse(system)
+    solved = _solve_apply_matmul(system_inverse, combined_rhs)
+  elif _SOLVE_METHOD == "substitution":
+    system_inverse = None
+    solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
   else:
-    solved = _solve_unit_lower_triangular_doubling(
-        system,
-        jnp.concatenate((value_beta, w_input), axis=-1),
-    )
+    system_inverse = None
+    solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
   u = solved[..., :value_dim]
   w = solved[..., value_dim : value_dim + key_dim]
 
@@ -838,7 +922,12 @@ def _kda_fused_backward_kernel(
     return
 
   solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
-  if _SOLVE_METHOD == "substitution":
+  if _SOLVE_METHOD == "inverse":
+    combined_rhs_cotangent = _solve_apply_matmul(
+        _transpose(system_inverse),
+        solved_cotangent,
+    )
+  elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
         system,
         solved_cotangent,
@@ -993,8 +1082,10 @@ def pallas_kda_fused_forward(
         "the first production kernel is specialized to chunk=64 and K=V=128, "
         f"got chunk={chunk_size}, K={key_dim}, V={value_dim}"
     )
-  if solve_method not in ("blocked", "doubling", "substitution"):
-    raise ValueError(f"solve_method must be blocked or doubling, got {solve_method}")
+  if solve_method not in ("blocked", "doubling", "substitution", "inverse"):
+    raise ValueError(
+        f"solve_method must be blocked, doubling, substitution, or inverse, got {solve_method}"
+    )
   if profile_stage not in ("preprocess", "pairwise", "solve", "full"):
     raise ValueError(f"unknown forward profile stage: {profile_stage}")
 
