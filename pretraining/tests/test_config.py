@@ -118,6 +118,7 @@ def test_climbmix_profile_is_explicit_streaming_no_checkpoint_run():
     assert config.data.dataset_name == "karpathy/climbmix-400b-shuffle"
     assert config.data.streaming is True
     assert config.data.validation_fraction == 0.01
+    assert config.model.kda.precision == "full_fp32"
     assert config.data.prefetch_batches == 3
     assert config.experiment.token_budget == 10_000_000_000
     assert config.experiment.checkpoint.enabled is False

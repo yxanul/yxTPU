@@ -80,7 +80,12 @@ def make_leaf_config(config: ResolvedConfig) -> SimpleNamespace:
         kda_use_fused_pallas_kernel=kda.precision == "guarded_fp32",
         kda_precision=kda.precision,
         kda_use_pallas_blocked_solve=False,
-        kda_use_analytical_custom_vjp=False,
+        # The fused Pallas backward is retained for synthetic benchmarks, but
+        # real ClimbMix batches exposed workload-specific gradient explosions.
+        # The full-FP32 production mode uses the validated analytical VJP,
+        # which recomputes compact chunk values instead of retaining autodiff
+        # intermediates and is materially faster than generic XLA autodiff.
+        kda_use_analytical_custom_vjp=kda.precision == "full_fp32",
         # AttentionOp fields. Tokamax Splash is the only TPU production path.
         head_dim=attention.head_dim,
         attention_kernel="flash",
