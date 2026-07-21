@@ -1,11 +1,17 @@
 # KDA precision policy
 
 The production kernel exports only `pallas_kda_fused`. It is specialized to a
-64-token chunk and a 128×128 FP32 recurrent state.
+64-token chunk and a 128×128 FP32 recurrent state, and it owns the whole QKV
+mixer: it consumes the raw fused-projection output `[B, T, 3, H, D]` and the
+conv weight, and runs the causal depthwise convolution, SiLU, Q/K
+normalization, and chunked recurrence in one program per batch element
+(EXP-037).
 
 `guarded_fp32` means:
 
-- BF16 Q/K/V input and output traffic;
+- BF16 raw-QKV input and output traffic;
+- FP32 in-kernel convolution accumulation and SiLU (the XLA reference path
+  convolves in BF16);
 - FP32 chunk-boundary state;
 - one-pass TPU matmuls for ordinary chunk, pairwise, and state work;
 - a full-pass FP32 divide-and-conquer explicit inverse for the WY solve and
@@ -59,13 +65,23 @@ Qualification on native v6e-8, 2026-07-21:
   operating point of this model, including the numerically invalid doubling
   path.
 
+The conv-folded kernel (EXP-037) reran every gate on the same day: core
+gradients including the conv weight match the XLA-mixer + analytical
+reference at or below `1.8e-9`; the trigger measures gradient norm
+`2.4068875` against the reference `2.4068251`; the exhaustive vector
+comparison measures `0.019792` relative L2 at cosine `0.999805` with
+bit-identical parameters (part of the movement from `0.018622` is the FP32
+in-kernel convolution against the reference's BF16 convolution); and 15
+real-text steps stay finite at **735,658 global tok/s** with a
+29,960,940,032-byte compiled peak, 2.03 GB below the unfolded kernel.
+
 The aggregate norm and maximum are not an elementwise gradient comparison,
 and the `3e-4` relative-L2 analytical-equivalence gate still fails for the
 same pre-existing reason it failed under substitution. The path may be
 described as stable on the measured ClimbMix workload. It must not be
 described as reference-equivalent or as an unconditional 10B default until
-the 1.8% vector discrepancy is accepted against an explicit BF16 baseline or
-reduced.
+the roughly 2% vector discrepancy is accepted against an explicit BF16
+baseline or reduced.
 
 The full model routes `full_fp32` to the owned XLA/recurrent reference with the
 validated analytical VJP. It remains the correctness fallback. It recomputes

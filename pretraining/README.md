@@ -7,10 +7,12 @@ without importing MaxText's model registry or top-level trainer.
 
 The validated architecture is four `[KDA, KDA, KDA, NoPE-GQA]` cycles with
 RMSNorm and fused SwiGLU. KDA uses BF16 Q/K/V traffic and FP32 weights and
-chunk-boundary states. The fused Pallas path solves the WY system through a
-full-pass FP32 divide-and-conquer explicit inverse that forms no matrix
-powers (EXP-036); recursive doubling is confined to benchmarks after ClimbMix
-exposed its catastrophic cancellation (EXP-032/034).
+chunk-boundary states. The fused Pallas kernel owns the whole QKV mixer —
+causal depthwise convolution, SiLU, Q/K normalization — consuming the raw
+projection output in its natural layout (EXP-037), and solves the WY system
+through a full-pass FP32 divide-and-conquer explicit inverse that forms no
+matrix powers (EXP-036); recursive doubling is confined to benchmarks after
+ClimbMix exposed its catastrophic cancellation (EXP-032/034).
 
 ## Install
 
@@ -139,10 +141,11 @@ cannot resume after Spot preemption.
 
 For this 309.1M GPT-2-vocabulary model, the fused output loss remains selected
 as a capacity requirement: standard loss at microbatch 16/GA=8 exceeds v6e HBM
-during compilation. KDA uses the fused divide-and-conquer inverse VJP
-(EXP-036). It compiles with a 31,989,071,680-byte executable estimate and
-sustains about 616.3k tok/s, putting the accelerator-only 10B-token time near
-4.5 hours before evaluation overhead.
+during compilation. KDA uses the fused divide-and-conquer inverse VJP with the
+QKV mixer folded into the kernel (EXP-036/037). It compiles with a
+29,960,940,032-byte executable estimate and sustains about 735.7k tok/s,
+putting the accelerator-only 10B-token time near 3.8 hours before evaluation
+overhead.
 
 The earlier recursive-doubling Pallas measurement reached 566.3k tok/s but is
 rejected. With frozen weights, update 7 contained one microbatch whose gradient
