@@ -133,7 +133,10 @@ def data_parallel_linear_cross_entropy(
         mesh=mesh,
         in_specs=(P("data", None), P("data"), P("data"), P()),
         out_specs=(P(), P()),
-        axis_names={"data"},
+        # Mosaic Pallas custom calls cannot cross any automatic partitioner
+        # boundary.  Mark the complete MaxText mesh manual; all axes other
+        # than data are required to have size one by configuration.
+        axis_names=set(mesh.axis_names),
         # Tokamax 0.0.12 constructs Pallas ShapeDtypeStruct outputs without the
         # manual_axis_type metadata required by JAX 0.10's VMA checker.  The
         # explicit psums below and the eight-device parity gate define and test
