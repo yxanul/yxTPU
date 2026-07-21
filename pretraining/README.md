@@ -62,6 +62,24 @@ uv run yx-pretrain benchmark --hardware v6e-8 --experiment selected
 uv run yx-pretrain benchmark --hardware v6e-8 --experiment max_throughput
 ```
 
+The default output loss remains the standard projected-logit cross-entropy.
+An opt-in Tokamax fused linear cross-entropy avoids materializing logits in the
+owned graph and has an explicit data-parallel reduction:
+
+```bash
+uv run yx-pretrain benchmark \
+  --hardware v6e-8 \
+  --experiment max_throughput \
+  --set model.loss.implementation=tokamax_fused
+```
+
+On v6e-8 this is a capacity option, not the throughput default. It made
+microbatch 64/GA=2 compile with full rematerialization when the standard loss
+missed available HBM by 84.6 MB, but every matched full-model comparison was
+1.5% to 2.6% slower. Standard loss at microbatch 16/GA=8 remains selected at
+598.5k tok/s. The complete parity and batch sweep is EXP-030 in
+`../EXPERIMENTS.md`.
+
 `sequence_sweep` is the 16,384-token crossover profile. Change
 `data.sequence_length` and `data.per_device_batch_size` with `--set` for the
 other measured points.
