@@ -84,7 +84,70 @@ missed available HBM by 84.6 MB, but every matched full-model comparison was
 `data.sequence_length` and `data.per_device_batch_size` with `--set` for the
 other measured points.
 
-## Real data and checkpoints
+## ClimbMix 10B training profile
+
+The primary real-data profile streams
+[`karpathy/climbmix-400b-shuffle`](https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle)
+without downloading the 600 GB corpus. It tokenizes on the fly with the Rust
+`GPT2TokenizerFast` backend, appends EOS between documents, densely packs
+2,048-token sequences, and pads GPT-2's 50,257-token vocabulary to 50,432 so
+the output dimension is a multiple of 256 on Trillium. A bounded background
+thread keeps three complete update batches ready.
+
+The source publishes only a `train` split. A stable content hash therefore
+reserves 1% of documents for validation before packing; training and validation
+streams are disjoint and reproducible even if upstream streaming order changes.
+Every 250 optimizer steps the trainer evaluates eight held-out microbatches and
+runs the separate TPU diagnostics pass. Every 1,250 steps it additionally runs
+the pinned EleutherAI lm-evaluation-harness suite:
+
+- normalized accuracy: HellaSwag, PIQA, ARC-Easy, ARC-Challenge, OpenBookQA;
+- raw accuracy: SciQ, BoolQ, COPA, CommonsenseQA, LAMBADA;
+- the ARC-Easy minus ARC-Challenge primary-metric gap; and
+- LAMBADA perplexity as a secondary metric.
+
+The harness scores the live NNX model on all eight devices; it does not export a
+checkpoint or create a second model. Full result JSON, including harness
+provenance, is written under the run directory and uploaded as a W&B artifact.
+Run `wandb login` once on the TPU VM. Credentials stay in the VM's credential
+store and are never passed on the command line or written to a configuration.
+
+Launch the foreground job on an existing, already-configured TPU VM with:
+
+```bash
+cd pretraining
+scripts/launch_climbmix_10b.sh
+```
+
+The equivalent public command is:
+
+```bash
+yx-pretrain train \
+  --model kda_hybrid_309m_gpt2 \
+  --optimizer adamw_10b \
+  --data climbmix \
+  --hardware v6e-8 \
+  --experiment climbmix_10b
+```
+
+This profile deliberately has no checkpoints. It must be acknowledged by
+`experiment.acknowledge_no_checkpoint=true`, stops after the first update that
+reaches the 10B-token budget (4,769 updates; 10,001,317,888 packed tokens), and
+cannot resume after Spot preemption.
+
+For this 309.1M GPT-2-vocabulary model, the fused loss is selected as a capacity
+requirement rather than a general throughput preference. Standard loss at
+microbatch 16/GA=8 exceeds v6e HBM during compilation. Fused loss compiles with
+a 31,989,071,680-byte executable estimate and sustained 566.3k tok/s after
+warmup on real ClimbMix batches. The smaller-vocabulary 272.9M benchmark still
+uses standard loss, as described above.
+
+Training metrics are emitted after device synchronization, outside the timed
+and compiled update. Gradient, parameter, hidden-state, sampled-logit, and
+per-attention-head logit diagnostics run in their own compiled pass every 250
+steps, so no host-side tree walk or W&B call enters the hot path.
+
+## Other real data and checkpoints
 
 Hugging Face records may come from `data.dataset_name`, or from an offline
 JSONL `data.dataset_path`. Each record contains either `input_ids` or `text`;

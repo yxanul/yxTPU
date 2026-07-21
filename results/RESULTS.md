@@ -1073,3 +1073,49 @@ rejected, and the current v6e-8 flags remain unchanged.
 Artifacts:
 
 - `v6e8-fused-linear-ce-20260721/`
+
+### ClimbMix 10B real-data training gate
+
+The production input stack now streams `karpathy/climbmix-400b-shuffle`, calls
+the Rust GPT-2 tokenizer on batches of 256 documents, appends EOS, densely packs
+2,048-token examples, and fills a bounded three-update prefetch queue. A stable
+content hash assigns 1% of documents to a disjoint held-out stream because the
+source has no published validation split. After cache warmup, host preparation
+of a full 2,097,152-token update measured 1.173M tok/s, more than twice the
+model's consumption rate.
+
+Padding GPT-2's vocabulary to 50,432 increases the hybrid to 309,111,392
+parameters and changes the loss-memory decision from EXP-030. At the required
+microbatch-16/GA=8 operating point, standard projected-logit cross-entropy
+fails compilation with 36.29 GB of temporaries. The fused loss compiles and
+runs:
+
+| Model/loss | Tokens/update | Global tok/s | Compiled peak estimate | Result |
+| --- | ---: | ---: | ---: | --- |
+| 309.1M, standard | 2,097,152 | n/a | >31.25 GB physical | compile OOM |
+| 309.1M, fused | 2,097,152 | **566,328** | 31,989,071,680 bytes | selected |
+
+The throughput number is the mean of the final two steps in a seven-step real
+ClimbMix run; the six post-first-step measurements lie between 566.18k and
+566.48k tok/s. The executable reports 28,275,503,136 bytes of temporaries and
+uses buffer donation/aliasing to fit. A raw gradient-norm excursion on the last
+short run was finite and optimizer clipping remained at 1.0; the independent
+diagnostic gate on a held-out batch measured gradient norm 2.461, gradient max
+0.0666, hidden RMS 1.0000, hidden max 6.165, sampled-logit max 5.105, and all
+attention-head max logits below 7.0.
+
+The final full-stack smoke ran on all eight v6e chips and completed the fused
+optimizer step, held-out validation, diagnostics, every requested
+lm-evaluation-harness task at a two-example smoke limit, JSON provenance
+serialization, and W&B artifact upload. Those task scores are connectivity and
+correctness checks, not meaningful quality estimates. Production evaluation
+uses the full task sets every 1,250 updates, while held-out loss and diagnostics
+run every 250 updates.
+
+The 10B budget is crossed after 4,769 updates, or 10,001,317,888 densely packed
+tokens. Checkpointing is deliberately disabled for this Spot run, so a
+preemption ends it rather than resuming or provisioning replacement capacity.
+
+Artifacts:
+
+- `v6e8-climbmix-10b-smoke-20260721/`

@@ -1,0 +1,28 @@
+{
+  "compiled_memory": {
+    "alias_size_in_bytes": 3709371904,
+    "argument_size_in_bytes": 3713566208,
+    "estimated_peak_bytes": 31989071680,
+    "generated_code_size_in_bytes": 1309394432,
+    "output_size_in_bytes": 3709374240,
+    "temp_size_in_bytes": 28275503136
+  },
+  "effective_batch_size_per_device": 128,
+  "effective_global_batch_size": 1024,
+  "final_loss": 11.378366470336914,
+  "gradient_accumulation_steps": 8,
+  "jax_device_count": 8,
+  "jax_process_count": 1,
+  "libtpu_init_args": "--xla_tpu_scoped_vmem_limit_kib=98304 --xla_enable_async_all_gather=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_use_enhanced_launch_barrier=true",
+  "max_tokens_per_second": null,
+  "mean_tokens_per_second": null,
+  "memory": {
+    "peak_bytes_in_use": 6525927424
+  },
+  "microbatch_size_per_device": 16,
+  "parameter_count": 309111392,
+  "steps": 1,
+  "token_budget": null,
+  "tokens_seen": 2097152,
+  "wandb_url": "https://wandb.ai/davidfranco2300-other/yxtpu-pretrain/runs/raxd2gkf"
+}
