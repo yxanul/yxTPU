@@ -273,6 +273,21 @@ def _device_batch(batch, mesh):
     }
 
 
+def _data_pipeline_stats(iterator) -> dict[str, float]:
+    """Host-side pipeline health counters; costs a few attribute reads."""
+    stats: dict[str, float] = {}
+    queue_depth = getattr(iterator, "queue_depth", None)
+    if queue_depth is not None:
+        stats["prefetch_queue_depth"] = float(queue_depth)
+    for key, value in dict(getattr(iterator, "stats", {}) or {}).items():
+        stats[key] = float(value)
+    seen = stats.get("documents_seen")
+    selected = stats.get("documents_selected")
+    if seen:
+        stats["document_selection_rate"] = (selected or 0.0) / seen
+    return stats
+
+
 def _memory_summary() -> dict[str, int | float | None]:
     stats = []
     for device in jax.local_devices():
@@ -355,6 +370,11 @@ def run(
     del benchmark_only
     if config.hardware.multi_host and not jax.distributed.is_initialized():
         jax.distributed.initialize()
+    if config.data.streaming and jax.process_count() > 1:
+        # Each process would open its own reshuffled copy of the same stream
+        # and train on overlapping documents. Sharding the stream by process
+        # has to exist before streaming data can scale past one host.
+        raise ValueError("streaming data is not sharded across processes yet")
     mesh = create_mesh(config.hardware)
     logical_axis_rules = make_leaf_config(config).logical_axis_rules
     train_process_batch, eval_process_batch = _process_batch_sizes(
@@ -452,21 +472,32 @@ def run(
     tokens_seen = 0
     completed_steps = start_step
     trace_active = False
+    cached_eval_batches: list | None = None
+    previous_step_end: float | None = None
     try:
         for step in range(start_step + 1, config.experiment.steps + 1):
             if profile and step == min(config.experiment.profile_steps):
                 jax.profiler.start_trace(str(run_dir / "profile"))
                 trace_active = True
-            batch = (
-                first_batch
-                if step == start_step + 1
-                else _device_batch(next(data_iterator), mesh)
-            )
+            data_started = time.perf_counter()
+            if step == start_step + 1:
+                batch = first_batch
+                data_wait_seconds = 0.0
+            else:
+                host_batch = next(data_iterator)
+                data_wait_seconds = time.perf_counter() - data_started
+                batch = _device_batch(host_batch, mesh)
+            transfer_seconds = time.perf_counter() - data_started - data_wait_seconds
             started = time.perf_counter()
             with logical_mesh_context(mesh, logical_axis_rules):
                 metrics = compiled_train_step(state, batch)
                 jax.block_until_ready(metrics)
-            elapsed = time.perf_counter() - started
+            step_end = time.perf_counter()
+            elapsed = step_end - started
+            wall_elapsed = (
+                step_end - previous_step_end if previous_step_end is not None else None
+            )
+            previous_step_end = step_end
             host_metrics = jax.device_get(metrics)
             tokens = float(host_metrics["tokens"])
             tokens_seen += int(tokens)
@@ -493,6 +524,11 @@ def run(
                 "tokens": int(tokens),
                 "step_ms": elapsed * 1_000,
                 "tokens_per_second": throughput,
+                "data_wait_ms": data_wait_seconds * 1_000,
+                "host_to_device_ms": transfer_seconds * 1_000,
+                "wall_tokens_per_second": (
+                    tokens / wall_elapsed if wall_elapsed else throughput
+                ),
                 "grad_norm": grad_norm,
                 "learning_rate": _learning_rate(config, step),
                 "tokens_seen": tokens_seen,
@@ -514,8 +550,12 @@ def run(
                         },
                         "performance": {
                             "tokens_per_second": throughput,
+                            "wall_tokens_per_second": record["wall_tokens_per_second"],
                             "step_ms": elapsed * 1_000,
+                            "data_wait_ms": record["data_wait_ms"],
+                            "host_to_device_ms": record["host_to_device_ms"],
                         },
+                        "data": _data_pipeline_stats(data_iterator),
                         "optimizer": {
                             "grad_norm": grad_norm,
                             "learning_rate": record["learning_rate"],
@@ -534,11 +574,21 @@ def run(
                 throughputs.append(throughput)
 
             if eval_iterator is not None and step % config.data.eval_interval == 0:
+                if config.data.eval_fixed_batches:
+                    if cached_eval_batches is None:
+                        cached_eval_batches = [
+                            next(eval_iterator) for _ in range(config.data.eval_steps)
+                        ]
+                    eval_host_batches = cached_eval_batches
+                else:
+                    eval_host_batches = [
+                        next(eval_iterator) for _ in range(config.data.eval_steps)
+                    ]
                 eval_loss_sum = 0.0
                 eval_token_sum = 0.0
                 diagnostic_batch = None
-                for _ in range(config.data.eval_steps):
-                    diagnostic_batch = _device_batch(next(eval_iterator), mesh)
+                for eval_host_batch in eval_host_batches:
+                    diagnostic_batch = _device_batch(eval_host_batch, mesh)
                     with logical_mesh_context(mesh, logical_axis_rules):
                         eval_metrics = eval_step(
                             state.model,
@@ -553,6 +603,7 @@ def run(
                     "step": step,
                     "evaluation_loss": evaluation_loss,
                     "evaluation_tokens": int(eval_token_sum),
+                    "evaluation_fixed_batches": bool(config.data.eval_fixed_batches),
                 }
                 metrics_writer.write(evaluation_record)
                 print(json.dumps(evaluation_record, sort_keys=True), flush=True)
@@ -562,7 +613,12 @@ def run(
                             "train_holdout_loss": evaluation_loss,
                             "train_holdout_perplexity": math.exp(min(evaluation_loss, 80.0)),
                             "tokens": int(eval_token_sum),
-                        }
+                        },
+                        "performance": {
+                            "device_peak_bytes_in_use": _memory_summary()[
+                                "peak_bytes_in_use"
+                            ],
+                        },
                     },
                     step=step,
                     tokens_seen=tokens_seen,

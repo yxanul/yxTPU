@@ -73,7 +73,7 @@ class WandbTracker:
         )
         self.run.define_metric("trainer/step")
         self.run.define_metric("trainer/tokens_seen")
-        for namespace in ("train/*", "performance/*", "optimizer/*", "stability/*"):
+        for namespace in ("train/*", "performance/*", "data/*", "optimizer/*", "stability/*"):
             self.run.define_metric(namespace, step_metric="trainer/step", step_sync=True)
         for namespace in ("eval/*", "diagnostics/*", "lm_eval/*"):
             self.run.define_metric(namespace, step_metric="trainer/tokens_seen", step_sync=True)

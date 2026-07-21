@@ -133,6 +133,12 @@ class DataConfig(StrictModel):
     per_device_batch_size: int = 8
     eval_interval: int = 0
     eval_steps: int = 0
+    # Materialize the first evaluation pass's host batches once and reuse them
+    # at every later evaluation. This makes the held-out loss a comparable
+    # curve over one fixed set instead of a rolling sample, and for streaming
+    # sources it stops re-scanning roughly 1/validation_fraction documents per
+    # evaluation batch after the first pass.
+    eval_fixed_batches: bool = True
     dataset_name: str | None = None
     dataset_path: str | None = None
     tokenizer: str | None = None

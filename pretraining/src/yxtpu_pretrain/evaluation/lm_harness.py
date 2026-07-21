@@ -39,12 +39,17 @@ def _score_step():
             decoder_segment_ids=batch["segment_ids"],
             decoder_positions=batch["positions"],
         )
-        log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
-        selected = jnp.take_along_axis(log_probs, batch["labels"][..., None], axis=-1)[
+        # log p(label) = logit[label] - logsumexp(logits). The reduction fuses
+        # over the vocabulary axis, so no second [batch, sequence, vocab]
+        # log-probability tensor is ever materialized; with the FP32 logits it
+        # is exactly the log_softmax gather it replaces.
+        logits = logits.astype(jnp.float32)
+        log_normalizer = jax.nn.logsumexp(logits, axis=-1)
+        selected = jnp.take_along_axis(logits, batch["labels"][..., None], axis=-1)[
             ..., 0
         ]
         mask = batch["score_mask"].astype(jnp.float32)
-        loglikelihood = jnp.sum(selected * mask, axis=-1)
+        loglikelihood = jnp.sum((selected - log_normalizer) * mask, axis=-1)
         greedy = jnp.all(
             (jnp.argmax(logits, axis=-1) == batch["labels"]) | (mask == 0),
             axis=-1,
