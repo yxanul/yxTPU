@@ -1,0 +1,28 @@
+{
+  "compiled_memory": {
+    "alias_size_in_bytes": 3709371904,
+    "argument_size_in_bytes": 3713566208,
+    "estimated_peak_bytes": 44662410976,
+    "generated_code_size_in_bytes": 2617166336,
+    "output_size_in_bytes": 3709374240,
+    "temp_size_in_bytes": 40948842432
+  },
+  "effective_batch_size_per_device": 128,
+  "effective_global_batch_size": 1024,
+  "final_loss": 9.228933334350586,
+  "gradient_accumulation_steps": 8,
+  "jax_device_count": 8,
+  "jax_process_count": 1,
+  "libtpu_init_args": "--xla_tpu_scoped_vmem_limit_kib=98304 --xla_enable_async_all_gather=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_use_enhanced_launch_barrier=true",
+  "max_tokens_per_second": 158800.15062507268,
+  "mean_tokens_per_second": 158745.12542212082,
+  "memory": {
+    "peak_bytes_in_use": 6380304384
+  },
+  "microbatch_size_per_device": 16,
+  "parameter_count": 309111392,
+  "steps": 15,
+  "token_budget": null,
+  "tokens_seen": 31457280,
+  "wandb_url": null
+}

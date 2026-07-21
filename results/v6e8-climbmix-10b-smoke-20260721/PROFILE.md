@@ -1,4 +1,10 @@
-# ClimbMix 10B training-stack gate
+# ClimbMix 10B training-stack gate (throughput result rejected)
+
+> **Post-gate correction:** the guarded fused KDA backward became non-finite at
+> production step 12. Its 566k tok/s result is retained as historical evidence
+> but is not a valid training operating point. EXP-032 and
+> `../v6e8-climbmix-realtext-precision-20260721/` contain the trigger-batch
+> comparison and selected full-FP32 analytical path.
 
 ## Workload
 
@@ -43,9 +49,13 @@ configuration, JSONL, summary, and complete harness result.
 
 W&B smoke: <https://wandb.ai/davidfranco2300-other/yxtpu-pretrain/runs/raxd2gkf>
 
-## Selection
+## Superseded selection
 
 The padded GPT-2 output layer makes the standard-loss microbatch-16/GA-8
 executable exceed physical HBM during compilation. Fused loss is therefore the
 selected capacity path for this 309.1M profile even though standard loss remains
 faster for the smaller-vocabulary 272.9M profile in EXP-030.
+
+The fused output loss remains selected. The guarded fused KDA implementation
+does not: real training now uses the full-FP32 analytical VJP at about 173k
+tok/s.
