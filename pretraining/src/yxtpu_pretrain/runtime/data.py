@@ -335,20 +335,41 @@ class StreamingHuggingFaceIterator(PackedTokenBatcher):
         vocab_size: int,
         *,
         validation: bool,
+        process_index: int = 0,
+        process_count: int = 1,
     ):
         from datasets import load_dataset
 
         if config.tokenizer is None:
             raise ValueError("streaming text data requires data.tokenizer")
+        if not 0 <= process_index < process_count:
+            raise ValueError(
+                f"process index {process_index} is outside [0, {process_count})"
+            )
         dataset = load_dataset(
             config.dataset_name,
             split=config.split,
             streaming=True,
         )
+        # Every process must shuffle with the same seed so the shard order that
+        # split_dataset_by_node partitions is identical everywhere; a
+        # per-process seed here would hand overlapping documents to different
+        # hosts. The disjoint validation reservation stays hash-based and is
+        # therefore identical no matter which process streams a document.
         dataset = dataset.shuffle(
             seed=config.shuffle_seed,
             buffer_size=config.shuffle_buffer_size,
         )
+        if process_count > 1:
+            from datasets.distributed import split_dataset_by_node
+
+            dataset = split_dataset_by_node(
+                dataset,
+                rank=process_index,
+                world_size=process_count,
+            )
+        self.process_index = process_index
+        self.process_count = process_count
         tokenizer = load_fast_tokenizer(config.tokenizer, padded_vocab_size=vocab_size)
         super().__init__(
             dataset,
@@ -358,6 +379,14 @@ class StreamingHuggingFaceIterator(PackedTokenBatcher):
             vocab_size=vocab_size,
             validation=validation,
         )
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {
+            **super().metadata,
+            "process_index": self.process_index,
+            "process_count": self.process_count,
+        }
 
 
 @dataclass(frozen=True)
@@ -459,7 +488,16 @@ def create_data_iterator(
     global_batch_size: int,
     vocab_size: int,
     validation: bool = False,
+    process_index: int = 0,
+    process_count: int = 1,
 ):
+    """Builds the process-local iterator.
+
+    ``global_batch_size`` is the *process-local* batch a training step consumes
+    from this iterator. On multi-host slices the streaming source shards the
+    document stream disjointly by ``process_index``; the offline sources rely
+    on the caller's per-process seed offset instead.
+    """
     if config.type == "synthetic":
         source = SyntheticIterator(config, global_batch_size, vocab_size)
     elif config.type == "huggingface" and config.streaming:
@@ -468,6 +506,8 @@ def create_data_iterator(
             global_batch_size,
             vocab_size,
             validation=validation,
+            process_index=process_index,
+            process_count=process_count,
         )
     elif config.type == "huggingface":
         source = HuggingFaceIterator(config, global_batch_size, vocab_size)

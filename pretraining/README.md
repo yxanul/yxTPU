@@ -171,7 +171,50 @@ See EXP-032/034/035/036,
 Training metrics are emitted after device synchronization, outside the timed
 and compiled update. Gradient, parameter, hidden-state, sampled-logit, and
 per-attention-head logit diagnostics run in their own compiled pass every 250
-steps, so no host-side tree walk or W&B call enters the hot path.
+steps, so no host-side tree walk or W&B call enters the hot path. The
+per-step record additionally reports `data_wait_ms`, `host_to_device_ms`, and
+`wall_tokens_per_second`, and W&B carries a `data/*` namespace with the
+prefetch queue depth and streaming-packer counters; a queue depth pinned at
+zero means the run is input-bound rather than compute-bound.
+
+## Scaling past one host (v6e-16/32/64)
+
+`v6e-8` is the largest single-host slice; the `v6e-16`, `v6e-32`, and
+`v6e-64` hardware profiles are multi-host and none of them is
+performance-verified yet. What is already handled:
+
+- Streaming data shards one identically-shuffled ClimbMix stream disjointly
+  by process via `split_dataset_by_node`; the shared shuffle seed across
+  processes is load-bearing for that disjointness, and the hash-based
+  validation reservation is process-independent. Offline and synthetic
+  sources keep the per-process seed offset instead.
+- `jax.distributed.initialize()` runs automatically for multi-host profiles,
+  batches assemble through `host_local_array_to_global_array`, and JSONL
+  metrics, stdout records, run artifacts, and W&B all come from process zero
+  only.
+- The multi-host profiles pin the same `libtpu_init_args` as the certified
+  v6e-8 profile, including the scoped-VMEM limit the fused KDA kernels and
+  Tokamax loss were qualified under.
+
+What a launch must still get right:
+
+- Keep the update size fixed at 2,097,152 tokens by scaling gradient
+  accumulation down with chip count at microbatch 16/device: GA=4 on
+  v6e-16, GA=2 on v6e-32, GA=1 on v6e-64. The 10B schedule (4,769 updates)
+  and every optimizer hyperparameter then carry over unchanged.
+- Start the trainer on every worker, for example
+  `gcloud compute tpus tpu-vm ssh <node> --worker=all --command=...`; a
+  multi-host slice does nothing until all processes join.
+- Set `experiment.harness_eval.enabled=false`: the in-process lm-eval
+  adapter is single-host only and fails fast otherwise. Held-out loss and
+  diagnostics work unchanged.
+- The streaming iterator remains non-checkpointable and the 10B profile
+  remains no-checkpoint, so a Spot preemption of any host restarts the run
+  from zero; at multi-host throughput the exposure window shrinks
+  accordingly, but the acknowledgment is still explicit.
+- Run the usual gates once on the new slice before a long run: a short
+  real-text run for finiteness and throughput, and one held-out evaluation,
+  since no multi-host profile has been validated on hardware.
 
 ## Other real data and checkpoints
 

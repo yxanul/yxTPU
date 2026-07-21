@@ -1,12 +1,11 @@
-name: v6e-64
-accelerator: v6e-64
-device_count: 64
-chips: 64
-hosts: 8
-mesh: {data: 64, fsdp: 1, tensor: 1, sequence: 1}
+name: v6e-16
+accelerator: v6e-16
+device_count: 16
+chips: 16
+hosts: 2
+mesh: {data: 16, fsdp: 1, tensor: 1, sequence: 1}
 # Identical to the certified v6e-8 flag set. The scoped-VMEM limit is load-
-# bearing for the fused Pallas KDA kernels and the Tokamax fused loss; the
-# earlier version of this profile omitted it.
+# bearing for the fused Pallas KDA kernels and the Tokamax fused loss.
 libtpu_init_args:
   - --xla_tpu_scoped_vmem_limit_kib=98304
   - --xla_enable_async_all_gather=true
@@ -17,6 +16,6 @@ libtpu_init_args:
 multi_host: true
 performance_verified: false
 notes: >-
-  Eight-host data-parallel slice; unverified. Keep 2,097,152 tokens/update by
-  setting gradient accumulation to 1 at microbatch 16/device. Launch the
+  Two-host data-parallel slice; unverified. Keep 2,097,152 tokens/update by
+  halving gradient accumulation to 4 at microbatch 16/device. Launch the
   trainer on every worker.
