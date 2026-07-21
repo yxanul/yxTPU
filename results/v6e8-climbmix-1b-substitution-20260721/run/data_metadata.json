@@ -1,0 +1,12 @@
+{
+  "eos_token_id": 50256,
+  "pad_token_id": 50256,
+  "padded_vocab_size": 50432,
+  "prefetch_batches": 3,
+  "streaming": true,
+  "tokenizer": "openai-community/gpt2",
+  "tokenizer_backend": "rust_fast",
+  "tokenizer_vocab_size": 50257,
+  "validation_fraction": 0.01,
+  "validation_partition": false
+}
