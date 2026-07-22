@@ -53,10 +53,15 @@ State is dynamic; verify it before relying on this section.
   `HEALTHY`. `guaranteed: {}` (the on-demand tier) confirmed on the resource.
   On-demand provisioned on the first attempt, unlike the four reclaimed v6e
   Spot attempts the same day.
-- Benchmarks 2026-07-22 (synthetic, 30 steps, selected profile, 8/device x
-  2048, pure data parallel over 32 chips): MaxText 247M GQA baseline
-  ~2.26M tokens/s global (~105 TFLOP/s/device, ~38% MFU); KDA hybrid 273M
-  ~630k tokens/s global (~831 ms/step at 524,288 tokens/step).
+- Benchmarks 2026-07-22 (synthetic, selected profile, pure data parallel
+  over 32 chips): MaxText 247M GQA baseline ~2.26M tokens/s global
+  (~105 TFLOP/s/device, ~38% MFU). KDA 273M with the fully fused v4 kernel
+  (fused forward + split fused backward, commit 3cfc1a9): ~1.54M tokens/s
+  global at 8/device x 2048 - about 32% below the GQA baseline, matching
+  the 20-40% gap measured on v6e. 16/device x 2048 (~1.53M) and
+  8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
+  The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
+  batch 16 from its XLA-tape backward; it remains only as a fallback.
 - KDA on v4 runs through `kda_v4_hybrid`: the pre-fold fused Pallas forward
   (`kernels/kda_fused_pallas_v4.py`) plus a chunkwise XLA backward. The fused
   backward cannot compile on v4 - Mosaic's layout assignment needs a
