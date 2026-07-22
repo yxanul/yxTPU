@@ -273,3 +273,32 @@ def test_block_attnres_model_forward_is_finite_and_adds_read_parameters():
         )
     }
     assert "attnres_pseudoquery" in roles
+
+
+def test_depth_attn_read_split_scoring_matches_fused_reference():
+    """Split-scoring must match the naive concatenate-then-softmax form to
+    tight fp32 tolerance (only value-combine summation association differs)."""
+    from yxtpu_pretrain.layers.attn_res import DepthAttnRead
+
+    read = DepthAttnRead(
+        16, epsilon=1e-5, dtype=jnp.float32, weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    key = jax.random.key(2)
+    read.pseudo_query.value = jax.random.normal(key, (16,), jnp.float32)
+    buffer = jax.random.normal(jax.random.key(3), (4, 2, 8, 16), jnp.float32)
+    partial = jax.random.normal(jax.random.key(4), (2, 8, 16), jnp.float32)
+    block_index = jnp.int32(2)
+
+    out = read(buffer, block_index, partial, include_partial=True)
+
+    sources = jnp.concatenate((buffer, partial[None]), axis=0)
+    keys = read.norm(sources)
+    scores = jnp.einsum("d,sbtd->sbt", read.pseudo_query.value, keys)
+    valid = jnp.concatenate(
+        (jnp.arange(4) <= block_index, jnp.ones((1,), dtype=bool))
+    )
+    scores = jnp.where(valid[:, None, None], scores, -1.0e30)
+    probabilities = jax.nn.softmax(scores, axis=0)
+    reference = jnp.einsum("sbt,sbtd->btd", probabilities, sources)
+    assert jnp.allclose(out, reference, rtol=1e-5, atol=1e-5)
