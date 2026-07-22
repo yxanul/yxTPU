@@ -1,0 +1,17 @@
+name: v4-64
+accelerator: v4-64
+# v4 slice names count TensorCores (2 per chip) and megacore fuses each
+# chip's two cores into one JAX device: v4-64 = 32 chips = 32 devices.
+device_count: 32
+chips: 32
+hosts: 8
+mesh: {data: 32, fsdp: 1, tensor: 1, sequence: 1}
+libtpu_init_args:
+  - --xla_enable_async_all_gather=true
+multi_host: true
+performance_verified: false
+notes: >-
+  Eight-host data-parallel slice; the TRC grant's 32-chip on-demand v4 row in
+  us-central2-b. On-demand use always requires explicit approval. Kernel
+  flags and memory headroom are unverified on v4; the v6e scoped-VMEM flag is
+  deliberately absent.

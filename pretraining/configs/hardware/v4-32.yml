@@ -1,9 +1,11 @@
 name: v4-32
 accelerator: v4-32
-device_count: 32
-chips: 32
+# v4 slice names count TensorCores (2 per chip) and megacore fuses each
+# chip's two cores into one JAX device: v4-32 = 16 chips = 16 devices.
+device_count: 16
+chips: 16
 hosts: 4
-mesh: {data: 32, fsdp: 1, tensor: 1, sequence: 1}
+mesh: {data: 16, fsdp: 1, tensor: 1, sequence: 1}
 libtpu_init_args:
   - --xla_enable_async_all_gather=true
 multi_host: true
