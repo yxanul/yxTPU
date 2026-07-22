@@ -125,6 +125,11 @@ class OptimizerConfig(StrictModel):
     warmup_steps: int = 3
     schedule_steps: int = 30
     final_learning_rate_fraction: float = 0.1
+    # When set, the schedule holds the peak learning rate constant after
+    # warmup and applies the cosine decay only over the final decay_steps
+    # of schedule_steps (terminal anneal). None keeps the classic
+    # warmup-then-cosine shape over the whole schedule.
+    decay_steps: int | None = None
     muon_beta: float = 0.95
     muon_epsilon: float = 1.0e-8
     muon_ns_steps: int = 5
@@ -152,6 +157,13 @@ class OptimizerConfig(StrictModel):
             raise ValueError("schedule_steps must be greater than warmup_steps")
         if not 0.0 <= self.final_learning_rate_fraction <= 1.0:
             raise ValueError("final_learning_rate_fraction must be in [0, 1]")
+        if self.decay_steps is not None:
+            if self.decay_steps <= 0:
+                raise ValueError("decay_steps must be positive when set")
+            if self.warmup_steps + self.decay_steps > self.schedule_steps:
+                raise ValueError(
+                    "warmup_steps + decay_steps must not exceed schedule_steps"
+                )
         return self
 
 
