@@ -143,3 +143,31 @@ def test_gqa_muonclip_changes_only_qk_and_preserves_optimizer_moments():
         moments_before, jax.tree.leaves(optimizer_state), strict=True
     ):
         assert jnp.array_equal(before_moment, after_moment)
+
+
+def test_muon_updates_use_consistent_rms_scaling():
+    """A Muon-routed matrix update must have AdamW-like RMS (Moonshot's
+    0.2 * sqrt(max(fan_in, fan_out)) convention), not optax's width-transfer
+    default, whose ~0.02 RMS silently undertrains at a shared learning rate."""
+    config = _config()
+    model = _model(config, 3)
+    transform, routes = build_optimizer(model, config.optimizer)
+    params = nnx.state(model, nnx.Param)
+    state = transform.init(params)
+    gradients = jax.tree.map(
+        lambda value: jax.random.normal(jax.random.key(0), value.shape, value.dtype),
+        params,
+    )
+    # The warmup schedule starts at zero, so measure the second update
+    # against the schedule's actual step-1 learning rate.
+    from yxtpu_pretrain.optimizers.routing import build_learning_rate_schedule
+
+    updates, state = transform.update(gradients, state, params)
+    updates, _ = transform.update(gradients, state, params)
+    matrix_route = next(route for route in routes if route.optimizer == "muon")
+    flat = dict(nnx.to_flat_state(updates))
+    update = flat[matrix_route.path].get_value()
+    lr = float(build_learning_rate_schedule(config.optimizer)(1))
+    rms = float(jnp.sqrt(jnp.mean(jnp.square(update / lr))))
+    # Consistent-RMS scaling targets ~0.2; width-transfer leaves ~0.02-0.03.
+    assert rms > 0.1, f"muon update RMS {rms} looks width-transfer scaled"
