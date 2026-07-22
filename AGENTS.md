@@ -62,6 +62,16 @@ State is dynamic; verify it before relying on this section.
   8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
   The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
   batch 16 from its XLA-tape backward; it remains only as a fallback.
+- BlockAttnRes perf pass 2026-07-22 (commits 41d7aeb..878bb28): split-
+  scoring, RMSNorm-fold into the pseudo-query, and bf16 dot operands cut the
+  depth-read overhead from ~17% to ~4% (steady step ~484 ms vs 464 baseline)
+  with losses overlaying to ~1e-4. optimizer.muon_ns_bf16 (bf16 momentum +
+  Newton-Schulz via masked post-clip cast + mu_dtype) is implemented and
+  gate-validated - 200-step trajectory within 0.016 nats of the fp32
+  reference, grad norms unchanged - but measured perf-neutral on v4 at 337M,
+  so it stays default-false; revisit at larger widths where NS FLOPs grow
+  quadratically. Toggling it changes the optimizer-state pytree (checkpoint
+  incompatibility across the flag).
 - BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit 7028526; same
   kda_hybrid_128k + muonclip protocol as run 3): PASSES both gates - final
   loss 3.796 vs 3.872, holdout 3.850 vs 3.882. lambada, the hybrid's one
