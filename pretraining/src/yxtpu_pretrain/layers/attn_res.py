@@ -44,20 +44,31 @@ class DepthAttnRead(nnx.Module):
     """blocks_buffer is [slots, batch, length, embed]; slot 0 holds the token
     embedding and slot n holds completed block n. Slots beyond block_index
     are masked out of the softmax."""
-    if include_partial:
-      sources = jnp.concatenate((blocks_buffer, partial_sum[None]), axis=0)
-    else:
-      sources = blocks_buffer
-    keys = self.norm(sources)
+    # Score the buffer and the partial sum separately and concatenate only
+    # the tiny [slots, batch, length] score tensors: RMSNorm normalizes the
+    # last axis only, so per-slot scores are independent and this avoids
+    # copying the full buffer just to prepend one slot. Only the value
+    # combine's fp32 summation association differs from the fused form.
     query = jnp.asarray(self.pseudo_query[...], dtype=jnp.float32)
-    scores = jnp.einsum("d,sbtd->sbt", query, keys.astype(jnp.float32))
+    scores = jnp.einsum(
+        "d,sbtd->sbt", query, self.norm(blocks_buffer).astype(jnp.float32)
+    )
     slots = blocks_buffer.shape[0]
     valid = jnp.arange(slots) <= block_index
-    if include_partial:
-      valid = jnp.concatenate((valid, jnp.ones((1,), dtype=bool)))
     scores = jnp.where(valid[:, None, None], scores, jnp.float32(-1.0e30))
+    if include_partial:
+      partial_score = jnp.einsum(
+          "d,btd->bt", query, self.norm(partial_sum).astype(jnp.float32)
+      )
+      scores = jnp.concatenate((scores, partial_score[None]), axis=0)
     probabilities = jax.nn.softmax(scores, axis=0)
     combined = jnp.einsum(
-        "sbt,sbtd->btd", probabilities, sources.astype(jnp.float32)
+        "sbt,sbtd->btd",
+        probabilities[:slots],
+        blocks_buffer.astype(jnp.float32),
     )
+    if include_partial:
+      combined = combined + probabilities[slots][..., None] * partial_sum.astype(
+          jnp.float32
+      )
     return combined.astype(blocks_buffer.dtype)
