@@ -97,6 +97,7 @@ def test_all_required_profiles_exist():
         "hardware/v5e-16.yml",
         "hardware/v5e-64.yml",
         "hardware/v4-32.yml",
+        "hardware/v4-64.yml",
         "experiments/selected.yml",
         "experiments/max_throughput.yml",
         "experiments/sequence_sweep.yml",

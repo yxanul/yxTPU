@@ -186,7 +186,8 @@ class MeshConfig(StrictModel):
 class HardwareProfile(StrictModel):
     name: str
     accelerator: Literal[
-        "v6e-8", "v6e-16", "v6e-32", "v6e-64", "v5litepod-16", "v5litepod-64", "v4-32"
+        "v6e-8", "v6e-16", "v6e-32", "v6e-64", "v5litepod-16", "v5litepod-64", "v4-32",
+        "v4-64"
     ]
     device_count: int
     chips: int
