@@ -117,6 +117,22 @@ State is dynamic; verify it before relying on this section.
   splash attention ~12 ms (2.6%). Remaining wall tail is episodic >1 s
   step spikes (present in all runs; not data_wait - suspect W&B flush or
   stream shard boundaries) - a 2-3-batch prefetch queue would mask them.
+- Loss-head and collective levers probed 2026-07-23 (v4, production shape):
+  (1) loss.implementation=tokamax_fused is HARD-BLOCKED on v4 - tokamax's
+  mosaic_tpu linear-CE kernel raises NotImplementedError "Not supported on
+  TPU v4" with and without the scoped-VMEM flag; porting it would be a
+  KDA-fork-scale kernel project. The compile probe also priced the standard
+  loss's cost: 20.4 GB temp vs 16.4 GB for a logits-free step (~4 GB =
+  the two [8,2048,128256] materializations, the 10-20 ms/step a fused head
+  would save on v6e). (2) The v5e collective-overlap flag set
+  (data_parallel_all_reduce_opt + different_sized_ops + async collective
+  fusion trio + overlap_compute_collective_tc) compiles on v4, is
+  numerics-neutral (loss digits identical), and is PERFORMANCE-NEUTRAL:
+  step-time floor 473.1 -> 472.4 ms p10 on the 200-step A/B. The profile's
+  ~27.5 ms/step of all-reduce stays synchronous on v4's compiler path, so
+  the flags were not adopted into v4-64.yml. Remaining ranked levers from
+  the profile: per-device batch 16 (fits per the memory survey), deeper
+  prefetch queue against the >1 s step spikes, mixer_only AttnRes ablation.
 - BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit 7028526; same
   kda_hybrid_128k + muonclip protocol as run 3): PASSES both gates - final
   loss 3.796 vs 3.872, holdout 3.850 vs 3.882. lambada, the hybrid's one

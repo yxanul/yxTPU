@@ -12,6 +12,9 @@ multi_host: true
 performance_verified: false
 notes: >-
   Eight-host data-parallel slice; the TRC grant's 32-chip on-demand v4 row in
-  us-central2-b. On-demand use always requires explicit approval. Kernel
-  flags and memory headroom are unverified on v4; the v6e scoped-VMEM flag is
-  deliberately absent.
+  us-central2-b. On-demand use always requires explicit approval. Flag facts
+  measured 2026-07-23: the v5e collective-overlap set compiles here but is
+  performance-neutral (step-time floor unchanged on a 200-step A/B), so it
+  is deliberately not adopted; the v6e scoped-VMEM flag stays absent; and
+  loss.implementation=tokamax_fused cannot be used on v4 at all - tokamax's
+  mosaic_tpu linear-CE kernel raises "Not supported on TPU v4".
