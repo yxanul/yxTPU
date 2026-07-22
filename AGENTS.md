@@ -62,6 +62,17 @@ State is dynamic; verify it before relying on this section.
   8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
   The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
   batch 16 from its XLA-tape backward; it remains only as a fallback.
+- SuperBPE-1B campaign 2026-07-22 (W&B group superbpe-1b; ClimbMix streamed
+  through alisawuffles/superbpe-tokenizer-128k, vocab padded 128256, tied
+  embeddings, 1B tokens, constant LR 3e-4 after 40-step warmup, full lm-eval
+  every 477 steps): gqa_rope_128k+adamw final loss 4.011 / holdout 4.07;
+  gqa_rope_128k+muonclip 3.872 / 3.929; kda_hybrid_128k+muonclip 3.824 /
+  3.882 (best, and the calmest gradients: mean 0.39, max 2.03). Two bugs
+  were found and fixed en route: benchmark-sized LR schedules decaying to
+  the floor by step 30, and optax Muon defaulting to width-transfer scaling
+  (fixed with consistent_rms=0.2, commit 5f134c7) - the un-fixed muonclip
+  run lost a full nat of loss and its grad norms rose all run. Multi-host
+  lm-eval works as of ecbc7b8; each full ten-task round costs ~2 minutes.
 - Tied embeddings (model.logits_via_embedding, commit 6472af7): now actually
   implemented (the flag was schema-only before). On v4-64 at 8x4096 the tied
   273m model runs ~1.554M tokens/s (unchanged, as expected) with
