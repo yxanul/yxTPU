@@ -94,6 +94,29 @@ State is dynamic; verify it before relying on this section.
   tests/test_kimi_delta_attention.py has 5 pre-existing failures when run
   on v4 hardware (sublane-gather in the non-v4 kernels; identical at
   4de5b4a) - only its v4-path tests are meaningful gates there.
+- Batch prefetch 2026-07-23 (commit d8aece3): the loop now stages batch i+1
+  between dispatching step i and blocking on it, hiding the ~70 ms/step
+  host-to-device path (data_wait is ~0.3 ms; the cost is global-array
+  assembly in _device_batch, not the fetch). Validated: losses identical to
+  the synchronous run digit-for-digit, median wall throughput 758k -> 1.01M
+  tokens/s on the 200-step A/B, fastest wall steps now equal the 473 ms
+  compute floor. Auto-disabled when checkpointing is enabled (a save would
+  persist iterator state one batch ahead and skip a batch on resume).
+- Profile 2026-07-23 (steps 80-84, kda_hybrid_128k+muonclip+attnres,
+  prefetch on; xplane parsed directly - the tensorboard_plugin_profile
+  converter is incompatible with the venv TF, and beware name-matching op
+  categories: instruction strings embed operand names). Device busy
+  454.6 ms/step vs step_ms ~473 (~20 ms dispatch/infeed edges). Breakdown:
+  dense body GEMMs ~220 ms (48%, ~37% MFU overall), 128k vocab head ~60 ms
+  (13%, near GEMM roofline; the unfused standard loss materializes
+  [8,2048,128256] twice - the fused implementation would shave the
+  elementwise/materialization slice, est. 10-20 ms), KDA kernels ~70 ms
+  (15%: stage_a 28.6, fwd 21.7, stage_b 19.8), gradient all-reduces
+  ~27.5 ms (6%, partly inside the backward cycle scan - async-collective /
+  latency-hiding-scheduler flags untested), AttnRes reads ~15 ms (3.3%),
+  splash attention ~12 ms (2.6%). Remaining wall tail is episodic >1 s
+  step spikes (present in all runs; not data_wait - suspect W&B flush or
+  stream shard boundaries) - a 2-3-batch prefetch queue would mask them.
 - BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit 7028526; same
   kda_hybrid_128k + muonclip protocol as run 3): PASSES both gates - final
   loss 3.796 vs 3.872, holdout 3.850 vs 3.882. lambada, the hybrid's one
