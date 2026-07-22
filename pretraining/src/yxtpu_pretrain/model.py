@@ -32,15 +32,23 @@ ACTIVATION_LOGICAL_AXES = (
 
 
 def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
-    for module in (
-        layer.in_proj_qkv,
-        layer.decay_down,
-        layer.decay_up,
-        layer.beta_proj,
-        layer.output_gate_down,
-        layer.output_gate_up,
-        layer.out_proj,
-    ):
+    modules = [layer.decay_up, layer.output_gate_up, layer.out_proj]
+    if layer.in_proj_mixer is not None:
+        # The fused input projection is one KDA_MATRIX parameter. Muon would
+        # orthogonalize its qkv/decay/beta/gate blocks jointly, which is why
+        # config validation rejects fused_in_proj under muon-family
+        # optimizers until blocked routing exists.
+        modules.append(layer.in_proj_mixer)
+    else:
+        modules.extend(
+            (
+                layer.in_proj_qkv,
+                layer.decay_down,
+                layer.beta_proj,
+                layer.output_gate_down,
+            )
+        )
+    for module in modules:
         declare_dense_kernel(module, ParamRole.KDA_MATRIX)
     layer.conv1d.kernel = declare_parameter(layer.conv1d.kernel, ParamRole.DEPTHWISE_CONV)
     layer.A_log = declare_parameter(layer.A_log, ParamRole.KDA_SCALAR)

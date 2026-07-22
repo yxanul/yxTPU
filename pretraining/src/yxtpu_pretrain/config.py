@@ -31,6 +31,11 @@ class KDAConfig(StrictModel):
     safe_gate: bool = True
     gate_lower_bound: float = -5.0
     precision: Literal["guarded_fp32", "full_fp32"] = "guarded_fp32"
+    # Merge in_proj_qkv, decay_down, beta_proj, and output_gate_down into one
+    # [embed, 3HD + rank + heads + rank] GEMM that reads hidden_states once.
+    # Initialization is distribution-identical (fan_in-only initializer, all
+    # blocks share fan_in = embed); AdamW dynamics are element-wise identical.
+    fused_in_proj: bool = False
 
     @model_validator(mode="after")
     def validate_production_shape(self) -> KDAConfig:
@@ -319,6 +324,13 @@ class ResolvedConfig(StrictModel):
                     "(fsdp=tensor=sequence=1); vocabulary parallelism needs explicit "
                     "global softmax collectives"
                 )
+        if self.model.kda.fused_in_proj and self.optimizer.name in ("muon", "muonclip"):
+            raise ValueError(
+                "kda.fused_in_proj fuses four KDA_MATRIX parameters that Muon "
+                "currently orthogonalizes separately; blocked Muon routing for "
+                "the fused weight is not implemented yet, so use adamw or "
+                "disable the fusion"
+            )
         if self.data.streaming and self.experiment.checkpoint.enabled:
             raise ValueError(
                 "the streaming packed iterator is not checkpointable; disable prefetch/streaming "

@@ -1209,15 +1209,37 @@ class KimiDeltaAttention(nnx.Module):
     self.projection_dim = self.num_heads * self.head_dim
     self.gate_rank = config.kda_gate_rank
 
-    self.in_proj_qkv = DenseGeneral(
-        in_features_shape=config.emb_dim,
-        out_features_shape=(3, self.num_heads, self.head_dim),
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("embed", "qkv", "gdn_head", None),
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
-    )
+    if config.kda_fused_in_proj:
+      self.in_proj_qkv = None
+      # One GEMM reads hidden_states for every input-side projection; static
+      # slices recover the qkv / decay / beta / gate blocks. The fused feature
+      # axis stays replicated: at emb_dim-scale widths there is no sharding
+      # loss, and the blocks keep their exact separate-projection semantics.
+      self.in_proj_mixer = DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=(
+              3 * self.num_heads * self.head_dim
+              + self.gate_rank
+              + self.num_heads
+              + self.gate_rank
+          ),
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("embed", None),
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
+    else:
+      self.in_proj_mixer = None
+      self.in_proj_qkv = DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=(3, self.num_heads, self.head_dim),
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("embed", "qkv", "gdn_head", None),
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
     self.conv1d = nnx.Conv(
         in_features=3 * self.projection_dim,
         out_features=3 * self.projection_dim,
@@ -1231,15 +1253,18 @@ class KimiDeltaAttention(nnx.Module):
         rngs=rngs,
     )
 
-    self.decay_down = DenseGeneral(
-        in_features_shape=config.emb_dim,
-        out_features_shape=self.gate_rank,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("embed", None),
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
-    )
+    if config.kda_fused_in_proj:
+      self.decay_down = None
+    else:
+      self.decay_down = DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=self.gate_rank,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("embed", None),
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
     self.decay_up = DenseGeneral(
         in_features_shape=self.gate_rank,
         out_features_shape=(self.num_heads, self.head_dim),
@@ -1249,24 +1274,28 @@ class KimiDeltaAttention(nnx.Module):
         matmul_precision=config.matmul_precision,
         rngs=rngs,
     )
-    self.beta_proj = DenseGeneral(
-        in_features_shape=config.emb_dim,
-        out_features_shape=self.num_heads,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("embed", "gdn_head"),
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
-    )
-    self.output_gate_down = DenseGeneral(
-        in_features_shape=config.emb_dim,
-        out_features_shape=self.gate_rank,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        kernel_axes=("embed", None),
-        matmul_precision=config.matmul_precision,
-        rngs=rngs,
-    )
+    if config.kda_fused_in_proj:
+      self.beta_proj = None
+      self.output_gate_down = None
+    else:
+      self.beta_proj = DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=self.num_heads,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("embed", "gdn_head"),
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
+      self.output_gate_down = DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=self.gate_rank,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("embed", None),
+          matmul_precision=config.matmul_precision,
+          rngs=rngs,
+      )
     self.output_gate_up = DenseGeneral(
         in_features_shape=self.gate_rank,
         out_features_shape=(self.num_heads, self.head_dim),
@@ -1334,7 +1363,21 @@ class KimiDeltaAttention(nnx.Module):
         use_fused_kernel and self.config.use_qk_norm_in_gdn and _local_tpu_is_v4()
     )
     use_fused_kernel = use_fused_kernel and not use_v4_fused_kernel
-    qkv = self.in_proj_qkv(hidden_states)
+    if self.in_proj_mixer is not None:
+      qkv_width = 3 * self.num_heads * self.head_dim
+      rank = self.gate_rank
+      mixed = self.in_proj_mixer(hidden_states)
+      qkv = mixed[..., :qkv_width].reshape(
+          batch, sequence_length, 3, self.num_heads, self.head_dim
+      )
+      decay_hidden = mixed[..., qkv_width : qkv_width + rank]
+      beta_logits = mixed[..., qkv_width + rank : qkv_width + rank + self.num_heads]
+      gate_hidden = mixed[..., qkv_width + rank + self.num_heads :]
+    else:
+      qkv = self.in_proj_qkv(hidden_states)
+      decay_hidden = self.decay_down(hidden_states)
+      beta_logits = self.beta_proj(hidden_states)
+      gate_hidden = self.output_gate_down(hidden_states)
     if use_fused_kernel:
       # The fused Pallas kernel owns the causal depthwise convolution and
       # SiLU, consuming the projection output directly as [B, T, 3, H, D].
@@ -1356,7 +1399,7 @@ class KimiDeltaAttention(nnx.Module):
       qkv = qkv.reshape(batch, sequence_length, self.num_heads, 3, self.head_dim)
       query, key, value = (qkv[..., i, :] for i in range(3))
 
-    decay_input = self.decay_up(self.decay_down(hidden_states))
+    decay_input = self.decay_up(decay_hidden)
     raw_decay = decay_input.astype(jnp.float32) + jnp.asarray(self.dt_bias[...], dtype=jnp.float32)
     decay_rate = jnp.exp(jnp.asarray(self.A_log[...], dtype=jnp.float32))[None, None, :, None]
     if self.config.kda_safe_gate:
@@ -1366,7 +1409,7 @@ class KimiDeltaAttention(nnx.Module):
       log_decay = self.config.kda_gate_lower_bound * jax.nn.sigmoid(decay_rate * raw_decay)
     else:
       log_decay = -decay_rate * jax.nn.softplus(raw_decay)
-    beta = jax.nn.sigmoid(self.beta_proj(hidden_states).astype(jnp.float32))
+    beta = jax.nn.sigmoid(beta_logits.astype(jnp.float32))
 
     if decoder_segment_ids is not None:
       valid = decoder_segment_ids != 0
@@ -1465,7 +1508,7 @@ class KimiDeltaAttention(nnx.Module):
         return jax.checkpoint(kda_impl)(q, k, v, g, b, initial_state=state)
 
       output, _ = sharded_kda(query, key, value, log_decay, beta, initial_state)
-    output_gate = self.output_gate_up(self.output_gate_down(hidden_states))
+    output_gate = self.output_gate_up(gate_hidden)
     output = self.output_norm(output) * jax.nn.sigmoid(output_gate.astype(jnp.float32))
     output = self.out_proj(output.astype(self.config.dtype))
     return output, None

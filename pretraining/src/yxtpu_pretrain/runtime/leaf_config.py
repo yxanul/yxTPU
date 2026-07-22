@@ -78,6 +78,7 @@ def make_leaf_config(config: ResolvedConfig) -> SimpleNamespace:
         kda_safe_gate=kda.safe_gate,
         kda_gate_lower_bound=kda.gate_lower_bound,
         kda_use_fused_pallas_kernel=kda.precision == "guarded_fp32",
+        kda_fused_in_proj=kda.fused_in_proj,
         kda_precision=kda.precision,
         kda_use_pallas_blocked_solve=False,
         # The fused Pallas backward is retained for synthetic benchmarks, but
