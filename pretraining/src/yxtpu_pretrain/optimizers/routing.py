@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import jax
+import jax.numpy as jnp
 import optax
 from flax import nnx
 
@@ -107,6 +109,28 @@ def _muon_dimension_tree(parameters, routes: list[Route]):
     return dimensions_for
 
 
+def _muon_mask_tree(parameters, routes: list[Route]):
+    """Boolean mask over the gradient tree marking Muon-routed leaves."""
+    by_path = {route.path: route for route in routes}
+    values = []
+    for path, variable in nnx.to_flat_state(parameters):
+        values.append(
+            (path, variable.replace(value=by_path[path].optimizer == "muon"))
+        )
+    variable_mask = nnx.from_flat_state(values)
+    pure_mask = nnx.as_pure(variable_mask)
+
+    def mask_for(current_updates):
+        first_value = nnx.to_flat_state(current_updates)[0][1]
+        return (
+            variable_mask
+            if isinstance(first_value, nnx.Variable)
+            else pure_mask
+        )
+
+    return mask_for
+
+
 def build_learning_rate_schedule(config: OptimizerConfig):
     """Builds the shared warmup/cosine schedule for the optimizer and telemetry."""
     warmup = optax.linear_schedule(
@@ -145,13 +169,32 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
         )
     else:
         dimensions = _muon_dimension_tree(parameters, routes)
-        transform = optax.chain(
-            clipping,
+        stages = [clipping]
+        if config.muon_ns_bf16:
+            # Cast Muon-routed gradients to bf16 AFTER clipping (the global
+            # norm and its metric stay fp32 and bit-identical) so momentum,
+            # bias correction, and the Newton-Schulz iteration all run in
+            # bf16 - the modded-nanogpt lineage. mu_dtype=bf16 is required
+            # too: either half alone silently leaves NS in fp32. The
+            # Frobenius pre-normalization also becomes a bf16 reduction; the
+            # 200-step trajectory gate covers that deviation.
+            stages.append(
+                optax.masked(
+                    optax.stateless(
+                        lambda updates, params: jax.tree.map(
+                            lambda u: u.astype(jnp.bfloat16), updates
+                        )
+                    ),
+                    _muon_mask_tree(parameters, routes),
+                )
+            )
+        stages.append(
             optax.contrib.muon(
                 learning_rate=learning_rate,
                 ns_steps=config.muon_ns_steps,
                 beta=config.muon_beta,
                 eps=config.muon_epsilon,
+                mu_dtype=jnp.bfloat16 if config.muon_ns_bf16 else None,
                 consistent_rms=config.muon_consistent_rms,
                 weight_decay=config.weight_decay,
                 adam_b1=config.beta1,
@@ -159,6 +202,7 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
                 adam_weight_decay=config.weight_decay,
                 adam_learning_rate=learning_rate,
                 muon_weight_dimension_numbers=dimensions,
-            ),
+            )
         )
+        transform = optax.chain(*stages)
     return transform, routes
