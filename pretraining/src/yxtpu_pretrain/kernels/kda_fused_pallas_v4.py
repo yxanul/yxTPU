@@ -1117,7 +1117,6 @@ def _kda_backward_stage_a_kernel(
     state_before_cotangent_ref,
     system_cotangent_ref,
     intra_cotangent_ref,
-    cumulative_decay_ref,
     final_decay_cotangent_ref,
     state_cotangent_scratch_ref,
     *,
@@ -1271,7 +1270,7 @@ def _kda_backward_stage_a_kernel(
   if extras_mode == "none":
     return
   wants = extras_mode.split("+") if extras_mode != "real" else [
-      "kb", "sys", "intra", "cum", "fdc",
+      "kb", "sys", "intra", "fdc",
   ]
 
   def pick(tag, value, zero_shape):
@@ -1282,7 +1281,6 @@ def _kda_backward_stage_a_kernel(
   key_beta_partial_ref[0] = pick("kb", key_beta_cotangent, key_beta_cotangent.shape)
   system_cotangent_ref[0, :, 0] = pick("sys", system_cotangent, system_cotangent.shape)
   intra_cotangent_ref[0, :, 0] = pick("intra", intra_cotangent, intra_cotangent.shape)
-  cumulative_decay_ref[0] = pick("cum", cumulative_decay, cumulative_decay.shape)
   final_decay_cotangent_ref[0, :, 0, 0] = pick(
       "fdc", final_decay_cotangent, final_decay_cotangent.shape
   )
@@ -1300,7 +1298,7 @@ def _kda_backward_stage_b_kernel(
     decay_partial_ref,
     system_cotangent_ref,
     intra_cotangent_ref,
-    cumulative_decay_ref,
+    log_decay_ref,
     final_decay_cotangent_ref,
     query_cotangent_ref,
     key_cotangent_ref,
@@ -1329,7 +1327,10 @@ def _kda_backward_stage_b_kernel(
   if "zeros_all" in flags:
     cumulative_decay = jnp.zeros((streams, chunk, key_dim), jnp.float32)
   else:
-    cumulative_decay = cumulative_decay_ref[0]
+    # Bitwise-identical recompute of stage A's chunk-local value: the same
+    # fp32 block through the same _inclusive_cumsum lowering, replacing a
+    # 67 MB fp32 export round trip per layer.
+    cumulative_decay = _inclusive_cumsum(log_decay_ref[0].astype(jnp.float32))
   if "zeros_all" in flags or "zeros_squares" in flags:
     system_cotangent_in = jnp.zeros((streams, chunk, chunk), jnp.float32)
     intra_cotangent_in = jnp.zeros((streams, chunk, chunk), jnp.float32)
@@ -1953,7 +1954,6 @@ def _pallas_kda_fused_v4_backward_split(
       state_before_cotangent_t,
       system_cotangent_t,
       intra_cotangent_t,
-      cumulative_decay_t,
       final_decay_cotangent_t,
   ) = pl.pallas_call(
       functools.partial(
@@ -1989,7 +1989,6 @@ def _pallas_kda_fused_v4_backward_split(
               state_before_cotangent_spec,
               square_spec(True),
               square_spec(True),
-              chunk_spec(key_dim, True),
               row_spec(key_dim, True),
           ),
           scratch_shapes=(
@@ -2005,7 +2004,6 @@ def _pallas_kda_fused_v4_backward_split(
           f32((1, streams, 1, key_dim, value_dim)),
           f32(square_shape),
           f32(square_shape),
-          f32(chunk_qkv_shape),
           f32(row_shape),
       ),
       compiler_params=pltpu.CompilerParams(
@@ -2042,7 +2040,6 @@ def _pallas_kda_fused_v4_backward_split(
     decay_partial_t = jnp.zeros_like(decay_partial_t)
     system_cotangent_t = jnp.zeros_like(system_cotangent_t)
     intra_cotangent_t = jnp.zeros_like(intra_cotangent_t)
-    cumulative_decay_t = jnp.zeros_like(cumulative_decay_t)
     final_decay_cotangent_t = jnp.zeros_like(final_decay_cotangent_t)
 
   (
@@ -2109,7 +2106,7 @@ def _pallas_kda_fused_v4_backward_split(
       decay_partial_t,
       system_cotangent_t,
       intra_cotangent_t,
-      cumulative_decay_t,
+      log_decay_t,
       final_decay_cotangent_t,
   )
 
