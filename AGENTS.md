@@ -62,6 +62,14 @@ State is dynamic; verify it before relying on this section.
   8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
   The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
   batch 16 from its XLA-tape backward; it remains only as a fallback.
+- Input-projection fusion (kda.fused_in_proj, commit c841282): merges the
+  four input-side KDA projections into one [embed, 3336] GEMM. Proven exactly
+  equivalent (transplant test, 2e-5) and guarded against muon-family
+  optimizers pending blocked Newton-Schulz routing. A/B on v4-64 measured it
+  performance-NEUTRAL (-0.8% at 8x2048, +0.7% at 8x4096): XLA already
+  overlaps the sliver GEMMs behind the qkv GEMM, and the fused path pays a
+  materialize-and-slice cost instead. Keep it off by default; re-evaluate on
+  v6e where the wider MXU makes slivers relatively costlier.
 - KDA on v4 runs through `kda_v4_hybrid`: the pre-fold fused Pallas forward
   (`kernels/kda_fused_pallas_v4.py`) plus a chunkwise XLA backward. The fused
   backward cannot compile on v4 - Mosaic's layout assignment needs a
