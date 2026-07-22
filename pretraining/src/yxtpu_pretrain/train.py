@@ -495,23 +495,43 @@ def run(
     cached_eval_batches: list | None = None
     previous_step_end: float | None = None
     try:
+        # Prefetch the next batch between dispatching a step and blocking on
+        # it, so the host fetch and host-to-device transfer (~70 ms/step of
+        # otherwise-exposed wall time) overlap the device computation still
+        # in flight. Disabled when checkpointing is enabled: a save would
+        # persist the data-iterator state one batch ahead of the last
+        # trained step, silently skipping that batch on resume.
+        prefetch = not checkpoint_io.enabled
+        batch = first_batch
+        data_wait_seconds = 0.0
+        transfer_seconds = 0.0
         for step in range(start_step + 1, config.experiment.steps + 1):
             if profile and step == min(config.experiment.profile_steps):
                 jax.profiler.start_trace(str(run_dir / "profile"))
                 trace_active = True
-            data_started = time.perf_counter()
-            if step == start_step + 1:
-                batch = first_batch
-                data_wait_seconds = 0.0
-            else:
+            if batch is None:
+                data_started = time.perf_counter()
                 host_batch = next(data_iterator)
                 data_wait_seconds = time.perf_counter() - data_started
                 batch = _device_batch(host_batch, mesh)
-            transfer_seconds = time.perf_counter() - data_started - data_wait_seconds
+                transfer_seconds = (
+                    time.perf_counter() - data_started - data_wait_seconds
+                )
             started = time.perf_counter()
             with logical_mesh_context(mesh, logical_axis_rules):
                 metrics = compiled_train_step(state, batch)
-                jax.block_until_ready(metrics)
+            batch = None
+            next_data_wait_seconds = 0.0
+            next_transfer_seconds = 0.0
+            if prefetch and step < config.experiment.steps:
+                data_started = time.perf_counter()
+                host_batch = next(data_iterator)
+                next_data_wait_seconds = time.perf_counter() - data_started
+                batch = _device_batch(host_batch, mesh)
+                next_transfer_seconds = (
+                    time.perf_counter() - data_started - next_data_wait_seconds
+                )
+            jax.block_until_ready(metrics)
             step_end = time.perf_counter()
             elapsed = step_end - started
             wall_elapsed = (
@@ -553,6 +573,10 @@ def run(
                 "learning_rate": _learning_rate(config, step),
                 "tokens_seen": tokens_seen,
             }
+            # The prefetched batch's costs belong to the step that consumes
+            # it, i.e. the next record.
+            data_wait_seconds = next_data_wait_seconds
+            transfer_seconds = next_transfer_seconds
             if "muonclip_max_logit" in host_metrics:
                 record["muonclip"] = {
                     "max_logit": host_metrics["muonclip_max_logit"].tolist(),
