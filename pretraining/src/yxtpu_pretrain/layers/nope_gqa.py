@@ -65,6 +65,23 @@ class NoPEGQA(nnx.Module):
             out_axes=(2,),
         )
 
+        if config.rope:
+            from maxtext.layers.embeddings import RotaryEmbedding
+
+            # Parameter-free module; rotation commutes with the query's
+            # 1/sqrt(head_dim) pre-scale applied in _project.
+            self.rotary = RotaryEmbedding(
+                min_timescale=1,
+                max_timescale=10_000,
+                mesh=mesh,
+                embedding_dims=self.head_dim,
+                cast_as_fprop_dtype=True,
+                fprop_dtype=dtype,
+                rngs=rngs,
+            )
+        else:
+            self.rotary = None
+
         self.use_tokamax = mesh.devices[(0,) * mesh.devices.ndim].platform == "tpu"
         if self.use_tokamax:
             self.attention_op = AttentionOp(
@@ -152,6 +169,15 @@ class NoPEGQA(nnx.Module):
         record_max_logits: bool = False,
     ):
         query, key, value = self._project(hidden_states)
+        if self.rotary is not None:
+            positions = decoder_positions
+            if positions is None:
+                positions = jnp.broadcast_to(
+                    jnp.arange(hidden_states.shape[1], dtype=jnp.int32)[None, :],
+                    hidden_states.shape[:2],
+                )
+            query = self.rotary(query, positions)
+            key = self.rotary(key, positions)
         if self.attention_op is None:
             output = self._dot_attention(
                 query,
