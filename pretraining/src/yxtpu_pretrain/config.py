@@ -104,10 +104,8 @@ class ModelConfig(StrictModel):
                 "supported cycles are the certified [KDA,KDA,KDA,NoPE-GQA] hybrid "
                 "or a pure-GQA transformer baseline"
             )
-        if self.residual_policy == "block_attnres":
-            raise ValueError(
-                "block_attnres is reserved but disabled until its separate quality experiment"
-            )
+        if self.residual_policy == "block_attnres" and not self.cycle:
+            raise ValueError("block_attnres requires a hybrid cycle")
         return self
 
 
