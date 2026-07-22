@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -352,13 +354,19 @@ class HybridLanguageModel(nnx.Module):
                 embedding,
                 (((hidden_states.ndim - 1,), (1,)), ((), ())),
             )
-            return logits.astype(jnp.float32)
+            # The embedding initializes at stddev 1.0 (vs the head's fan_in
+            # scale), so tied logits are normalized by sqrt(emb_dim) exactly
+            # as MaxText's shared-embedding decoder does.
+            scale = 1.0 / math.sqrt(self.config.model.emb_dim)
+            return logits.astype(jnp.float32) * scale
         return self.logits(hidden_states).astype(jnp.float32)
 
     def output_projection_kernel(self, dtype):
         """Returns the FP32 master LM head converted to its MXU traffic dtype."""
         if self.logits is None:
-            return jnp.asarray(self.token_embedding.embedding[...], dtype=dtype).T
+            scale = 1.0 / math.sqrt(self.config.model.emb_dim)
+            embedding = self.token_embedding.embedding[...] * scale
+            return jnp.asarray(embedding, dtype=dtype).T
         return jnp.asarray(self.logits.kernel[...], dtype=dtype)
 
     def __call__(

@@ -182,7 +182,9 @@ def test_tied_embeddings_drop_head_parameters_and_match_manual_projection():
         hidden = model_tied.hidden_states(tokens)
         logits = model_tied.project_logits(hidden)
     embedding = jnp.asarray(model_tied.token_embedding.embedding[...], jnp.float32)
-    expected = jnp.einsum("bte,ve->btv", jnp.asarray(hidden, jnp.float32), embedding)
+    expected = jnp.einsum(
+        "bte,ve->btv", jnp.asarray(hidden, jnp.float32), embedding
+    ) / jnp.sqrt(jnp.float32(tied.model.emb_dim))
     assert logits.shape == (1, 64, tied.model.vocab_size)
     assert jnp.allclose(logits, expected, rtol=2e-5, atol=2e-5)
 
