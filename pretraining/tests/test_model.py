@@ -139,3 +139,58 @@ def test_legacy_adapter_is_exhaustive_and_converts_qwen_norm_scale():
         nnx.to_flat_state(converted), nnx.to_flat_state(template), strict=True
     ):
         assert jnp.array_equal(actual.get_value(), expected.get_value())
+
+
+def test_tied_embeddings_drop_head_parameters_and_match_manual_projection():
+    untied = _tiny_config()
+    tied = load_config(
+        model="kda_hybrid_273m",
+        optimizer="adamw",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="selected",
+        overrides=[
+            "model.emb_dim=128",
+            "model.mlp_dim=256",
+            "model.num_layers=4",
+            "model.num_cycles=1",
+            "model.kda.num_heads=1",
+            "model.kda.precision=full_fp32",
+            "model.attention.num_query_heads=1",
+            "model.attention.num_kv_heads=1",
+            "data.sequence_length=64",
+            "data.per_device_batch_size=1",
+            "model.vocab_size=256",
+            "model.dtype=float32",
+            "model.remat_policy=full",
+            "model.logits_via_embedding=true",
+        ],
+    )
+    mesh = create_mesh(untied.hardware, allow_device_mismatch=True)
+    model_untied = HybridLanguageModel(untied, mesh, rngs=nnx.Rngs(7))
+    model_tied = HybridLanguageModel(tied, mesh, rngs=nnx.Rngs(7))
+
+    head_parameters = untied.model.vocab_size * untied.model.emb_dim
+    assert (
+        count_parameters(model_untied) - count_parameters(model_tied)
+        == head_parameters
+    )
+    assert model_tied.logits is None
+
+    tokens = jnp.arange(64, dtype=jnp.int32)[None, :] % tied.model.vocab_size
+    with logical_mesh_context(mesh, make_leaf_config(tied).logical_axis_rules):
+        hidden = model_tied.hidden_states(tokens)
+        logits = model_tied.project_logits(hidden)
+    embedding = jnp.asarray(model_tied.token_embedding.embedding[...], jnp.float32)
+    expected = jnp.einsum("bte,ve->btv", jnp.asarray(hidden, jnp.float32), embedding)
+    assert logits.shape == (1, 64, tied.model.vocab_size)
+    assert jnp.allclose(logits, expected, rtol=2e-5, atol=2e-5)
+
+    roles = {
+        variable.get_metadata().get("role")
+        for variable in jax.tree.leaves(
+            nnx.state(model_tied, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.Variable),
+        )
+    }
+    assert "logits" not in roles

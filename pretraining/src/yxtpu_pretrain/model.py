@@ -255,16 +255,22 @@ class HybridLanguageModel(nnx.Module):
             rngs=rngs,
         )
         declare_norm(self.final_norm)
-        self.logits = DenseGeneral(
-            in_features_shape=model.emb_dim,
-            out_features_shape=model.vocab_size,
-            dtype=self.leaf_config.dtype,
-            weight_dtype=self.leaf_config.weight_dtype,
-            kernel_axes=("embed", "vocab"),
-            matmul_precision="default",
-            rngs=rngs,
-        )
-        declare_dense_kernel(self.logits, ParamRole.LOGITS)
+        if model.logits_via_embedding:
+            # Tied output head: the LM head reads the embedding table
+            # transposed, dropping vocab_size * emb_dim parameters and their
+            # optimizer state. The embedding keeps its EMBEDDING (AdamW) role.
+            self.logits = None
+        else:
+            self.logits = DenseGeneral(
+                in_features_shape=model.emb_dim,
+                out_features_shape=model.vocab_size,
+                dtype=self.leaf_config.dtype,
+                weight_dtype=self.leaf_config.weight_dtype,
+                kernel_axes=("embed", "vocab"),
+                matmul_precision="default",
+                rngs=rngs,
+            )
+            declare_dense_kernel(self.logits, ParamRole.LOGITS)
 
     def _apply_cycles(
         self,
@@ -337,10 +343,22 @@ class HybridLanguageModel(nnx.Module):
 
     def project_logits(self, hidden_states):
         """Materializes FP32 logits for evaluation and the reference loss."""
+        if self.logits is None:
+            embedding = jnp.asarray(
+                self.token_embedding.embedding[...], dtype=self.leaf_config.dtype
+            )
+            logits = jax.lax.dot_general(
+                hidden_states,
+                embedding,
+                (((hidden_states.ndim - 1,), (1,)), ((), ())),
+            )
+            return logits.astype(jnp.float32)
         return self.logits(hidden_states).astype(jnp.float32)
 
     def output_projection_kernel(self, dtype):
         """Returns the FP32 master LM head converted to its MXU traffic dtype."""
+        if self.logits is None:
+            return jnp.asarray(self.token_embedding.embedding[...], dtype=dtype).T
         return jnp.asarray(self.logits.kernel[...], dtype=dtype)
 
     def __call__(
