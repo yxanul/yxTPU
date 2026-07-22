@@ -62,6 +62,15 @@ State is dynamic; verify it before relying on this section.
   8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
   The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
   batch 16 from its XLA-tape backward; it remains only as a fallback.
+- BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit 7028526; same
+  kda_hybrid_128k + muonclip protocol as run 3): PASSES both gates - final
+  loss 3.796 vs 3.872, holdout 3.850 vs 3.882. lambada, the hybrid's one
+  campaign loss, jumped 0.112 -> 0.164 acc (ppl 7,161 -> 2,247), beating
+  even the pure-GQA transformer's 0.127. sciq 0.58, hellaswag and
+  arc_challenge also up; piqa/boolq slightly down. Cost: ~17% throughput
+  (0.94M vs 1.13M tokens/s) - the depth reads are bandwidth-bound, and a
+  mixer_only site ablation is the obvious next lever. Grad norms slightly
+  busier (mean 0.51 vs 0.39, max 5.67) but bounded and smooth.
 - SuperBPE-1B campaign 2026-07-22 (W&B group superbpe-1b; ClimbMix streamed
   through alisawuffles/superbpe-tokenizer-128k, vocab padded 128256, tied
   embeddings, 1B tokens, constant LR 3e-4 after 40-step warmup, full lm-eval
