@@ -72,6 +72,28 @@ State is dynamic; verify it before relying on this section.
   so it stays default-false; revisit at larger widths where NS FLOPs grow
   quadratically. Toggling it changes the optimizer-state pytree (checkpoint
   incompatibility across the flag).
+- KDA backward-bandwidth pass 2026-07-23 (commits f657066..28c7242): the
+  cycle remat was re-running the fused KDA forward inside every backward.
+  The fwd rule now checkpoint_names its output and state history, and
+  model.remat_save_kda_residuals (default true) adds both names to the
+  policy; the recompute then survives only as a dead zero-output shard_map
+  husk in the jaxpr, which XLA's HLO DCE deletes. Compiled HLO shows fwd
+  custom_calls 6 -> 3 per scan body (static count - the executed saving is
+  12 walks/step at 4 cycles), XLA temp memory 14.2 -> 16.4 GB, and the
+  compute-floor step time (p10 of a 200-step muonclip+attnres A/B) fell
+  483 -> 473 ms (~2%). Disable the flag for memory-tight long-sequence runs
+  (saved state history scales linearly with sequence length). Two kernel
+  cuts landed alongside, both verified bit-identical on-device across all
+  nine fwd/bwd outputs: stage A's state-cotangent export shrank from a full
+  per-chunk buffer to one revisited chunk-0 slot (134 MB -> 4 MB of writes
+  per layer), and stage B recomputes cumulative_decay from log_decay
+  in-kernel instead of round-tripping a 67 MB export; both sit below
+  run-to-run timing noise, as estimated. Loss trajectories across
+  baseline/flag-off/flag-on overlay at fp-noise (<=2e-5 at step 50,
+  ~4e-3 transient wobble at the mid-run grad spike, no drift). Note:
+  tests/test_kimi_delta_attention.py has 5 pre-existing failures when run
+  on v4 hardware (sublane-gather in the non-v4 kernels; identical at
+  4de5b4a) - only its v4-path tests are meaningful gates there.
 - BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit 7028526; same
   kda_hybrid_128k + muonclip protocol as run 3): PASSES both gates - final
   loss 3.796 vs 3.872, holdout 3.850 vs 3.882. lambada, the hybrid's one
@@ -105,8 +127,11 @@ State is dynamic; verify it before relying on this section.
   overlaps the sliver GEMMs behind the qkv GEMM, and the fused path pays a
   materialize-and-slice cost instead. Keep it off by default; re-evaluate on
   v6e where the wider MXU makes slivers relatively costlier.
-- KDA on v4 runs through `kda_v4_hybrid`: the pre-fold fused Pallas forward
-  (`kernels/kda_fused_pallas_v4.py`) plus a chunkwise XLA backward. The fused
+- KDA on v4 runs through `pallas_kda_fused_v4`: the pre-fold fused Pallas
+  forward plus the split fused backward (stage A reverse solve, stage B
+  parallel pairwise epilogue) in `kernels/kda_fused_pallas_v4.py`;
+  `kda_v4_hybrid` (fused forward + chunkwise XLA backward) remains only as
+  an unused fallback. The integrated one-kernel fused
   backward cannot compile on v4 - Mosaic's layout assignment needs a
   sublane-gather relayout the v4 ISA lacks (every construct compiles in
   isolation; only the integrated backward fails). The folded kernel remains
