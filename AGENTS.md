@@ -62,6 +62,11 @@ State is dynamic; verify it before relying on this section.
   8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
   The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
   batch 16 from its XLA-tape backward; it remains only as a fallback.
+- Tied embeddings (model.logits_via_embedding, commit 6472af7): now actually
+  implemented (the flag was schema-only before). On v4-64 at 8x4096 the tied
+  273m model runs ~1.554M tokens/s (unchanged, as expected) with
+  parameter_count 239,381,088 - exactly vocab x emb fewer. For the gpt2
+  model the same flag saves 51.6M parameters (~17%).
 - Input-projection fusion (kda.fused_in_proj, commit c841282): merges the
   four input-side KDA projections into one [embed, 3336] GEMM. Proven exactly
   equivalent (transplant test, 2e-5) and guarded against muon-family
