@@ -37,7 +37,6 @@ from maxtext.layers.normalizations import RMSNorm, l2norm
 from maxtext.utils.sharding import logical_to_mesh_axes
 
 from yxtpu_pretrain.kernels.kda_fused_pallas import pallas_kda_fused
-from yxtpu_pretrain.kernels.kda_fused_pallas_v4 import pallas_kda_fused_v4
 
 
 @functools.lru_cache(maxsize=1)
@@ -1122,6 +1121,64 @@ def chunk_kda(
   )
 
 
+@jax.custom_vjp
+def kda_v4_hybrid(query, key, value, log_decay, beta, initial_state):
+  """TPU-v4 KDA training op: fused Pallas forward, chunkwise XLA backward.
+
+  The pre-fold fused forward kernel compiles on v4 stage by stage, but
+  Mosaic's layout assignment for the fused backward demands a sublane-gather
+  relayout that v4's ISA lacks (the constructs pass in isolation; only the
+  integrated backward fails). Gradients therefore recompute through the
+  chunkwise XLA path, keeping residuals to the six inputs.
+  """
+  from yxtpu_pretrain.kernels.kda_fused_pallas_v4 import (
+      _pallas_kda_fused_v4_forward,
+  )
+
+  output, final_state, _ = _pallas_kda_fused_v4_forward(
+      query,
+      key,
+      value,
+      log_decay,
+      beta,
+      initial_state,
+      chunk_size=64,
+      use_qk_norm=True,
+      solve_method="inverse",
+  )
+  return output, final_state
+
+
+def _kda_v4_hybrid_fwd(query, key, value, log_decay, beta, initial_state):
+  return (
+      kda_v4_hybrid(query, key, value, log_decay, beta, initial_state),
+      (query, key, value, log_decay, beta, initial_state),
+  )
+
+
+def _kda_v4_hybrid_bwd(residuals, output_cotangents):
+  query, key, value, log_decay, beta, initial_state = residuals
+
+  def reference(query, key, value, log_decay, beta, initial_state):
+    return chunk_kda(
+        query,
+        key,
+        value,
+        log_decay,
+        beta,
+        initial_state=initial_state,
+        chunk_size=64,
+        use_qk_norm=True,
+        compute_dtype=jnp.bfloat16,
+    )
+
+  _, vjp = jax.vjp(reference, query, key, value, log_decay, beta, initial_state)
+  return vjp(output_cotangents)
+
+
+kda_v4_hybrid.defvjp(_kda_v4_hybrid_fwd, _kda_v4_hybrid_bwd)
+
+
 class KimiDeltaAttention(nnx.Module):
   """Dense KDA token mixer for MaxText's Qwen3-Next hybrid container."""
 
@@ -1384,7 +1441,7 @@ class KimiDeltaAttention(nnx.Module):
       )
       def sharded_kda(q, k, v, g, b, state):
         if use_v4_fused_kernel:
-          return pallas_kda_fused_v4(q, k, v, g, b, state)
+          return kda_v4_hybrid(q, k, v, g, b, state)
         kda_impl = functools.partial(
             chunk_kda,
             chunk_size=self.config.gdn_chunk_size,

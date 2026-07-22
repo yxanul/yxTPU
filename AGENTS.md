@@ -49,10 +49,44 @@ State is dynamic; verify it before relying on this section.
   this is the grant's only on-demand row.
 - Runtime: `tpu-ubuntu2204-base`
 - Created: 2026-07-22
-- Last verified: 2026-07-22 — `guaranteed: {}` (the on-demand tier) confirmed
-  on the resource; queued resource `PROVISIONING`, node `CREATING`. The VM
-  starts empty: run `pretraining` setup (repo clone, venv, HF and W&B
-  credentials) on all 8 workers once it is ACTIVE.
+- Last verified: 2026-07-22 — queued resource `ACTIVE`; node `READY` and
+  `HEALTHY`. `guaranteed: {}` (the on-demand tier) confirmed on the resource.
+  On-demand provisioned on the first attempt, unlike the four reclaimed v6e
+  Spot attempts the same day.
+- Benchmarks 2026-07-22 (synthetic, 30 steps, selected profile, 8/device x
+  2048, pure data parallel over 32 chips): MaxText 247M GQA baseline
+  ~2.26M tokens/s global (~105 TFLOP/s/device, ~38% MFU); KDA hybrid 273M
+  ~630k tokens/s global (~831 ms/step at 524,288 tokens/step).
+- KDA on v4 runs through `kda_v4_hybrid`: the pre-fold fused Pallas forward
+  (`kernels/kda_fused_pallas_v4.py`) plus a chunkwise XLA backward. The fused
+  backward cannot compile on v4 - Mosaic's layout assignment needs a
+  sublane-gather relayout the v4 ISA lacks (every construct compiles in
+  isolation; only the integrated backward fails). The folded kernel remains
+  the v5+/v6 path; dispatch is automatic by device generation.
+- v4 pod-slice operations, learned the hard way:
+  - libtpu initialization on a pod slice is collective: a JAX process on one
+    worker blocks in `make_tpu_client` forever unless all workers launch
+    together. Single-worker debugging needs `TPU_PROCESS_BOUNDS`-style env
+    restrictions; otherwise always use `--worker=all`.
+  - A crashed run leaves `/tmp/libtpu_lockfile` behind; the next client
+    blocks or fails until it is removed on every worker.
+  - The primary logging process (jax process_index 0) is NOT necessarily
+    worker 0 - it landed on worker 3 here. Filter run logs by content, not
+    hostname.
+  - Never `pkill -f <pattern>` over `gcloud ssh --command` when the pattern
+    also appears in the command line itself - the shell kills its own
+    session and gcloud retries in a loop.
+- Setup completed 2026-07-22 on all 8 workers: repo at `main` (`6aeaf4a`,
+  full clone — doctor's pin check needs git history, so never clone with
+  `--depth 1`), `uv sync --locked --extra dev`, HF token in
+  `~/.cache/huggingface/token` and W&B key in `~/.netrc` (both verified by
+  live authentication; non-interactive SSH needs `~/.local/bin` added to
+  PATH for `uv`). `doctor --hardware v4-64`: all 8 workers report 32 TPU
+  devices and matching device count. The `maxtext_pin` check reports
+  `clean=False` on workers and locally alike — the vendored `maxtext/` tree
+  was intentionally patched after the import commit by the KDA training-path
+  commits — so treat that specific FAIL as the known baseline, not a setup
+  regression.
 - Quota verified 2026-07-22 via the Service Usage API: "TPU-V4 pod cores in
   use" has no default quota anywhere and exactly one zone override,
   `us-central2-b` = 64 cores = 32 chips — the TRC grant fingerprint. The

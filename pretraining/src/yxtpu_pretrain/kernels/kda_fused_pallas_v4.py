@@ -196,6 +196,34 @@ def _matmul(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Array:
   )
 
 
+def _matmul_tn(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Array:
+  """``_matmul(_transpose(left), right)`` without materializing the transpose.
+
+  Contracts the second-to-last axis of both operands so the MXU consumes the
+  transposed left operand directly. TPU v4's Mosaic backend cannot lower the
+  skinny ``[row_block, chunk]`` vector transpose this replaces — it needs a
+  sublane gather that only exists on v5 and later generations.
+  """
+  if precision is None:
+    precision = _CHUNK_MATMUL_PRECISION
+  if left.ndim == 2:
+    return lax.dot_general(
+        left,
+        right,
+        (((0,), (0,)), ((), ())),
+        precision=precision,
+        preferred_element_type=jnp.float32,
+    )
+  batch_axes = tuple(range(left.ndim - 2))
+  return lax.dot_general(
+      left,
+      right,
+      (((left.ndim - 2,), (right.ndim - 2,)), (batch_axes, batch_axes)),
+      precision=precision,
+      preferred_element_type=jnp.float32,
+  )
+
+
 def _state_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Matmul for terms that read or write the cross-chunk recurrent state."""
   return _matmul(left, right, precision=_STATE_MATMUL_PRECISION)
@@ -391,7 +419,9 @@ def _decayed_pairwise_backward(
     cotangent_block = output_cotangent[..., row_start:row_end, :]
 
     weighted_left_cotangent = _pairwise_matmul(cotangent_block, weighted_right)
-    weighted_right_cotangent = _pairwise_matmul(_transpose(cotangent_block), weighted_left)
+    weighted_right_cotangent = _matmul_tn(
+        cotangent_block, weighted_left, precision=_PAIRWISE_MATMUL_PRECISION
+    )
     left_cotangent_blocks.append(weighted_left_cotangent * left_factor)
     right_cotangent = right_cotangent + weighted_right_cotangent * right_factor
 
