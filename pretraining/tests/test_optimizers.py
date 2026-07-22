@@ -214,3 +214,37 @@ def test_muon_ns_bf16_casts_muon_updates_and_leaves_adam_fp32():
     transform_off, _ = build_optimizer(_model(config_off, 3), config_off.optimizer)
     state_off = transform_off.init(params)
     assert bf16_leaf_count(state_off) == 0
+
+
+def test_terminal_decay_schedule_holds_peak_until_decay_window():
+    """decay_steps carves the cosine out of only the schedule tail: peak is
+    constant from warmup until schedule_steps - decay_steps, and the
+    host-side telemetry mirror in train._learning_rate must agree with the
+    Optax schedule everywhere (it is step-indexed, count = step - 1)."""
+    from yxtpu_pretrain.optimizers.routing import build_learning_rate_schedule
+    from yxtpu_pretrain.train import _learning_rate
+
+    config = load_config(
+        model="kda_hybrid_273m",
+        optimizer="muonclip",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="selected",
+        overrides=[
+            "optimizer.warmup_steps=40",
+            "optimizer.schedule_steps=1000",
+            "optimizer.decay_steps=100",
+            "optimizer.final_learning_rate_fraction=0.0",
+        ],
+    )
+    schedule = build_learning_rate_schedule(config.optimizer)
+    peak = config.optimizer.learning_rate
+    assert float(schedule(40)) == pytest.approx(peak)
+    assert float(schedule(500)) == pytest.approx(peak)
+    assert float(schedule(900)) == pytest.approx(peak)
+    assert float(schedule(950)) == pytest.approx(0.5 * peak, rel=1e-6)
+    assert float(schedule(1000)) == pytest.approx(0.0, abs=1e-12)
+    for step in (1, 41, 501, 901, 951, 1001):
+        assert _learning_rate(config, step) == pytest.approx(
+            float(schedule(step - 1)), rel=1e-6, abs=1e-9
+        )

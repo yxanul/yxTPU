@@ -132,20 +132,37 @@ def _muon_mask_tree(parameters, routes: list[Route]):
 
 
 def build_learning_rate_schedule(config: OptimizerConfig):
-    """Builds the shared warmup/cosine schedule for the optimizer and telemetry."""
+    """Builds the shared warmup/cosine schedule for the optimizer and telemetry.
+
+    train._learning_rate mirrors this host-side for logging; keep both in
+    lockstep."""
     warmup = optax.linear_schedule(
         init_value=0.0,
         end_value=config.learning_rate,
         transition_steps=config.warmup_steps,
     )
+    if config.decay_steps is None:
+        decay = optax.cosine_decay_schedule(
+            init_value=config.learning_rate,
+            decay_steps=config.schedule_steps - config.warmup_steps,
+            alpha=config.final_learning_rate_fraction,
+        )
+        return optax.join_schedules(
+            schedules=(warmup, decay),
+            boundaries=(config.warmup_steps,),
+        )
+    constant = optax.constant_schedule(config.learning_rate)
     decay = optax.cosine_decay_schedule(
         init_value=config.learning_rate,
-        decay_steps=config.schedule_steps - config.warmup_steps,
+        decay_steps=config.decay_steps,
         alpha=config.final_learning_rate_fraction,
     )
     return optax.join_schedules(
-        schedules=(warmup, decay),
-        boundaries=(config.warmup_steps,),
+        schedules=(warmup, constant, decay),
+        boundaries=(
+            config.warmup_steps,
+            config.schedule_steps - config.decay_steps,
+        ),
     )
 
 

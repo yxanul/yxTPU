@@ -352,8 +352,14 @@ def _learning_rate(config: ResolvedConfig, step: int) -> float:
     count = max(step - 1, 0)
     if count < optimizer.warmup_steps:
         return optimizer.learning_rate * count / max(optimizer.warmup_steps, 1)
-    decay_steps = optimizer.schedule_steps - optimizer.warmup_steps
-    progress = min(max(count - optimizer.warmup_steps, 0) / decay_steps, 1.0)
+    if optimizer.decay_steps is not None:
+        decay_start = optimizer.schedule_steps - optimizer.decay_steps
+        if count < decay_start:
+            return optimizer.learning_rate
+        progress = min((count - decay_start) / optimizer.decay_steps, 1.0)
+    else:
+        decay_steps = optimizer.schedule_steps - optimizer.warmup_steps
+        progress = min(max(count - optimizer.warmup_steps, 0) / decay_steps, 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return optimizer.learning_rate * (
         optimizer.final_learning_rate_fraction
@@ -498,10 +504,17 @@ def run(
         # Prefetch the next batch between dispatching a step and blocking on
         # it, so the host fetch and host-to-device transfer (~70 ms/step of
         # otherwise-exposed wall time) overlap the device computation still
-        # in flight. Disabled when checkpointing is enabled: a save would
-        # persist the data-iterator state one batch ahead of the last
-        # trained step, silently skipping that batch on resume.
-        prefetch = not checkpoint_io.enabled
+        # in flight. Skipped on iterations that save a checkpoint (the saved
+        # iterator state must not run one batch ahead of the last trained
+        # step) and on the projected final token-budget step, so persisted
+        # and consumed positions always agree.
+        checkpoint_interval = config.experiment.checkpoint.save_interval
+        tokens_per_step = (
+            config.data.per_device_batch_size
+            * config.experiment.gradient_accumulation_steps
+            * jax.device_count()
+            * config.data.sequence_length
+        )
         batch = first_batch
         data_wait_seconds = 0.0
         transfer_seconds = 0.0
@@ -523,7 +536,20 @@ def run(
             batch = None
             next_data_wait_seconds = 0.0
             next_transfer_seconds = 0.0
-            if prefetch and step < config.experiment.steps:
+            will_checkpoint = bool(
+                checkpoint_io.enabled
+                and checkpoint_interval
+                and step % checkpoint_interval == 0
+            )
+            ends_token_budget = (
+                config.experiment.token_budget is not None
+                and tokens_seen + tokens_per_step >= config.experiment.token_budget
+            )
+            if (
+                step < config.experiment.steps
+                and not will_checkpoint
+                and not ends_token_budget
+            ):
                 data_started = time.perf_counter()
                 host_batch = next(data_iterator)
                 next_data_wait_seconds = time.perf_counter() - data_started
