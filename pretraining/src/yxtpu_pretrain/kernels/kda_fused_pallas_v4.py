@@ -43,6 +43,7 @@ import math
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
@@ -2159,6 +2160,12 @@ def _pallas_kda_fused_v4_fwd(query, key, value, log_decay, beta, initial_state):
       use_qk_norm=True,
       solve_method=_SOLVE_METHOD,
   )
+  # Under the cycle remat these two names are the whole consumer set of the
+  # forward pallas call, so a policy that saves both leaves the backward's
+  # recompute of this sequential walk dead (a zero-output shard_map husk in
+  # the jaxpr that XLA's HLO DCE then removes).
+  output = checkpoint_name(output, "kda_out")
+  state_history = checkpoint_name(state_history, "kda_state_history")
   return (output, final_state), (
       query,
       key,

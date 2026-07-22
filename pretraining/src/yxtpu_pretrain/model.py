@@ -59,22 +59,20 @@ def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
     declare_norm(layer.output_norm)
 
 
-def _remat_policy(name: str):
+def _remat_policy(name: str, save_kda_residuals: bool):
     if name == "full":
         return None
     if name == "minimal":
-        return jax.checkpoint_policies.save_only_these_names(
-            "qkv_proj", "out_proj", "mlpwi", "mlpwo"
-        )
-    if name == "minimal_with_context":
-        return jax.checkpoint_policies.save_only_these_names(
-            "qkv_proj", "context", "out_proj", "mlpwi", "mlpwo"
-        )
-    if name == "save_dot_except_mlp":
-        return jax.checkpoint_policies.save_only_these_names(
-            "qkv_proj", "out_proj"
-        )
-    raise ValueError(f"unknown rematerialization policy: {name}")
+        names = ("qkv_proj", "out_proj", "mlpwi", "mlpwo")
+    elif name == "minimal_with_context":
+        names = ("qkv_proj", "context", "out_proj", "mlpwi", "mlpwo")
+    elif name == "save_dot_except_mlp":
+        names = ("qkv_proj", "out_proj")
+    else:
+        raise ValueError(f"unknown rematerialization policy: {name}")
+    if save_kda_residuals:
+        names = (*names, "kda_out", "kda_state_history")
+    return jax.checkpoint_policies.save_only_these_names(*names)
 
 
 class HybridLayer(nnx.Module):
@@ -411,7 +409,10 @@ class HybridLanguageModel(nnx.Module):
 
         cycle_fn = jax.checkpoint(
             cycle_fn,
-            policy=_remat_policy(self.config.model.remat_policy),
+            policy=_remat_policy(
+                self.config.model.remat_policy,
+                self.config.model.remat_save_kda_residuals,
+            ),
             prevent_cse=False,
         )
         hidden_states, scanned_state = jax.lax.scan(cycle_fn, hidden_states, (params, state))
