@@ -421,3 +421,100 @@ def test_chunk_kda_masks_future_decay_before_exponentiation():
   )
   for array in jax.tree.leaves(value_and_grads):
     assert np.all(np.isfinite(array))
+
+
+def test_fused_input_projection_matches_separate_projections():
+  from flax import nnx
+
+  from yxtpu_pretrain.config import load_config
+  from yxtpu_pretrain.layers.kimi_delta_attention import KimiDeltaAttention
+  from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
+  from yxtpu_pretrain.runtime.mesh import create_mesh
+
+  def build_config(fused: bool):
+    return load_config(
+        model="kda_hybrid_273m",
+        optimizer="adamw",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="selected",
+        overrides=[
+            "model.emb_dim=128",
+            "model.mlp_dim=256",
+            "model.num_layers=4",
+            "model.num_cycles=1",
+            "model.kda.num_heads=1",
+            "model.kda.precision=full_fp32",
+            "model.attention.num_query_heads=1",
+            "model.attention.num_kv_heads=1",
+            "data.sequence_length=128",
+            "data.per_device_batch_size=1",
+            "model.vocab_size=256",
+            "model.dtype=float32",
+            f"model.kda.fused_in_proj={'true' if fused else 'false'}",
+        ],
+    )
+
+  config_a = build_config(False)
+  config_b = build_config(True)
+  mesh = create_mesh(config_a.hardware, allow_device_mismatch=True)
+  layer_a = KimiDeltaAttention(
+      config=make_leaf_config(config_a), mesh=mesh, rngs=nnx.Rngs(3)
+  )
+  layer_b = KimiDeltaAttention(
+      config=make_leaf_config(config_b), mesh=mesh, rngs=nnx.Rngs(3)
+  )
+
+  emb = layer_a.in_proj_qkv.kernel.value.shape[0]
+  fused_kernel = jnp.concatenate(
+      (
+          layer_a.in_proj_qkv.kernel.value.reshape(emb, -1),
+          layer_a.decay_down.kernel.value.reshape(emb, -1),
+          layer_a.beta_proj.kernel.value.reshape(emb, -1),
+          layer_a.output_gate_down.kernel.value.reshape(emb, -1),
+      ),
+      axis=1,
+  )
+  layer_b.in_proj_mixer.kernel.value = fused_kernel.reshape(
+      layer_b.in_proj_mixer.kernel.value.shape
+  )
+  transplants = (
+      (layer_a.conv1d.kernel, layer_b.conv1d.kernel),
+      (layer_a.decay_up.kernel, layer_b.decay_up.kernel),
+      (layer_a.output_gate_up.kernel, layer_b.output_gate_up.kernel),
+      (layer_a.output_gate_up.bias, layer_b.output_gate_up.bias),
+      (layer_a.out_proj.kernel, layer_b.out_proj.kernel),
+      (layer_a.A_log, layer_b.A_log),
+      (layer_a.dt_bias, layer_b.dt_bias),
+      (layer_a.output_norm.scale, layer_b.output_norm.scale),
+  )
+  for source, destination in transplants:
+    destination.value = source.value
+
+  hidden = jnp.asarray(
+      np.random.default_rng(0).standard_normal((1, 128, emb)), jnp.float32
+  )
+  output_a, _ = layer_a(hidden)
+  output_b, _ = layer_b(hidden)
+  np.testing.assert_allclose(
+      np.asarray(output_b, np.float32),
+      np.asarray(output_a, np.float32),
+      rtol=2e-5,
+      atol=2e-5,
+  )
+
+
+def test_fused_input_projection_rejects_muon():
+  import pytest
+
+  from yxtpu_pretrain.config import load_config
+
+  with pytest.raises(ValueError, match="fused_in_proj"):
+    load_config(
+        model="kda_hybrid_273m",
+        optimizer="muon",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="selected",
+        overrides=["model.kda.fused_in_proj=true"],
+    )
