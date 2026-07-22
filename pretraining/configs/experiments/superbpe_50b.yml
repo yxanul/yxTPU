@@ -1,0 +1,57 @@
+# 50B-token overnight run: BlockAttnRes hybrid KDA + MuonClip/AdamW.
+# 524,288 tokens/step -> the budget lands during step 95,368; steps carries
+# margin and token_budget stops the run. Checkpoints every 19,073 steps
+# (~10B tokens) to per-host local disks (~3.2 GB each; streaming iterator
+# position is not serializable, so restores are weights+optimizer only).
+# Launch overrides supply the schedule: warmup 40, constant 3e-4, cosine
+# decay over the final 9,537 steps (~5B tokens).
+name: superbpe_50b
+steps: 95500
+token_budget: 50000000000
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: false
+checkpoint:
+  enabled: true
+  destination: /home/a1111/yxtpu_ckpts
+  save_interval: 19073
+  async_save: true
+  keep: 6
+  resume: true
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: superbpe-50b
+  tags: [v4-64, superbpe-128k, 50b-tokens, block-attnres]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 250
+harness_eval:
+  enabled: true
+  interval: 4768
+  tasks:
+    - hellaswag
+    - piqa
+    - arc_easy
+    - arc_challenge
+    - sciq
+    - boolq
+    - openbookqa
+    - copa
+    - commonsense_qa
+    - lambada_openai
+  batch_size_per_device: 1
+  num_fewshot: 0
+  limit: null
+  use_cache: true
+model_overrides:
+  residual_policy: block_attnres
+data_overrides:
+  sequence_length: 2048
+  per_device_batch_size: 8

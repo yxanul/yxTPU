@@ -249,3 +249,36 @@ def test_interrupted_training_reproduces_next_uninterrupted_step(tmp_path):
     ):
         assert actual_path == expected_path
         assert jnp.array_equal(actual.get_value(), expected.get_value())
+
+
+class _UnresumableIterator:
+    """Streaming-profile stand-in: the position cannot be serialized."""
+
+    def get_state(self):
+        raise RuntimeError(
+            "streaming packed data is not checkpointable in this profile"
+        )
+
+    def set_state(self, state):
+        raise AssertionError("set_state must not be called for stub restores")
+
+
+def test_unresumable_iterator_saves_stub_and_restores_weights_only(tmp_path):
+    config = _tiny_config(tmp_path)
+    train_state = _train_state(config)
+    model = train_state.model
+    original = {
+        path: variable.get_value().copy()
+        for path, variable in nnx.to_flat_state(nnx.state(model, nnx.Param))
+    }
+    checkpoint = CheckpointIO(config, run_name="weights-only")
+    iterator = _UnresumableIterator()
+    assert checkpoint.save(train_state, iterator, 1, force=True)
+    checkpoint.manager.wait_until_finished()
+
+    first_parameter = next(iter(nnx.to_flat_state(nnx.state(model, nnx.Param))))[1]
+    first_parameter.set_value(jnp.zeros_like(first_parameter.get_value()))
+    assert checkpoint.restore(train_state, iterator) == 1
+    checkpoint.close()
+    for path, variable in nnx.to_flat_state(nnx.state(model, nnx.Param)):
+        assert jnp.array_equal(variable.get_value(), original[path])
