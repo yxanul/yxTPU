@@ -459,7 +459,12 @@ def run(
         train_step = _make_train_step(config)
         eval_step = _make_eval_step()
         diagnostics_step = _make_diagnostics_step()
-        first_batch = _device_batch(next(data_iterator), mesh)
+    # The batch conversion must happen outside logical_mesh_context: under
+    # jax.set_mesh the host-local -> global expansion silently no-ops, so the
+    # step would be compiled for the per-host shape and reject the global
+    # batches the loop feeds it on multi-host slices.
+    first_batch = _device_batch(next(data_iterator), mesh)
+    with logical_mesh_context(mesh, logical_axis_rules):
         compiled_train_step = train_step.lower(state, first_batch).compile()
         compiled_memory = _compiled_memory_summary(compiled_train_step)
     parameter_count = count_parameters(state.model)

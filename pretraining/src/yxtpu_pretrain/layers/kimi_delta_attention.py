@@ -37,6 +37,18 @@ from maxtext.layers.normalizations import RMSNorm, l2norm
 from maxtext.utils.sharding import logical_to_mesh_axes
 
 from yxtpu_pretrain.kernels.kda_fused_pallas import pallas_kda_fused
+from yxtpu_pretrain.kernels.kda_fused_pallas_v4 import pallas_kda_fused_v4
+
+
+@functools.lru_cache(maxsize=1)
+def _local_tpu_is_v4() -> bool:
+  """The folded kernel's in-kernel [time, head] transposes lower to sublane
+  gathers, which v4's Mosaic backend rejects; v4 takes the pre-fold kernel
+  with the QKV mixer left in XLA."""
+  devices = jax.devices()
+  if not devices or devices[0].platform != "tpu":
+    return False
+  return "v4" in str(getattr(devices[0], "device_kind", "")).lower()
 
 _TRIANGULAR_SOLVE_BLOCK_SIZE = 16
 
@@ -1259,6 +1271,12 @@ class KimiDeltaAttention(nnx.Module):
 
     batch, sequence_length, _ = hidden_states.shape
     use_fused_kernel = self.config.kda_use_fused_pallas_kernel
+    # The v4 kernel bakes qk-norm in, so it only serves the certified
+    # normalized configuration; anything else falls through to chunk_kda.
+    use_v4_fused_kernel = (
+        use_fused_kernel and self.config.use_qk_norm_in_gdn and _local_tpu_is_v4()
+    )
+    use_fused_kernel = use_fused_kernel and not use_v4_fused_kernel
     qkv = self.in_proj_qkv(hidden_states)
     if use_fused_kernel:
       # The fused Pallas kernel owns the causal depthwise convolution and
@@ -1365,6 +1383,8 @@ class KimiDeltaAttention(nnx.Module):
           check_vma=False,
       )
       def sharded_kda(q, k, v, g, b, state):
+        if use_v4_fused_kernel:
+          return pallas_kda_fused_v4(q, k, v, g, b, state)
         kda_impl = functools.partial(
             chunk_kda,
             chunk_size=self.config.gdn_chunk_size,
