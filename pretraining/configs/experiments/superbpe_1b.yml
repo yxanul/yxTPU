@@ -1,0 +1,48 @@
+name: superbpe_1b
+steps: 1908
+token_budget: 1000000000
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: true
+checkpoint:
+  enabled: false
+  destination: null
+  save_interval: 0
+  async_save: false
+  keep: 0
+  resume: false
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: superbpe-1b
+  tags: [v4-64, superbpe-128k, 1b-tokens]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 250
+harness_eval:
+  enabled: true
+  interval: 477
+  tasks:
+    - hellaswag
+    - piqa
+    - arc_easy
+    - arc_challenge
+    - sciq
+    - boolq
+    - openbookqa
+    - copa
+    - commonsense_qa
+    - lambada_openai
+  batch_size_per_device: 1
+  num_fewshot: 0
+  limit: null
+  use_cache: true
+data_overrides:
+  sequence_length: 2048
+  per_device_batch_size: 8

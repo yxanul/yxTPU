@@ -1,0 +1,39 @@
+name: superbpe_smoke
+steps: 40
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: true
+checkpoint:
+  enabled: false
+  destination: null
+  save_interval: 0
+  async_save: false
+  keep: 0
+  resume: false
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: superbpe-smoke
+  tags: [v4-64, superbpe-128k, smoke]
+  mode: online
+diagnostics:
+  enabled: false
+  interval: 0
+harness_eval:
+  enabled: true
+  interval: 30
+  tasks:
+    - piqa
+    - copa
+  batch_size_per_device: 1
+  num_fewshot: 0
+  limit: 100
+  use_cache: false
+data_overrides:
+  sequence_length: 2048
+  per_device_batch_size: 8

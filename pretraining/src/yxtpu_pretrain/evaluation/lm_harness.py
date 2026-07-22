@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
+from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from lm_eval.api.model import TemplateLM
 
@@ -66,11 +67,12 @@ class JaxHarnessLM(TemplateLM):
 
     def __init__(self, config: ResolvedConfig, model, mesh, logical_axis_rules):
         super().__init__()
-        if jax.process_count() != 1:
-            raise ValueError(
-                "the in-process lm-eval adapter is single-host only; set "
-                "experiment.harness_eval.enabled=false on multi-host slices"
-            )
+        # Multi-host: every process runs the identical request stream
+        # (simple_evaluate is fully seeded, so ordering is deterministic),
+        # feeds its shard of each global batch, and allgathers the small
+        # score vectors. A divergence guard in _loglikelihood_tokens turns
+        # any cross-host request mismatch into an immediate error instead of
+        # a silent hang.
         if config.data.tokenizer is None:
             raise ValueError("lm-eval requires data.tokenizer")
         self.config = config
@@ -79,7 +81,7 @@ class JaxHarnessLM(TemplateLM):
         self.logical_axis_rules = logical_axis_rules
         self.max_length = config.data.sequence_length
         self.batch_size = (
-            config.experiment.harness_eval.batch_size_per_device * jax.local_device_count()
+            config.experiment.harness_eval.batch_size_per_device * jax.device_count()
         )
         self.tokenizer = load_fast_tokenizer(
             config.data.tokenizer,
@@ -146,13 +148,22 @@ class JaxHarnessLM(TemplateLM):
             key: np.stack([example[key] for example in examples])
             for key in examples[0]
         }
-        device_batch = {
-            key: jax.device_put(jnp.asarray(value), self._data_matrix)
-            for key, value in host_batch.items()
-        }
+        def globalize(value):
+            array = np.asarray(value)
+            if jax.process_count() == 1:
+                return jax.device_put(jnp.asarray(array), self._data_matrix)
+            return jax.make_array_from_callback(
+                array.shape, self._data_matrix, lambda index, a=array: a[index]
+            )
+
+        device_batch = {key: globalize(value) for key, value in host_batch.items()}
         with logical_mesh_context(self.mesh, self.logical_axis_rules):
             scores, greedy = self._score(self.model, device_batch)
-            scores, greedy = jax.device_get((scores, greedy))
+        if jax.process_count() > 1:
+            scores, greedy = multihost_utils.global_array_to_host_local_array(
+                (scores, greedy), self.mesh, (PartitionSpec(), PartitionSpec())
+            )
+        scores, greedy = jax.device_get((scores, greedy))
         return scores[:real_size], greedy[:real_size]
 
     def _loglikelihood_tokens(self, requests, **kwargs) -> list[tuple[float, bool]]:
@@ -161,6 +172,11 @@ class JaxHarnessLM(TemplateLM):
             self._prepare_request(context_tokens, continuation_tokens)
             for _, context_tokens, continuation_tokens in requests
         ]
+        if jax.process_count() > 1:
+            multihost_utils.assert_equal(
+                np.int64(len(examples)),
+                "lm-eval request streams diverged across hosts",
+            )
         results: list[tuple[float, bool]] = []
         for start in range(0, len(examples), self.batch_size):
             scores, greedy = self._run_batch(examples[start : start + self.batch_size])

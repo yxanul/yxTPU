@@ -1,0 +1,38 @@
+name: gqa_rope_128k
+vocab_size: 128256
+emb_dim: 1024
+num_layers: 16
+cycle: [gqa, gqa, gqa, gqa]
+num_cycles: 4
+mlp_dim: 2816
+fused_mlp: true
+rms_norm_epsilon: 1.0e-5
+dtype: bfloat16
+weight_dtype: float32
+param_scan_axis: 1
+remat_policy: minimal_with_context
+residual_policy: standard
+logits_via_embedding: true
+dropout_rate: 0.0
+kda:
+  chunk_size: 64
+  num_heads: 8
+  key_head_dim: 128
+  value_head_dim: 128
+  conv_kernel_size: 4
+  gate_rank: 128
+  qk_norm: true
+  safe_gate: true
+  gate_lower_bound: -5.0
+  precision: guarded_fp32
+attention:
+  implementation: tokamax_splash
+  num_query_heads: 8
+  num_kv_heads: 2
+  head_dim: 128
+  block_q: 1024
+  block_q_dkv: 2048
+  fused_qkv: true
+  rope: true
+loss:
+  implementation: standard

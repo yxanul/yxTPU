@@ -94,8 +94,16 @@ class ModelConfig(StrictModel):
     def validate_layout(self) -> ModelConfig:
         if self.num_layers != self.num_cycles * len(self.cycle):
             raise ValueError("num_layers must equal num_cycles * len(cycle)")
-        if tuple(self.cycle) != ("kda", "kda", "kda", "gqa"):
-            raise ValueError("the certified baseline requires [KDA,KDA,KDA,NoPE-GQA] cycles")
+        allowed_cycles = (
+            ("kda", "kda", "kda", "gqa"),
+            ("gqa",),
+            ("gqa", "gqa", "gqa", "gqa"),
+        )
+        if tuple(self.cycle) not in allowed_cycles:
+            raise ValueError(
+                "supported cycles are the certified [KDA,KDA,KDA,NoPE-GQA] hybrid "
+                "or a pure-GQA transformer baseline"
+            )
         if self.residual_policy == "block_attnres":
             raise ValueError(
                 "block_attnres is reserved but disabled until its separate quality experiment"
