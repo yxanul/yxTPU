@@ -128,6 +128,14 @@ class OptimizerConfig(StrictModel):
     # AdamW learning rate. optax's default width-transfer scaling leaves the
     # update RMS ~0.02-0.03 for our shapes, an effective 6-10x LR undershoot.
     muon_consistent_rms: float = 0.2
+    # Run Muon's momentum + Newton-Schulz in bf16 (modded-nanogpt lineage):
+    # a masked post-clip gradient cast plus mu_dtype=bf16. Note mu_dtype is a
+    # shared knob inside optax.contrib.muon, so the muonclip arm's
+    # AdamW-routed params also store their first moment in bf16 (their
+    # update math stays fp32). Checkpoint note: toggling this changes the
+    # optimizer-state pytree, so checkpoints are not cross-resumable across
+    # the flag.
+    muon_ns_bf16: bool = False
     qk_clip_tau: float = 100.0
     qk_clip_epsilon: float = 1.0e-6
 
