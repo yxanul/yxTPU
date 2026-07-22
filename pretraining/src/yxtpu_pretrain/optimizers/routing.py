@@ -152,6 +152,7 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
                 ns_steps=config.muon_ns_steps,
                 beta=config.muon_beta,
                 eps=config.muon_epsilon,
+                consistent_rms=config.muon_consistent_rms,
                 weight_decay=config.weight_decay,
                 adam_b1=config.beta1,
                 adam_b2=config.beta2,

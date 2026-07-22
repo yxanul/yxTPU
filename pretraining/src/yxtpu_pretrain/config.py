@@ -125,6 +125,11 @@ class OptimizerConfig(StrictModel):
     muon_beta: float = 0.95
     muon_epsilon: float = 1.0e-8
     muon_ns_steps: int = 5
+    # Moonshot's "Muon is Scalable" RMS matching: scale each orthogonalized
+    # update by sqrt(max(fan_in, fan_out)) * this value so Muon shares the
+    # AdamW learning rate. optax's default width-transfer scaling leaves the
+    # update RMS ~0.02-0.03 for our shapes, an effective 6-10x LR undershoot.
+    muon_consistent_rms: float = 0.2
     qk_clip_tau: float = 100.0
     qk_clip_epsilon: float = 1.0e-6
 
