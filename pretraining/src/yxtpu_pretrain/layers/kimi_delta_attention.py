@@ -1441,7 +1441,11 @@ class KimiDeltaAttention(nnx.Module):
       )
       def sharded_kda(q, k, v, g, b, state):
         if use_v4_fused_kernel:
-          return kda_v4_hybrid(q, k, v, g, b, state)
+          from yxtpu_pretrain.kernels.kda_fused_pallas_v4 import (
+              pallas_kda_fused_v4,
+          )
+
+          return pallas_kda_fused_v4(q, k, v, g, b, state)
         kda_impl = functools.partial(
             chunk_kda,
             chunk_size=self.config.gdn_chunk_size,
