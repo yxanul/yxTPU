@@ -1906,9 +1906,13 @@ def _pallas_kda_fused_v4_backward_split(
           0,
       ),
   )
+  # Only the chunk-0 slot (the initial-state cotangent) is ever consumed, so
+  # the export is a single revisited block: the kernel overwrites it every
+  # reverse step and Mosaic flushes once per stream group with the last
+  # write, which is chunk 0.
   state_before_cotangent_spec = pl.BlockSpec(
       block_shape=(1, streams_per_program, 1, key_dim, value_dim),
-      index_map=lambda bg, hg, ci: (bg, hg, num_chunks - 1 - ci, 0, 0),
+      index_map=lambda bg, hg, ci: (bg, hg, 0, 0, 0),
   )
 
   stream_shape = (1, streams, sequence_length)
@@ -1998,7 +2002,7 @@ def _pallas_kda_fused_v4_backward_split(
           f32(chunk_qkv_shape),
           f32(chunk_value_shape),
           f32(chunk_qkv_shape),
-          f32(state_history_t.shape),
+          f32((1, streams, 1, key_dim, value_dim)),
           f32(square_shape),
           f32(square_shape),
           f32(chunk_qkv_shape),
@@ -2118,9 +2122,7 @@ def _pallas_kda_fused_v4_backward_split(
       unstream(value_cotangent_t, value_dim),
       unstream(log_decay_cotangent_t, key_dim),
       unstream(beta_cotangent_t, 1)[..., 0],
-      state_before_cotangent_t.reshape(batch, heads, num_chunks, key_dim, value_dim)[
-          :, :, 0
-      ],
+      state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
   )
 
 
