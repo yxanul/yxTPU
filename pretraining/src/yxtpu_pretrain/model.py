@@ -16,6 +16,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils_nnx
 
 from yxtpu_pretrain.config import ResolvedConfig
+from yxtpu_pretrain.layers.attn_res import DepthAttnRead
 from yxtpu_pretrain.layers.kimi_delta_attention import KimiDeltaAttention
 from yxtpu_pretrain.layers.nope_gqa import NoPEGQA
 from yxtpu_pretrain.layers.roles import (
@@ -144,6 +145,76 @@ class HybridLayer(nnx.Module):
         )
         declare_dense_kernel(self.mlp.wi, ParamRole.MLP_INPUT)
         declare_dense_kernel(self.mlp.wo, ParamRole.MLP_OUTPUT)
+        if config.model.residual_policy == "block_attnres":
+            self.mixer_read = DepthAttnRead(
+                model.emb_dim,
+                epsilon=model.rms_norm_epsilon,
+                dtype=leaf_config.dtype,
+                weight_dtype=leaf_config.weight_dtype,
+                rngs=rngs,
+            )
+            self.mlp_read = DepthAttnRead(
+                model.emb_dim,
+                epsilon=model.rms_norm_epsilon,
+                dtype=leaf_config.dtype,
+                weight_dtype=leaf_config.weight_dtype,
+                rngs=rngs,
+            )
+            for read in (self.mixer_read, self.mlp_read):
+                read.pseudo_query = declare_parameter(
+                    read.pseudo_query, ParamRole.ATTNRES_PSEUDOQUERY
+                )
+                declare_norm(read.norm)
+        else:
+            self.mixer_read = None
+            self.mlp_read = None
+
+    def attnres_step(
+        self,
+        blocks_buffer,
+        block_index,
+        partial_sum,
+        *,
+        first_in_block: bool,
+        decoder_segment_ids=None,
+        decoder_positions=None,
+        record_max_logits: bool = False,
+    ):
+        """One Block-AttnRes sub-layer pass: depth-read, mix, accumulate,
+        depth-read, MLP, accumulate. Returns the updated intra-block sum."""
+        read_input = self.mixer_read(
+            blocks_buffer,
+            block_index,
+            partial_sum,
+            include_partial=not first_in_block,
+        )
+        normalized = nn.with_logical_constraint(
+            self.input_norm(read_input), ACTIVATION_LOGICAL_AXES
+        )
+        if self.kind == "kda":
+            mixed, _ = self.mixer(
+                normalized,
+                decoder_segment_ids=decoder_segment_ids,
+                model_mode=MODEL_MODE_TRAIN,
+            )
+        else:
+            mixed = self.mixer(
+                normalized,
+                decoder_segment_ids=decoder_segment_ids,
+                decoder_positions=decoder_positions,
+                record_max_logits=record_max_logits,
+            )
+        partial_sum = partial_sum + nn.with_logical_constraint(
+            mixed, ACTIVATION_LOGICAL_AXES
+        )
+        mlp_read_input = self.mlp_read(
+            blocks_buffer, block_index, partial_sum, include_partial=True
+        )
+        mlp_input = nn.with_logical_constraint(
+            self.post_mixer_norm(mlp_read_input), ACTIVATION_LOGICAL_AXES
+        )
+        partial_sum = partial_sum + self.mlp(mlp_input, deterministic=True)
+        return nn.with_logical_constraint(partial_sum, ACTIVATION_LOGICAL_AXES)
 
     def __call__(
         self,
@@ -185,6 +256,7 @@ class HybridCycle(nnx.Module):
     """Owned four-layer `[KDA,KDA,KDA,NoPE-GQA]` scan unit."""
 
     def __init__(self, *, config: ResolvedConfig, leaf_config, mesh, rngs: nnx.Rngs):
+        self.cycle_length = len(config.model.cycle)
         for index, kind in enumerate(config.model.cycle):
             setattr(
                 self,
@@ -200,13 +272,31 @@ class HybridCycle(nnx.Module):
 
     def __call__(
         self,
-        hidden_states,
+        carry,
         *,
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
     ):
-        for index in range(4):
+        if isinstance(carry, tuple):
+            blocks_buffer, block_index = carry
+            partial_sum = jnp.zeros_like(blocks_buffer[0])
+            for index in range(self.cycle_length):
+                partial_sum = getattr(self, f"layer_{index}").attnres_step(
+                    blocks_buffer,
+                    block_index,
+                    partial_sum,
+                    first_in_block=index == 0,
+                    decoder_segment_ids=decoder_segment_ids,
+                    decoder_positions=decoder_positions,
+                    record_max_logits=record_max_logits,
+                )
+            blocks_buffer = jax.lax.dynamic_update_slice_in_dim(
+                blocks_buffer, partial_sum[None], block_index + 1, axis=0
+            )
+            return (blocks_buffer, block_index + 1)
+        hidden_states = carry
+        for index in range(self.cycle_length):
             hidden_states = getattr(self, f"layer_{index}")(
                 hidden_states,
                 decoder_segment_ids=decoder_segment_ids,
@@ -257,6 +347,20 @@ class HybridLanguageModel(nnx.Module):
             rngs=rngs,
         )
         declare_norm(self.final_norm)
+        if model.residual_policy == "block_attnres":
+            self.final_read = DepthAttnRead(
+                model.emb_dim,
+                epsilon=model.rms_norm_epsilon,
+                dtype=self.leaf_config.dtype,
+                weight_dtype=self.leaf_config.weight_dtype,
+                rngs=rngs,
+            )
+            self.final_read.pseudo_query = declare_parameter(
+                self.final_read.pseudo_query, ParamRole.ATTNRES_PSEUDOQUERY
+            )
+            declare_norm(self.final_read.norm)
+        else:
+            self.final_read = None
         if model.logits_via_embedding:
             # Tied output head: the LM head reads the embedding table
             # transposed, dropping vocab_size * emb_dim parameters and their
@@ -331,12 +435,39 @@ class HybridLanguageModel(nnx.Module):
             )
         hidden_states = self.token_embedding(token_ids, model_mode=MODEL_MODE_TRAIN)
         hidden_states = nn.with_logical_constraint(hidden_states, ACTIVATION_LOGICAL_AXES)
-        hidden_states = self._apply_cycles(
-            hidden_states,
-            decoder_segment_ids=decoder_segment_ids,
-            decoder_positions=decoder_positions,
-            record_max_logits=record_max_logits,
-        )
+        if self.final_read is not None:
+            # Block AttnRes: slot 0 is the token embedding; each cycle writes
+            # its summed block output into the next slot. The scan carry is
+            # (buffer, completed-block index).
+            num_cycles = self.config.model.num_cycles
+            blocks_buffer = jnp.concatenate(
+                (
+                    hidden_states[None],
+                    jnp.zeros(
+                        (num_cycles, *hidden_states.shape), dtype=hidden_states.dtype
+                    ),
+                ),
+                axis=0,
+            )
+            blocks_buffer, block_index = self._apply_cycles(
+                (blocks_buffer, jnp.int32(0)),
+                decoder_segment_ids=decoder_segment_ids,
+                decoder_positions=decoder_positions,
+                record_max_logits=record_max_logits,
+            )
+            hidden_states = self.final_read(
+                blocks_buffer,
+                block_index,
+                jnp.zeros_like(hidden_states),
+                include_partial=False,
+            )
+        else:
+            hidden_states = self._apply_cycles(
+                hidden_states,
+                decoder_segment_ids=decoder_segment_ids,
+                decoder_positions=decoder_positions,
+                record_max_logits=record_max_logits,
+            )
         hidden_states = nn.with_logical_constraint(
             self.final_norm(hidden_states),
             ACTIVATION_LOGICAL_AXES,

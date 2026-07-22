@@ -52,16 +52,16 @@ def test_cli_override_and_train_alias():
     assert config.optimizer.name == "muonclip"
 
 
-def test_block_attnres_is_reserved_but_rejected():
-    with pytest.raises(ValueError, match="reserved but disabled"):
-        load_config(
-            model="kda_hybrid_273m",
-            optimizer="adamw",
-            data="synthetic",
-            hardware="v6e-8",
-            experiment="selected",
-            overrides=["model.residual_policy=block_attnres"],
-        )
+def test_block_attnres_is_accepted():
+    config = load_config(
+        model="kda_hybrid_273m",
+        optimizer="adamw",
+        data="synthetic",
+        hardware="v6e-8",
+        experiment="selected",
+        overrides=["model.residual_policy=block_attnres"],
+    )
+    assert config.model.residual_policy == "block_attnres"
 
 
 def test_fused_loss_rejects_vocabulary_parallel_meshes():

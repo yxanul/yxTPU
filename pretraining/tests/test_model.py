@@ -196,3 +196,80 @@ def test_tied_embeddings_drop_head_parameters_and_match_manual_projection():
         )
     }
     assert "logits" not in roles
+
+
+def test_depth_attn_read_is_uniform_at_init_and_masks_invalid_slots():
+    from yxtpu_pretrain.layers.attn_res import DepthAttnRead
+
+    read = DepthAttnRead(
+        8, epsilon=1e-5, dtype=jnp.float32, weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    key = jax.random.key(1)
+    buffer = jax.random.normal(key, (3, 1, 4, 8), jnp.float32)
+    # Poison the masked slot: it must not affect the output.
+    poisoned = buffer.at[2].set(1.0e6)
+    partial = jnp.zeros((1, 4, 8), jnp.float32)
+    out = read(poisoned, jnp.int32(1), partial, include_partial=False)
+    expected = jnp.mean(buffer[:2], axis=0)
+    assert jnp.allclose(out, expected, rtol=1e-5, atol=1e-5)
+    # Including the (zero) partial widens the average to three sources.
+    out_partial = read(poisoned, jnp.int32(1), partial, include_partial=True)
+    expected_partial = (buffer[0] + buffer[1] + partial) / 3.0
+    assert jnp.allclose(out_partial, expected_partial, rtol=1e-5, atol=1e-5)
+
+
+def test_block_attnres_model_forward_is_finite_and_adds_read_parameters():
+    def build(policy):
+        return load_config(
+            model="kda_hybrid_273m",
+            optimizer="adamw",
+            data="synthetic",
+            hardware="v6e-8",
+            experiment="selected",
+            overrides=[
+                "model.emb_dim=128",
+                "model.mlp_dim=256",
+                "model.num_layers=4",
+                "model.num_cycles=1",
+                "model.kda.num_heads=1",
+                "model.kda.precision=full_fp32",
+                "model.attention.num_query_heads=1",
+                "model.attention.num_kv_heads=1",
+                "data.sequence_length=64",
+                "data.per_device_batch_size=1",
+                "model.vocab_size=256",
+                "model.dtype=float32",
+                "model.remat_policy=full",
+                f"model.residual_policy={policy}",
+            ],
+        )
+
+    standard = build("standard")
+    attnres = build("block_attnres")
+    mesh = create_mesh(standard.hardware, allow_device_mismatch=True)
+    model_standard = HybridLanguageModel(standard, mesh, rngs=nnx.Rngs(7))
+    model_attnres = HybridLanguageModel(attnres, mesh, rngs=nnx.Rngs(7))
+
+    emb = standard.model.emb_dim
+    # Per cycle position: 4 layers x 2 reads x (query + norm) + final read.
+    expected_delta = standard.model.num_cycles * 4 * 2 * 2 * emb + 2 * emb
+    assert (
+        count_parameters(model_attnres) - count_parameters(model_standard)
+        == expected_delta
+    )
+
+    tokens = jnp.arange(64, dtype=jnp.int32)[None, :] % attnres.model.vocab_size
+    with logical_mesh_context(mesh, make_leaf_config(attnres).logical_axis_rules):
+        logits = model_attnres(tokens)
+    assert logits.shape == (1, 64, attnres.model.vocab_size)
+    assert jnp.all(jnp.isfinite(logits))
+
+    roles = {
+        variable.get_metadata().get("role")
+        for variable in jax.tree.leaves(
+            nnx.state(model_attnres, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.Variable),
+        )
+    }
+    assert "attnres_pseudoquery" in roles
