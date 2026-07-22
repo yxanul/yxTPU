@@ -302,3 +302,56 @@ def test_depth_attn_read_split_scoring_matches_fused_reference():
     probabilities = jax.nn.softmax(scores, axis=0)
     reference = jnp.einsum("sbt,sbtd->btd", probabilities, sources)
     assert jnp.allclose(out, reference, rtol=1e-5, atol=1e-5)
+
+
+def test_remat_save_kda_residuals_keeps_forward_out_of_backward(monkeypatch):
+    """With the flag on, the policy saves the KDA fwd's named residuals, so
+    the backward's recompute of each fused forward survives only as a
+    zero-output shard_map husk in the jaxpr (XLA's HLO DCE removes it at
+    compile time). The tiny 1-cycle model has 3 KDA layers: exactly +3
+    husks versus the flag-off graph."""
+    from yxtpu_pretrain.layers import kimi_delta_attention as kda_layer
+
+    monkeypatch.setenv("YXTPU_KDA_INTERPRET", "1")
+    monkeypatch.setattr(kda_layer, "_local_tpu_is_v4", lambda: True)
+
+    def build(save_residuals):
+        config = load_config(
+            model="kda_hybrid_273m",
+            optimizer="adamw",
+            data="synthetic",
+            hardware="v6e-8",
+            experiment="selected",
+            overrides=[
+                "model.emb_dim=128",
+                "model.mlp_dim=256",
+                "model.num_layers=4",
+                "model.num_cycles=1",
+                "model.kda.num_heads=1",
+                "model.kda.precision=guarded_fp32",
+                "model.attention.num_query_heads=1",
+                "model.attention.num_kv_heads=1",
+                "data.sequence_length=128",
+                "data.per_device_batch_size=1",
+                "model.vocab_size=256",
+                "model.remat_policy=minimal_with_context",
+                f"model.remat_save_kda_residuals={str(save_residuals).lower()}",
+            ],
+        )
+        mesh = create_mesh(config.hardware, allow_device_mismatch=True)
+        model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(0))
+        tokens = jnp.zeros((1, 128), dtype=jnp.int32)
+
+        def loss(module):
+            return jnp.mean(module(tokens).astype(jnp.float32) ** 2)
+
+        step = nnx.jit(lambda m: nnx.value_and_grad(loss)(m))
+        with logical_mesh_context(mesh, make_leaf_config(config).logical_axis_rules):
+            return str(step.trace(model).traced.jaxpr)
+
+    saved = build(True)
+    recomputed = build(False)
+    # The fwd rule tags the names unconditionally; only the policy differs.
+    assert "kda_state_history" in saved
+    assert "kda_state_history" in recomputed
+    assert saved.count("out_specs=()") == recomputed.count("out_specs=()") + 3

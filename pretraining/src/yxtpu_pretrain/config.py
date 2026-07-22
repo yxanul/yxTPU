@@ -83,6 +83,11 @@ class ModelConfig(StrictModel):
     remat_policy: Literal["minimal", "minimal_with_context", "save_dot_except_mlp", "full"] = (
         "minimal_with_context"
     )
+    # Save the KDA kernel's output and state history across the cycle remat so
+    # the sequential fused forward never re-runs in the backward pass. Costs
+    # ~2.0 GB resident HBM at 2048-seq/batch-8 (state history scales with
+    # sequence length; disable for memory-tight long-sequence runs).
+    remat_save_kda_residuals: bool = True
     residual_policy: Literal["standard", "block_attnres"] = "standard"
     logits_via_embedding: bool = False
     dropout_rate: float = 0.0
