@@ -133,7 +133,11 @@ class CheckpointIO:
             item_names=("state", "iterator", "metadata"),
             item_handlers={
                 "state": ocp.StandardCheckpointHandler(**handler_options),
-                "iterator": ocp.StandardCheckpointHandler(**handler_options),
+                # Iterator states are small str->int dicts (or the
+                # unresumable stub). JSON keeps them off orbax's scalar
+                # type handlers, whose writes are gated on the GLOBAL
+                # primary host regardless of manager/handler options.
+                "iterator": ocp.JsonCheckpointHandler(**handler_options),
                 "metadata": ocp.JsonCheckpointHandler(**handler_options),
             },
             options=ocp.CheckpointManagerOptions(**manager_options),
@@ -155,7 +159,7 @@ class CheckpointIO:
             step,
             args=ocp.args.Composite(
                 state=ocp.args.StandardRestore(target.to_pure_dict()),
-                iterator=ocp.args.StandardRestore(),
+                iterator=ocp.args.JsonRestore(),
                 metadata=ocp.args.JsonRestore(),
             ),
         )
@@ -195,7 +199,7 @@ class CheckpointIO:
             step,
             args=ocp.args.Composite(
                 state=ocp.args.StandardSave(state),
-                iterator=ocp.args.StandardSave(iterator_state),
+                iterator=ocp.args.JsonSave(iterator_state),
                 metadata=ocp.args.JsonSave(self.metadata | {"step": step}),
             ),
             force=force,
