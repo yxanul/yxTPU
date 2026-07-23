@@ -257,6 +257,10 @@ class CheckpointConfig(StrictModel):
     async_save: bool = False
     keep: int = 2
     resume: bool = True
+    # Streaming data profiles cannot serialize their stream position; this
+    # opt-in accepts checkpoints whose restore keeps weights and optimizer
+    # state while the stream restarts (see runtime/checkpoints.py stub).
+    allow_weights_only_resume: bool = False
 
     @model_validator(mode="after")
     def validate_destination(self) -> CheckpointConfig:
@@ -367,10 +371,17 @@ class ResolvedConfig(StrictModel):
                 "the fused weight is not implemented yet, so use adamw or "
                 "disable the fusion"
             )
-        if self.data.streaming and self.experiment.checkpoint.enabled:
+        if (
+            self.data.streaming
+            and self.experiment.checkpoint.enabled
+            and not self.experiment.checkpoint.allow_weights_only_resume
+        ):
             raise ValueError(
-                "the streaming packed iterator is not checkpointable; disable prefetch/streaming "
-                "only after implementing an exact stream-state restore"
+                "the streaming packed iterator cannot serialize its position: "
+                "checkpoints of streaming runs restore weights and optimizer "
+                "state but restart the stream. Set "
+                "checkpoint.allow_weights_only_resume=true to accept that, or "
+                "use a resumable data profile"
             )
         if self.data.streaming and self.data.eval_interval and not self.data.validation_fraction:
             raise ValueError("streaming validation requires a nonzero validation_fraction")
