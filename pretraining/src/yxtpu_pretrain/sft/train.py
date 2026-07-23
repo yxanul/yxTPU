@@ -52,6 +52,8 @@ def main() -> int:
     parser.add_argument("--subset", default="General-Distillation")
     parser.add_argument("--rows", type=int, default=100_000)
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--sources", default=None)
+    parser.add_argument("--shuffle-seed", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run", default="kda_hybrid_128k-muonclip-superbpe_50b")
@@ -107,6 +109,8 @@ def main() -> int:
             sequence_length=config.data.sequence_length,
             process_batch=process_batch,
             process_index=jax.process_index(), process_count=jax.process_count(),
+            sources=args.sources.split(",") if args.sources else None,
+            shuffle_seed=args.shuffle_seed,
         )
         if is_primary:
             print("streaming full dataset", flush=True)
