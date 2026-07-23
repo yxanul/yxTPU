@@ -133,6 +133,25 @@ State is dynamic; verify it before relying on this section.
   checkpoints per host under /home/a1111/yxtpu_ckpts/ (steps 19073..95500,
   17 GB/host) - THEY EXIST ONLY ON THE TPU HOST DISKS; export before any
   slice teardown.
+- Extended 0-shot eval of ckpt 95500 on a standalone worker 2026-07-23
+  (122,886 requests, ~40 min on 4 chips; script: restore via CheckpointIO +
+  JaxHarnessLM outside training): mmlu 0.267 (chance-level, normal at 337M),
+  winogrande 0.523, race 0.334, truthfulqa_mc1 0.231 / mc2 0.389. Anchors
+  reproduced the in-training round exactly (arc_challenge acc_norm 0.3362
+  identical; lambada 0.366 vs 0.367; hellaswag 0.473 vs 0.474) - the
+  single-worker eval path is faithful. Tokenizer-lambada audit: SuperBPE
+  encode(ctx) is a prefix of encode(ctx+cont) on 5153/5153 examples and the
+  scored span decodes exactly to " "+target - lm-eval's _encode_pair
+  assumptions hold; lambada accuracy is trustworthy (perplexity remains
+  cross-tokenizer-incomparable). Generation sanity from the local ckpt copy
+  (CPU, chunk_kda path, kda.precision=full_fp32 override; the checkpoint
+  carries a TPU-only attention_op.rngs subtree - placeholders uint32[4] and
+  uint32[4,2], then drop): answers "capital of France" -> Paris, water
+  boils -> 100 C, gold -> Au, and follows Q:/A: format zero-shot. Harness
+  constraints for the SFT stage: ifeval needs a generate_until adapter
+  (ours is loglikelihood-only), ifbench absent from lm-eval 0.4.12, and
+  social_iqa/logiqa/wsc273 are script-based datasets the modern datasets
+  library refuses.
 - Per-host local checkpointing hardened 2026-07-23 (commits cb2ce06..f065265,
   preflight-validated save->resume->continue on all 8 hosts): orbax on
   non-shared disks needs FOUR things together - (1)
