@@ -208,6 +208,14 @@ State is dynamic; verify it before relying on this section.
   - Never `pkill -f <pattern>` over `gcloud ssh --command` when the pattern
     also appears in the command line itself - the shell kills its own
     session and gcloud retries in a loop.
+  - Never leave a `--worker=all` LAUNCH command in a backgrounded gcloud
+    ssh: its connection retry loop can fire the whole command again hours
+    later (observed 2026-07-23: an 8-hour-old launcher re-ran the 50B
+    launch mid-run, killing the live training; checkpoint resume:true
+    recovered it from the 10B-interval save with ~2.2k steps lost). Launch
+    sessions must be foreground with a short timeout, verified terminated,
+    or use -o ConnectTimeout so a dead worker fails fast instead of
+    retrying forever.
 - Setup completed 2026-07-22 on all 8 workers: repo at `main` (`6aeaf4a`,
   full clone — doctor's pin check needs git history, so never clone with
   `--depth 1`), `uv sync --locked --extra dev`, HF token in
