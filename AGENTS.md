@@ -133,6 +133,28 @@ State is dynamic; verify it before relying on this section.
   checkpoints per host under /home/a1111/yxtpu_ckpts/ (steps 19073..95500,
   17 GB/host) - THEY EXIST ONLY ON THE TPU HOST DISKS; export before any
   slice teardown.
+- SFT stage bootstrapped 2026-07-23/24 (commits 8b0ac80..7a4e90b, module
+  pretraining/src/yxtpu_pretrain/sft/): 12 chat specials on the free padded
+  ids 128001-128012 (K2.5-style roles + im_middle/im_end + single-token
+  <think>/</think> + five tool-call markers, exact-id asserted), jinja
+  template, assistant-only loss masking (render mask shifted with labels),
+  batched pre-tokenization (single fast-tokenizer call; the per-row loop
+  was ~2 h for 100k rows, batched is ~1 min). First run: 100k rows x 2
+  epochs of Jackrong/Kimi-K2.5-Reasoning-1M-Cleaned General-Distillation,
+  init weights-only from ckpt 95500 (fresh muonclip, new rows mean-init),
+  LR 5e-5 constant + 290-step anneal: loss 2.40 -> 1.645 over 1,392 steps
+  / 703M tokens in ~15 min. Checkpoints are process-0 pickles
+  (yxtpu_sft_ckpts on worker 3 + ckpt/sft/1392 local) - orbax's saver
+  breaks when two managers live in one process (signaling client asserts
+  single-controller; unique barrier prefixes did not cure it). Decode:
+  template-native reasoning confirmed - every answer runs
+  <think>-plan-</think>-markdown-answer-<|im_end|>; substance is honest
+  337M (17+25 boxed correct, tomato correct, facts wobble at temp 0.6;
+  greedy is more factual). Decode-path lesson: the eager loop shipped the
+  full [4,2048,128k] fp32 logits to host EVERY token (~4 GB/token);
+  slicing on device made it ~100x faster. Proper KDA O(1)-state
+  incremental decode remains the SFT-stage build, alongside ifeval
+  (generate_until adapter) and the full 368k rows + math/STEM subsets.
 - Extended 0-shot eval of ckpt 95500 on a standalone worker 2026-07-23
   (122,886 requests, ~40 min on 4 chips; script: restore via CheckpointIO +
   JaxHarnessLM outside training): mmlu 0.267 (chance-level, normal at 337M),
