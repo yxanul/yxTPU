@@ -19,7 +19,9 @@ checkpoint:
   enabled: true
   destination: /home/a1111/yxtpu_ckpts
   save_interval: 19073
-  async_save: true
+  # Sync saves are the validated per-host local path (~20-30 s each, five
+  # times over the run); async remains unexercised with the singleton mode.
+  async_save: false
   keep: 6
   resume: true
   # ClimbMix streams; restores keep weights+optimizer, the stream restarts.
