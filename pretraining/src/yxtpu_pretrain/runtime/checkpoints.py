@@ -94,6 +94,22 @@ class CheckpointIO:
             # orbax refuses create=True when active_processes is set; the
             # destination is a local path here, so create it directly.
             Path(destination).mkdir(parents=True, exist_ok=True)
+            # The default jax.Array handler writes an ArrayMetadata store
+            # that assumes every process's metadata lands in one shared
+            # directory; on per-host disks that check can never pass (each
+            # host only ever sees its own process file). Register a handler
+            # with no metadata store and per-process full-copy writes - the
+            # combination orbax's own local/emergency checkpointing uses.
+            ocp.type_handlers.register_type_handler(
+                jax.Array,
+                ocp.type_handlers.ArrayHandler(
+                    primary_host=None,
+                    replica_id=None,
+                    use_replica_parallel=False,
+                    array_metadata_store=None,
+                ),
+                override=True,
+            )
         manager_options = dict(
             create=multiprocessing_options is None,
             enable_async_checkpointing=checkpoint.async_save,
