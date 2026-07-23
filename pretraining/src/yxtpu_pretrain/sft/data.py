@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from yxtpu_pretrain.sft.tokens import render_conversation
+from yxtpu_pretrain.sft.tokens import (
+    DOCUMENT_SEPARATOR,
+    IM_END,
+    IM_MIDDLE,
+    ROLE_TOKENS,
+    render_conversation,
+)
 
 
 def conversations_to_messages(record) -> list[dict]:
@@ -24,15 +30,34 @@ def build_packed_dataset(tokenizer, *, dataset, subset, rows, sequence_length):
     from datasets import load_dataset
 
     stream = load_dataset(dataset, subset, split="train", streaming=True)
-    all_ids, all_mask = [], []
-    used = 0
+    conversations = []
     for record in stream:
-        ids, mask = render_conversation(tokenizer, conversations_to_messages(record))
+        conversations.append(conversations_to_messages(record))
+        if len(conversations) >= rows:
+            break
+    # One batched encode of every message body: the fast tokenizer
+    # parallelizes internally, and per-string results are identical to
+    # element-wise encoding (render_conversation stays the reference).
+    contents = [m["content"] for msgs in conversations for m in msgs]
+    encoded = iter(tokenizer(contents, add_special_tokens=False)["input_ids"])
+    role_ids = {
+        role: tokenizer.encode(role, add_special_tokens=False)
+        for role in ROLE_TOKENS
+    }
+    all_ids, all_mask = [], []
+    for msgs in conversations:
+        ids, mask = [DOCUMENT_SEPARATOR], [0]
+        for m in msgs:
+            role = m["role"]
+            header = [ROLE_TOKENS[role], *role_ids[role], IM_MIDDLE]
+            body = next(encoded)
+            trainable = 1 if role == "assistant" else 0
+            ids.extend(header + body)
+            mask.extend([0] * len(header) + [trainable] * len(body))
+            ids.append(IM_END)
+            mask.append(trainable)
         all_ids.append(np.asarray(ids, np.int32))
         all_mask.append(np.asarray(mask, np.float32))
-        used += 1
-        if used >= rows:
-            break
     ids = np.concatenate(all_ids)
     mask = np.concatenate(all_mask)
     count = (len(ids) - 1) // sequence_length
