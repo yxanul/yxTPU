@@ -124,11 +124,16 @@ class StreamingSFTIterator:
     progress counters only."""
 
     def __init__(self, tokenizer, *, dataset, sequence_length, process_batch,
-                 process_index, process_count, buffer_rows=512):
+                 process_index, process_count, buffer_rows=512,
+                 sources=None, shuffle_seed=None):
         from datasets import load_dataset
 
         self._tok = tokenizer
-        self._iter = iter(load_dataset(dataset, split="train", streaming=True))
+        stream = load_dataset(dataset, split="train", streaming=True)
+        if shuffle_seed is not None:
+            stream = stream.shuffle(seed=shuffle_seed, buffer_size=10_000)
+        self._sources = set(sources) if sources else None
+        self._iter = iter(stream)
         self._pi, self._pc = process_index, process_count
         self._row_idx = 0
         self._buffer_rows = buffer_rows
@@ -158,6 +163,9 @@ class StreamingSFTIterator:
             index = self._row_idx
             self._row_idx += 1
             if index % self._pc != self._pi:
+                continue
+            if self._sources and record.get("source") not in self._sources:
+                self.rows_dropped += 1
                 continue
             try:
                 msgs = conversations_to_messages(record)
