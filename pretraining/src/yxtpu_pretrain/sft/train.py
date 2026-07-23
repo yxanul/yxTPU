@@ -23,6 +23,7 @@ from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.metrics import MetricsWriter, NullMetricsWriter, WandbTracker
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
+from yxtpu_pretrain.sft.checkpoint import save_sft_checkpoint
 from yxtpu_pretrain.sft.data import SFTIterator, build_packed_dataset
 from yxtpu_pretrain.sft.tokens import SPECIAL_TOKENS, load_sft_tokenizer
 from yxtpu_pretrain.train import _device_batch, _learning_rate, _make_train_step
@@ -121,7 +122,7 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_writer = MetricsWriter(run_dir) if is_primary else NullMetricsWriter()
     tracker = WandbTracker(config, run_name=run_name, run_dir=run_dir, metadata={"sft": vars(args) | {"new_rows": new_rows, "init_step": start}})
-    saver = CheckpointIO(config, run_name=run_name)
+    save_dir = Path(args.out_destination) / run_name
 
     step = 0
     tokens_seen = 0
@@ -157,12 +158,10 @@ def main() -> int:
                     "learning_rate": record["learning_rate"]}},
                 step=step, tokens_seen=tokens_seen,
             )
-            if saver.enabled and step % config.experiment.checkpoint.save_interval == 0:
-                saver.save(state, iterator, step)
-        if saver.enabled:
-            saver.save(state, iterator, step, force=True)
+            if step % config.experiment.checkpoint.save_interval == 0:
+                save_sft_checkpoint(save_dir, step, state, iterator, config)
+        save_sft_checkpoint(save_dir, step, state, iterator, config)
     finally:
-        saver.close()
         summary = {"steps": step, "tokens_seen": tokens_seen, "final_loss": loss if step else None}
         metrics_writer.close(summary)
         tracker.finish(summary=summary)
