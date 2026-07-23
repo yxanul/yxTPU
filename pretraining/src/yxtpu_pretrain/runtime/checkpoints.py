@@ -57,6 +57,8 @@ def _persistent_state(module: nnx.Module):
 
 
 class CheckpointIO:
+    _instances = 0
+
     def __init__(self, config: ResolvedConfig, *, run_name: str):
         checkpoint = config.experiment.checkpoint
         self.enabled = checkpoint.enabled
@@ -64,6 +66,7 @@ class CheckpointIO:
         if not self.enabled:
             return
         destination = checkpoint_path(checkpoint.destination, run_name)
+        CheckpointIO._instances += 1
         multiprocessing_options = None
         if jax.process_count() > 1 and not destination.startswith("gs://"):
             # Multi-host slice writing to per-host local disks (no shared
@@ -89,7 +92,9 @@ class CheckpointIO:
             multiprocessing_options = ocp.options.MultiprocessingOptions(
                 primary_host=None,
                 active_processes=frozenset({jax.process_index()}),
-                barrier_sync_key_prefix=f"host{jax.process_index()}",
+                barrier_sync_key_prefix=(
+                    f"host{jax.process_index()}-io{CheckpointIO._instances}"
+                ),
             )
             # orbax refuses create=True when active_processes is set; the
             # destination is a local path here, so create it directly.
