@@ -79,8 +79,17 @@ class CheckpointIO:
                     "pure data parallelism; use a gs:// destination for "
                     "sharded parameter meshes"
                 )
+            # primary_host=None alone still routes array serialization
+            # through cross-host waits that deadlock on non-shared disks
+            # (observed on the v4-64 slice: every host froze mid-write at
+            # the same byte offset). Shrinking each host's orbax world to
+            # itself removes every cross-host barrier: replicated state is
+            # fully addressable locally, so single-process semantics are
+            # exact.
             multiprocessing_options = ocp.options.MultiprocessingOptions(
-                primary_host=None
+                primary_host=None,
+                active_processes=frozenset({jax.process_index()}),
+                barrier_sync_key_prefix=f"host{jax.process_index()}",
             )
         manager_options = dict(
             create=True,
