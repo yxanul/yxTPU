@@ -117,6 +117,22 @@ State is dynamic; verify it before relying on this section.
   splash attention ~12 ms (2.6%). Remaining wall tail is episodic >1 s
   step spikes (present in all runs; not data_wait - suspect W&B flush or
   stream shard boundaries) - a 2-3-batch prefetch queue would mask them.
+- SuperBPE-50B run COMPLETE 2026-07-23 (W&B group superbpe-50b, two runs:
+  02:04 crashed@59,446 by the zombie-launcher incident + 10:55 resumed from
+  the 30B checkpoint to completion): kda_hybrid_128k + BlockAttnRes +
+  muonclip, 95,500 steps = 50.07B step-tokens (~30B unique + ~1.7 epochs
+  over the stream head post-resume), constant LR 3e-4 with cosine anneal
+  over the final 9,537 steps to 0. Final: train loss ~2.60, holdout 2.593
+  (from 3.882 holdout at 1B - the anneal alone took 2.735 -> 2.58).
+  Final 0-shot lm-eval @50B (full sets): lambada 0.367/ppl 31.7 (0.164 at
+  1B), hellaswag acc_norm 0.474 (rose twelve straight rounds), arc_easy
+  0.642, arc_challenge acc_norm 0.336, piqa acc_norm 0.717, sciq 0.878,
+  boolq 0.591, openbookqa acc_norm 0.348, copa 0.71 - ahead of
+  Pythia-410M@300B on everything except lambada on 6x fewer tokens.
+  Mean throughput 1.098M tok/s (max 1.123M) on the resumed leg. SIX
+  checkpoints per host under /home/a1111/yxtpu_ckpts/ (steps 19073..95500,
+  17 GB/host) - THEY EXIST ONLY ON THE TPU HOST DISKS; export before any
+  slice teardown.
 - Per-host local checkpointing hardened 2026-07-23 (commits cb2ce06..f065265,
   preflight-validated save->resume->continue on all 8 hosts): orbax on
   non-shared disks needs FOUR things together - (1)
