@@ -130,6 +130,7 @@ def main() -> int:
         for batch_host in iterator:
             step += 1
             if step > config.experiment.steps:
+                step -= 1
                 break
             batch = _device_batch(batch_host, mesh)
             began = time.perf_counter()
