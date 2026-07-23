@@ -91,8 +91,11 @@ class CheckpointIO:
                 active_processes=frozenset({jax.process_index()}),
                 barrier_sync_key_prefix=f"host{jax.process_index()}",
             )
+            # orbax refuses create=True when active_processes is set; the
+            # destination is a local path here, so create it directly.
+            Path(destination).mkdir(parents=True, exist_ok=True)
         manager_options = dict(
-            create=True,
+            create=multiprocessing_options is None,
             enable_async_checkpointing=checkpoint.async_save,
             save_interval_steps=max(1, checkpoint.save_interval),
             max_to_keep=checkpoint.keep,
