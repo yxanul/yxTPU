@@ -113,3 +113,107 @@ class SFTIterator:
             "segment_ids": self._segments,
             "positions": self._positions,
         }
+
+
+class StreamingSFTIterator:
+    """Rank-strided on-the-fly render+pack for single-epoch full-dataset SFT.
+
+    Streams rows, drops conversations whose assistant turns open <think>
+    without closing it (K2.5 dumps: ~0.05%), batch-encodes per buffer, and
+    packs densely like pretraining. Not resumable; get_state reports
+    progress counters only."""
+
+    def __init__(self, tokenizer, *, dataset, sequence_length, process_batch,
+                 process_index, process_count, buffer_rows=512):
+        from datasets import load_dataset
+
+        self._tok = tokenizer
+        self._iter = iter(load_dataset(dataset, split="train", streaming=True))
+        self._pi, self._pc = process_index, process_count
+        self._row_idx = 0
+        self._buffer_rows = buffer_rows
+        self._B, self._T = process_batch, sequence_length
+        self._need = self._B * self._T + 1
+        self._ids = np.empty(0, np.int32)
+        self._mask = np.empty(0, np.float32)
+        self._role_ids = {
+            role: tokenizer.encode(role, add_special_tokens=False)
+            for role in ROLE_TOKENS
+        }
+        self._positions = np.tile(
+            np.arange(sequence_length, dtype=np.int32), (process_batch, 1))
+        self._segments = np.ones((process_batch, sequence_length), np.int32)
+        self.rows_consumed = 0
+        self.rows_dropped = 0
+        self.metadata = {"streaming": True, "dataset": dataset}
+        self.stats = {}
+
+    def _refill(self) -> bool:
+        batch = []
+        while len(batch) < self._buffer_rows:
+            try:
+                record = next(self._iter)
+            except StopIteration:
+                break
+            index = self._row_idx
+            self._row_idx += 1
+            if index % self._pc != self._pi:
+                continue
+            try:
+                msgs = conversations_to_messages(record)
+            except KeyError:
+                self.rows_dropped += 1
+                continue
+            if any(m["role"] == "assistant" and "<think>" in m["content"]
+                   and "</think>" not in m["content"] for m in msgs):
+                self.rows_dropped += 1
+                continue
+            batch.append(msgs)
+        if not batch:
+            return False
+        contents = [m["content"] for msgs in batch for m in msgs]
+        encoded = iter(self._tok(contents, add_special_tokens=False)["input_ids"])
+        chunks_i, chunks_m = [self._ids], [self._mask]
+        for msgs in batch:
+            ids, mask = [DOCUMENT_SEPARATOR], [0]
+            for m in msgs:
+                role = m["role"]
+                header = [ROLE_TOKENS[role], *self._role_ids[role], IM_MIDDLE]
+                body = next(encoded)
+                train = 1 if role == "assistant" else 0
+                ids.extend(header + body)
+                mask.extend([0] * len(header) + [train] * len(body))
+                ids.append(IM_END)
+                mask.append(train)
+            chunks_i.append(np.asarray(ids, np.int32))
+            chunks_m.append(np.asarray(mask, np.float32))
+            self.rows_consumed += 1
+        self._ids = np.concatenate(chunks_i)
+        self._mask = np.concatenate(chunks_m)
+        return True
+
+    def get_state(self) -> dict[str, int]:
+        return {"rows_consumed": int(self.rows_consumed),
+                "rows_dropped": int(self.rows_dropped)}
+
+    def set_state(self, payload) -> None:
+        raise RuntimeError("streaming SFT data is not resumable")
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while len(self._ids) < self._need:
+            if not self._refill():
+                raise StopIteration
+        count = self._B * self._T
+        batch = {
+            "input_ids": self._ids[:count].reshape(self._B, self._T),
+            "labels": self._ids[1:count + 1].reshape(self._B, self._T),
+            "loss_mask": self._mask[1:count + 1].reshape(self._B, self._T),
+            "segment_ids": self._segments,
+            "positions": self._positions,
+        }
+        self._ids = self._ids[count:]
+        self._mask = self._mask[count:]
+        return batch

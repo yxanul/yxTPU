@@ -24,7 +24,7 @@ from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.metrics import MetricsWriter, NullMetricsWriter, WandbTracker
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 from yxtpu_pretrain.sft.checkpoint import save_sft_checkpoint
-from yxtpu_pretrain.sft.data import SFTIterator, build_packed_dataset
+from yxtpu_pretrain.sft.data import SFTIterator, StreamingSFTIterator, build_packed_dataset
 from yxtpu_pretrain.sft.tokens import SPECIAL_TOKENS, load_sft_tokenizer
 from yxtpu_pretrain.train import _device_batch, _learning_rate, _make_train_step
 
@@ -51,6 +51,7 @@ def main() -> int:
     parser.add_argument("--dataset", default="Jackrong/Kimi-K2.5-Reasoning-1M-Cleaned")
     parser.add_argument("--subset", default="General-Distillation")
     parser.add_argument("--rows", type=int, default=100_000)
+    parser.add_argument("--stream", action="store_true")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run", default="kda_hybrid_128k-muonclip-superbpe_50b")
@@ -99,19 +100,32 @@ def main() -> int:
         print(f"initialized from step {start}; re-initialized rows {new_rows}", flush=True)
 
     tokenizer = load_sft_tokenizer(config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
-    inputs, labels, loss_mask = build_packed_dataset(
+    process_batch = config.data.per_device_batch_size * jax.local_device_count()
+    if args.stream:
+        iterator = StreamingSFTIterator(
+            tokenizer, dataset=args.dataset,
+            sequence_length=config.data.sequence_length,
+            process_batch=process_batch,
+            process_index=jax.process_index(), process_count=jax.process_count(),
+        )
+        if is_primary:
+            print("streaming full dataset", flush=True)
+        run_packed = False
+    else:
+        run_packed = True
+    if run_packed:
+        inputs, labels, loss_mask = build_packed_dataset(
         tokenizer, dataset=args.dataset, subset=args.subset,
         rows=args.rows, sequence_length=config.data.sequence_length,
     )
-    process_batch = config.data.per_device_batch_size * jax.local_device_count()
-    iterator = SFTIterator(
-        inputs, labels, loss_mask,
-        process_batch=process_batch, epochs=args.epochs,
-        seed=config.experiment.seed,
-        process_index=jax.process_index(), process_count=jax.process_count(),
-    )
-    if is_primary:
-        print(f"packed rows: {len(inputs)}, tokens/epoch ~{len(inputs)*inputs.shape[1]:,}", flush=True)
+        iterator = SFTIterator(
+            inputs, labels, loss_mask,
+            process_batch=process_batch, epochs=args.epochs,
+            seed=config.experiment.seed,
+            process_index=jax.process_index(), process_count=jax.process_count(),
+        )
+        if is_primary:
+            print(f"packed rows: {len(inputs)}, tokens/epoch ~{len(inputs)*inputs.shape[1]:,}", flush=True)
 
     train_step = _make_train_step(config)
     run_name = (
