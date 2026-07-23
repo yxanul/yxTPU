@@ -22,6 +22,8 @@ checkpoint:
   async_save: true
   keep: 6
   resume: true
+  # ClimbMix streams; restores keep weights+optimizer, the stream restarts.
+  allow_weights_only_resume: true
 wandb:
   enabled: true
   project: yxtpu-pretrain
