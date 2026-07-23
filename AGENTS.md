@@ -117,6 +117,26 @@ State is dynamic; verify it before relying on this section.
   splash attention ~12 ms (2.6%). Remaining wall tail is episodic >1 s
   step spikes (present in all runs; not data_wait - suspect W&B flush or
   stream shard boundaries) - a 2-3-batch prefetch queue would mask them.
+- Per-host local checkpointing hardened 2026-07-23 (commits cb2ce06..f065265,
+  preflight-validated save->resume->continue on all 8 hosts): orbax on
+  non-shared disks needs FOUR things together - (1)
+  MultiprocessingOptions(primary_host=None, active_processes={self},
+  per-host barrier prefix): every cross-host wait removed (plain
+  primary_host=None deadlocks mid-write waiting for other hosts' array
+  metadata in a directory it can never see); (2) the same options passed
+  into EVERY item handler, not just the manager (value-leaf/_METADATA
+  writes gate on the global primary otherwise); (3) iterator state saved
+  as JSON (Standard routes scalar leaves through type handlers whose
+  primary gating ignores handler options entirely); (4) a jax.Array type
+  handler override with no ArrayMetadata store. Diagnostic lesson: a
+  multi-host run where seven processes "exit silently" and one blocks in a
+  collective usually means the seven died at a per-host branch (here:
+  restore) - the one-line CLI error is the FIRST stderr line, and stdout
+  buffering hides everything else unless PYTHONUNBUFFERED=1. Streaming
+  runs checkpoint weights+optimizer only (stream position is not
+  serializable; checkpoint.allow_weights_only_resume=true opts in, restore
+  restarts the stream). Batch prefetch skips save iterations so persisted
+  iterator state never runs ahead.
 - Loss-head and collective levers probed 2026-07-23 (v4, production shape):
   (1) loss.implementation=tokamax_fused is HARD-BLOCKED on v4 - tokamax's
   mosaic_tpu linear-CE kernel raises NotImplementedError "Not supported on
