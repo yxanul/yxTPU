@@ -116,17 +116,25 @@ class CheckpointIO:
             save_interval_steps=max(1, checkpoint.save_interval),
             max_to_keep=checkpoint.keep,
         )
+        handler_options = {}
         if multiprocessing_options is not None:
             # Passing None explicitly trips orbax's primary-host probing;
             # only override the default when the local multi-host mode is on.
             manager_options["multiprocessing_options"] = multiprocessing_options
+            # The item handlers gate value-leaf and _METADATA writes on the
+            # GLOBAL primary host unless told otherwise - without this, only
+            # jax process 0's disk gets a complete item (arrays still land
+            # everywhere via the type-handler override, which is how a
+            # checkpoint can hold state on every host but iterator payload
+            # on one).
+            handler_options["multiprocessing_options"] = multiprocessing_options
         self.manager = ocp.CheckpointManager(
             destination,
             item_names=("state", "iterator", "metadata"),
             item_handlers={
-                "state": ocp.StandardCheckpointHandler(),
-                "iterator": ocp.StandardCheckpointHandler(),
-                "metadata": ocp.JsonCheckpointHandler(),
+                "state": ocp.StandardCheckpointHandler(**handler_options),
+                "iterator": ocp.StandardCheckpointHandler(**handler_options),
+                "metadata": ocp.JsonCheckpointHandler(**handler_options),
             },
             options=ocp.CheckpointManagerOptions(**manager_options),
             metadata={"format": "yxtpu-pretrain-nnx-v1"},
