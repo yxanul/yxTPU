@@ -33,6 +33,91 @@ class DepthAttnRead(nnx.Module):
         rngs=rngs,
     )
 
+  def folded_query(self) -> jax.Array:
+    """The pseudo-query with the RMSNorm scale folded in, in fp32.
+
+    q . (x * rsqrt(mean(x^2)+eps) (.) scale) == ((q (.) scale) . x) *
+    rsqrt(mean(x^2)+eps), so no normalized [S,B,T,D] tensor is ever
+    materialized (MaxText RMSNorm has scale_offset=0 here)."""
+    scale = jnp.asarray(self.norm.scale.get_value(), jnp.float32)
+    return jnp.asarray(self.pseudo_query[...], dtype=jnp.float32) * scale
+
+  def _slot_scores(self, values: jax.Array) -> jax.Array:
+    """Scores one source tensor against this site's folded pseudo-query."""
+    dim = values.shape[-1]
+    folded = self.folded_query().astype(values.dtype)
+    raw = jnp.einsum(
+        "d,...d->...", folded, values,
+        preferred_element_type=jnp.float32,
+    )
+    sum_squares = jnp.einsum(
+        "...d,...d->...", values, values,
+        preferred_element_type=jnp.float32,
+    )
+    return raw * jax.lax.rsqrt(sum_squares / dim + self.norm.epsilon)
+
+  def _combine(
+      self,
+      blocks_buffer: jax.Array,
+      block_index: jax.Array,
+      partial_sum: jax.Array,
+      buffer_scores: jax.Array,
+      *,
+      include_partial: bool,
+  ) -> jax.Array:
+    """Masks, softmaxes, and value-combines already-computed buffer scores."""
+    dtype = blocks_buffer.dtype
+    slots = blocks_buffer.shape[0]
+    valid = jnp.arange(slots) <= block_index
+    scores = jnp.where(valid[:, None, None], buffer_scores, jnp.float32(-1.0e30))
+    if include_partial:
+      scores = jnp.concatenate(
+          (scores, self._slot_scores(partial_sum)[None]), axis=0
+      )
+    probabilities = jax.nn.softmax(scores, axis=0)
+    combined = jnp.einsum(
+        "sbt,sbtd->btd",
+        probabilities[:slots].astype(dtype),
+        blocks_buffer,
+        preferred_element_type=jnp.float32,
+    )
+    if include_partial:
+      combined = combined + probabilities[slots][..., None] * partial_sum.astype(
+          jnp.float32
+      )
+    return combined.astype(dtype)
+
+  def read_with_scores(
+      self,
+      blocks_buffer: jax.Array,
+      block_index: jax.Array,
+      partial_sum: jax.Array,
+      raw_scores: jax.Array,
+      sum_squares: jax.Array,
+      *,
+      include_partial: bool,
+  ) -> jax.Array:
+    """Reads with hoisted buffer scores.
+
+    The buffer is loop-invariant within a cycle, so its raw pseudo-query
+    scores for every read site of the cycle can be formed in one MXU matmul
+    over a single buffer pass, and its sum of squares once rather than per
+    site; only the partial-sum score (which changes between reads) stays
+    local. ``raw_scores``/``sum_squares`` are this site's [slots, batch,
+    length] fp32 slices of that shared computation.
+    """
+    dim = blocks_buffer.shape[-1]
+    buffer_scores = raw_scores * jax.lax.rsqrt(
+        sum_squares / dim + self.norm.epsilon
+    )
+    return self._combine(
+        blocks_buffer,
+        block_index,
+        partial_sum,
+        buffer_scores,
+        include_partial=include_partial,
+    )
+
   def __call__(
       self,
       blocks_buffer: jax.Array,
@@ -48,46 +133,15 @@ class DepthAttnRead(nnx.Module):
     # (1) split-scoring: score buffer and partial separately, concatenate
     # only the tiny [slots, batch, length] score tensors (RMSNorm is
     # last-axis-only, so per-slot scores are independent); (2) the RMSNorm
-    # scale folds into the pseudo-query, since q . (x*rsqrt(mean(x^2)+eps)
-    # (.) scale) == ((q (.) scale) . x) * rsqrt(mean(x^2)+eps), so no
-    # normalized [S,B,T,D] tensor is ever materialized (MaxText RMSNorm has
-    # scale_offset=0 here); (3) dots take bf16 operands with fp32
-    # accumulation instead of materializing fp32 copies of the buffer. Each
-    # site reads the raw buffer twice (scores+sumsq fuse when XLA cooperates,
-    # plus the value combine) instead of ~4-5 passes.
-    dtype = blocks_buffer.dtype
-    dim = blocks_buffer.shape[-1]
-    scale = jnp.asarray(self.norm.scale.get_value(), jnp.float32)
-    folded_query = (
-        jnp.asarray(self.pseudo_query[...], dtype=jnp.float32) * scale
-    ).astype(dtype)
-
-    def slot_scores(values):
-      raw = jnp.einsum(
-          "d,...d->...", folded_query, values,
-          preferred_element_type=jnp.float32,
-      )
-      sum_squares = jnp.einsum(
-          "...d,...d->...", values, values,
-          preferred_element_type=jnp.float32,
-      )
-      return raw * jax.lax.rsqrt(sum_squares / dim + self.norm.epsilon)
-
-    scores = slot_scores(blocks_buffer)
-    slots = blocks_buffer.shape[0]
-    valid = jnp.arange(slots) <= block_index
-    scores = jnp.where(valid[:, None, None], scores, jnp.float32(-1.0e30))
-    if include_partial:
-      scores = jnp.concatenate((scores, slot_scores(partial_sum)[None]), axis=0)
-    probabilities = jax.nn.softmax(scores, axis=0)
-    combined = jnp.einsum(
-        "sbt,sbtd->btd",
-        probabilities[:slots].astype(dtype),
+    # scale folds into the pseudo-query (see folded_query); (3) dots take
+    # bf16 operands with fp32 accumulation instead of materializing fp32
+    # copies of the buffer. Cycle-level callers hoist the buffer scores for
+    # all sites into one matmul via read_with_scores; this standalone path
+    # remains for single reads such as the model's final read.
+    return self._combine(
         blocks_buffer,
-        preferred_element_type=jnp.float32,
+        block_index,
+        partial_sum,
+        self._slot_scores(blocks_buffer),
+        include_partial=include_partial,
     )
-    if include_partial:
-      combined = combined + probabilities[slots][..., None] * partial_sum.astype(
-          jnp.float32
-      )
-    return combined.astype(dtype)
