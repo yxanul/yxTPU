@@ -172,6 +172,9 @@ class HybridLayer(nnx.Module):
         blocks_buffer,
         block_index,
         partial_sum,
+        mixer_raw_scores,
+        mlp_raw_scores,
+        buffer_sum_squares,
         *,
         first_in_block: bool,
         decoder_segment_ids=None,
@@ -179,11 +182,17 @@ class HybridLayer(nnx.Module):
         record_max_logits: bool = False,
     ):
         """One Block-AttnRes sub-layer pass: depth-read, mix, accumulate,
-        depth-read, MLP, accumulate. Returns the updated intra-block sum."""
-        read_input = self.mixer_read(
+        depth-read, MLP, accumulate. Returns the updated intra-block sum.
+
+        ``mixer_raw_scores``/``mlp_raw_scores``/``buffer_sum_squares`` are this
+        layer's slices of the cycle-hoisted buffer scores (the buffer is
+        loop-invariant within a cycle, so HybridCycle computes them once)."""
+        read_input = self.mixer_read.read_with_scores(
             blocks_buffer,
             block_index,
             partial_sum,
+            mixer_raw_scores,
+            buffer_sum_squares,
             include_partial=not first_in_block,
         )
         normalized = nn.with_logical_constraint(
@@ -205,8 +214,13 @@ class HybridLayer(nnx.Module):
         partial_sum = partial_sum + nn.with_logical_constraint(
             mixed, ACTIVATION_LOGICAL_AXES
         )
-        mlp_read_input = self.mlp_read(
-            blocks_buffer, block_index, partial_sum, include_partial=True
+        mlp_read_input = self.mlp_read.read_with_scores(
+            blocks_buffer,
+            block_index,
+            partial_sum,
+            mlp_raw_scores,
+            buffer_sum_squares,
+            include_partial=True,
         )
         mlp_input = nn.with_logical_constraint(
             self.post_mixer_norm(mlp_read_input), ACTIVATION_LOGICAL_AXES
@@ -279,11 +293,40 @@ class HybridCycle(nnx.Module):
         if isinstance(carry, tuple):
             blocks_buffer, block_index = carry
             partial_sum = jnp.zeros_like(blocks_buffer[0])
-            for index in range(self.cycle_length):
-                partial_sum = getattr(self, f"layer_{index}").attnres_step(
+            # The buffer is loop-invariant within the cycle, so the raw
+            # pseudo-query scores of all 2*cycle_length read sites form in ONE
+            # matmul over a single buffer pass, and the reader-independent sum
+            # of squares once — instead of one buffer pass per site. Only the
+            # partial-sum scores (which change between reads) stay per-site.
+            layers = [getattr(self, f"layer_{index}") for index in range(self.cycle_length)]
+            folded_queries = jnp.stack(
+                [
+                    read.folded_query()
+                    for layer in layers
+                    for read in (layer.mixer_read, layer.mlp_read)
+                ],
+                axis=-1,
+            ).astype(blocks_buffer.dtype)
+            raw_scores = jnp.einsum(
+                "sbtd,dr->sbtr",
+                blocks_buffer,
+                folded_queries,
+                preferred_element_type=jnp.float32,
+            )
+            buffer_sum_squares = jnp.einsum(
+                "sbtd,sbtd->sbt",
+                blocks_buffer,
+                blocks_buffer,
+                preferred_element_type=jnp.float32,
+            )
+            for index, layer in enumerate(layers):
+                partial_sum = layer.attnres_step(
                     blocks_buffer,
                     block_index,
                     partial_sum,
+                    raw_scores[..., 2 * index],
+                    raw_scores[..., 2 * index + 1],
+                    buffer_sum_squares,
                     first_in_block=index == 0,
                     decoder_segment_ids=decoder_segment_ids,
                     decoder_positions=decoder_positions,
