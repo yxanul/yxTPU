@@ -81,7 +81,20 @@ class AttentionConfig(StrictModel):
 
 
 class LossConfig(StrictModel):
-    implementation: Literal["standard", "tokamax_fused"] = "standard"
+    # "standard" materializes [B, T, V] logits (~4 GB compiled temporaries at
+    # 337M/PDB-8, scaling with batch); "tokamax_fused" is hard-blocked on v4;
+    # "chunked" is the pure-XLA Liger-style implementation — FLOP-neutral,
+    # peak logits memory [B, block_tokens, V].
+    implementation: Literal["standard", "tokamax_fused", "chunked"] = "standard"
+    # Sequence-block size for the chunked implementation; must divide the
+    # sequence length. 256 keeps the block logits at ~1 GB fp32 at PDB 8.
+    block_tokens: int = 256
+
+    @model_validator(mode="after")
+    def validate_block(self) -> LossConfig:
+        if self.block_tokens <= 0:
+            raise ValueError("loss.block_tokens must be positive")
+        return self
 
 
 class ModelConfig(StrictModel):

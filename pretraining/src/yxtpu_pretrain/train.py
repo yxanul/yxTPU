@@ -19,7 +19,10 @@ from maxtext.common.train_state_nnx import TrainStateNNX
 from maxtext.utils import max_utils
 
 from yxtpu_pretrain.config import ResolvedConfig
-from yxtpu_pretrain.losses import data_parallel_linear_cross_entropy
+from yxtpu_pretrain.losses import (
+    chunked_linear_cross_entropy,
+    data_parallel_linear_cross_entropy,
+)
 from yxtpu_pretrain.model import (
     HybridLanguageModel,
     attention_logit_intermediates,
@@ -45,7 +48,15 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
         record_max_logits=record_max_logits,
     )
     weights = batch["loss_mask"].astype(jnp.float32)
-    if model.config.model.loss.implementation == "tokamax_fused":
+    if model.config.model.loss.implementation == "chunked":
+        loss, token_count = chunked_linear_cross_entropy(
+            hidden_states,
+            batch["labels"],
+            weights,
+            model.output_projection_kernel(hidden_states.dtype),
+            block_tokens=model.config.model.loss.block_tokens,
+        )
+    elif model.config.model.loss.implementation == "tokamax_fused":
         hidden_flat = hidden_states.reshape((-1, hidden_states.shape[-1]))
         labels_flat = batch["labels"].reshape((-1,))
         weights_flat = weights.reshape((-1,))
@@ -187,7 +198,15 @@ def _make_diagnostics_step():
                 record_max_logits=True,
             )
             weights = batch["loss_mask"].astype(jnp.float32)
-            if current_model.config.model.loss.implementation == "tokamax_fused":
+            if current_model.config.model.loss.implementation == "chunked":
+                loss, _ = chunked_linear_cross_entropy(
+                    hidden,
+                    batch["labels"],
+                    weights,
+                    current_model.output_projection_kernel(hidden.dtype),
+                    block_tokens=current_model.config.model.loss.block_tokens,
+                )
+            elif current_model.config.model.loss.implementation == "tokamax_fused":
                 loss, _ = data_parallel_linear_cross_entropy(
                     hidden.reshape((-1, hidden.shape[-1])),
                     batch["labels"].reshape((-1,)),
