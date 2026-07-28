@@ -35,7 +35,20 @@ ACTIVATION_LOGICAL_AXES = (
 
 
 def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
-    modules = [layer.decay_up, layer.output_gate_up, layer.out_proj]
+    modules = [layer.decay_up, layer.output_gate_up]
+    # Per-Head Muon alternates (K3 §2.5), active only under
+    # optimizer.muon_per_head: the QKV projection orthogonalizes one
+    # [embed, head_dim] block per (q|k|v, head) slot, and out_proj uses the
+    # whole-matrix (heads*dim -> embed) matricization. Without the flag,
+    # out_proj keeps its historical heads-only reduction — reduction (0,),
+    # output (dim, embed) — warts and all, so the 50B-validated recipe is
+    # reproduced exactly.
+    declare_dense_kernel(
+        layer.out_proj,
+        ParamRole.KDA_MATRIX,
+        head_in_axes=(0, 1),
+        head_out_axes=(2,),
+    )
     if layer.in_proj_mixer is not None:
         # The fused input projection is one KDA_MATRIX parameter. Muon would
         # orthogonalize its qkv/decay/beta/gate blocks jointly, which is why
@@ -43,9 +56,14 @@ def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
         # optimizers until blocked routing exists.
         modules.append(layer.in_proj_mixer)
     else:
+        declare_dense_kernel(
+            layer.in_proj_qkv,
+            ParamRole.KDA_MATRIX,
+            head_in_axes=(0,),
+            head_out_axes=(3,),
+        )
         modules.extend(
             (
-                layer.in_proj_qkv,
                 layer.decay_down,
                 layer.beta_proj,
                 layer.output_gate_down,

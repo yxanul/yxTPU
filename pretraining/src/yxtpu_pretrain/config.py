@@ -163,6 +163,15 @@ class OptimizerConfig(StrictModel):
     # optimizer-state pytree, so checkpoints are not cross-resumable across
     # the flag.
     muon_ns_bf16: bool = False
+    # Per-Head Muon (Kimi K3 §2.5): orthogonalize the attention QKV
+    # projections one [embed, head_dim] block per head slot, and switch the
+    # KDA out_proj to its whole-matrix (heads*dim -> embed) matricization
+    # instead of the historical heads-only reduction. Changes Muon's
+    # matricization only — optimizer state shapes are unchanged, so
+    # checkpoints stay layout-compatible across the flag (the update
+    # trajectory is not comparable across it). Gate on the 200-step
+    # trajectory protocol and a 1B-token A/B before adopting.
+    muon_per_head: bool = False
     qk_clip_tau: float = 100.0
     qk_clip_epsilon: float = 1.0e-6
 
