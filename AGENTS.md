@@ -176,10 +176,15 @@ State is dynamic; verify it before relying on this section.
   0.642, arc_challenge acc_norm 0.336, piqa acc_norm 0.717, sciq 0.878,
   boolq 0.591, openbookqa acc_norm 0.348, copa 0.71 - ahead of
   Pythia-410M@300B on everything except lambada on 6x fewer tokens.
-  Mean throughput 1.098M tok/s (max 1.123M) on the resumed leg. SIX
-  checkpoints per host under /home/a1111/yxtpu_ckpts/ (steps 19073..95500,
-  17 GB/host) - THEY EXIST ONLY ON THE TPU HOST DISKS; export before any
-  slice teardown.
+  Mean throughput 1.098M tok/s (max 1.123M) on the resumed leg. the run's
+  checkpoints were exported and then REMOVED from the TPU hosts on
+  2026-07-29: the authoritative copies are LOCAL - ckpt/95500 (full orbax
+  train state, byte-verified against the host copy and load-validated on
+  CPU 2026-07-23) and ckpt/sft/1392 (the SFT run's final pickle, likewise
+  byte-verified). /home/a1111/yxtpu_ckpts and yxtpu_sft_ckpts no longer
+  exist on the workers (~81 GB free per host, 60 GB on the worker-3
+  logger); intermediate rotations (19073..76427) were already gone before
+  the export.
 - SFT stage bootstrapped 2026-07-23/24 (commits 8b0ac80..7a4e90b, module
   pretraining/src/yxtpu_pretrain/sft/): 12 chat specials on the free padded
   ids 128001-128012 (K2.5-style roles + im_middle/im_end + single-token
