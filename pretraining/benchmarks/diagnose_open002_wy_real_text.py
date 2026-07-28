@@ -318,6 +318,7 @@ def main() -> int:
         overrides=[
             "experiment.harness_eval.enabled=false",
             "experiment.diagnostics.enabled=false",
+            "experiment.token_budget=null",
             f"experiment.checkpoint.destination={arguments.init_destination}",
             f"data.per_device_batch_size={arguments.per_device_batch}",
         ],
