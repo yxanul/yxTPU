@@ -368,6 +368,74 @@ def _decayed_pairwise(
   return values * causal
 
 
+def _decayed_pairwise_pair(
+    left_system: jax.Array,
+    left_intra: jax.Array,
+    right: jax.Array,
+    cumulative_log_decay: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  """Forms the strictly-lower system matrix and the causal intra matrix in one
+  shared row-block pass.
+
+  The two `_decayed_pairwise` calls in every kernel share ``right``, the
+  cumulative decay, and therefore every per-block anchor and exponential; only
+  the left operand differs. Stacking both left blocks into one MXU matmul per
+  row block is bit-identical to two separate calls: each output row is an
+  independent dot product, so row stacking cannot change any accumulation, and
+  the shared exponentials are computed once from identical inputs. Columns at
+  or beyond a block's row range are exact zeros in both formulations —
+  previously as ``exp(-inf)`` operand rows the matmul then multiplied, here as
+  explicit zero padding — so the ~44% of exponentials that were guaranteed
+  zeros are simply never evaluated.
+  """
+  chunk_size = left_system.shape[-2]
+  leading_shape = left_system.shape[:-2]
+  row_block_size = _PAIRWISE_ROW_BLOCK_SIZE
+  if chunk_size % row_block_size:
+    raise ValueError(
+        f"chunk size {chunk_size} must be divisible by row block size {row_block_size}"
+    )
+
+  system_blocks = []
+  intra_blocks = []
+  for block_index in range(chunk_size // row_block_size):
+    row_start = block_index * row_block_size
+    row_end = row_start + row_block_size
+    decay_block = cumulative_log_decay[..., row_start:row_end, :]
+    anchor = decay_block[..., _pairwise_anchor_row(row_block_size), :]
+
+    right_exponent = anchor[..., None, :] - cumulative_log_decay[..., :row_end, :]
+    weighted_right = right[..., :row_end, :].astype(jnp.float32) * jnp.exp(right_exponent)
+    left_factor = jnp.exp(decay_block - anchor[..., None, :])
+    stacked_left = jnp.concatenate(
+        (
+            left_system[..., row_start:row_end, :].astype(jnp.float32) * left_factor,
+            left_intra[..., row_start:row_end, :].astype(jnp.float32) * left_factor,
+        ),
+        axis=-2,
+    )
+    values = _pairwise_matmul(stacked_left, _transpose(weighted_right))
+    if row_end < chunk_size:
+      values = jnp.concatenate(
+          (
+              values,
+              jnp.zeros(
+                  leading_shape + (2 * row_block_size, chunk_size - row_end),
+                  dtype=jnp.float32,
+              ),
+          ),
+          axis=-1,
+      )
+    system_blocks.append(values[..., :row_block_size, :])
+    intra_blocks.append(values[..., row_block_size:, :])
+
+  system = jnp.concatenate(system_blocks, axis=-2)
+  intra = jnp.concatenate(intra_blocks, axis=-2)
+  strict_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  full_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+  return system * strict_causal, intra * full_causal
+
+
 def _decayed_pairwise_backward(
     left: jax.Array,
     right: jax.Array,
@@ -459,6 +527,153 @@ def _decayed_pairwise_backward(
       jnp.concatenate(left_cotangent_blocks, axis=-2),
       right_cotangent,
       jnp.concatenate(decay_cotangent_from_left_blocks, axis=-2) + decay_cotangent_from_right,
+  )
+
+
+def _decayed_pairwise_backward_pair(
+    left_system: jax.Array,
+    left_intra: jax.Array,
+    right: jax.Array,
+    cumulative_log_decay: jax.Array,
+    system_cotangent: jax.Array,
+    intra_cotangent: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Blockwise VJP for both decayed pairwise matrices in shared block passes.
+
+  Bit-identical to one `_decayed_pairwise_backward` call per matrix: the
+  stacked cotangent matmul keeps every output row an independent dot product,
+  trimmed contractions drop only exactly-zero terms (columns the causal masks
+  zeroed and rows the old code weighted by ``exp(-inf)``), and every reduction
+  feeding an anchor or decay cotangent keeps its original 64-row operand shape
+  so the reduction tree is unchanged. Cotangents are returned per matrix so
+  callers keep their existing accumulation order.
+  """
+  chunk_size = left_system.shape[-2]
+  channel_dim = left_system.shape[-1]
+  leading_shape = left_system.shape[:-2]
+  row_block_size = _PAIRWISE_ROW_BLOCK_SIZE
+  strict_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  full_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+  system_cotangent = system_cotangent.astype(jnp.float32) * strict_causal
+  intra_cotangent = intra_cotangent.astype(jnp.float32) * full_causal
+
+  right_cotangent_system = jnp.zeros(
+      leading_shape + (chunk_size, channel_dim), dtype=jnp.float32
+  )
+  right_cotangent_intra = jnp.zeros_like(right_cotangent_system)
+  decay_from_right_system = jnp.zeros_like(right_cotangent_system)
+  decay_from_right_intra = jnp.zeros_like(right_cotangent_system)
+  left_cotangent_system_blocks = []
+  left_cotangent_intra_blocks = []
+  decay_from_left_system_blocks = []
+  decay_from_left_intra_blocks = []
+  anchor_row = _pairwise_anchor_row(row_block_size) % row_block_size
+
+  def _fold_anchor(left_decay_product, right_decay_product):
+    anchor_cotangent = -jnp.sum(left_decay_product, axis=-2) + jnp.sum(
+        right_decay_product,
+        axis=-2,
+    )
+    if anchor_row == row_block_size - 1:
+      return jnp.concatenate(
+          (
+              left_decay_product[..., :-1, :],
+              left_decay_product[..., -1:, :] + anchor_cotangent[..., None, :],
+          ),
+          axis=-2,
+      )
+    return jnp.concatenate(
+        (
+            left_decay_product[..., :anchor_row, :],
+            left_decay_product[..., anchor_row : anchor_row + 1, :]
+            + anchor_cotangent[..., None, :],
+            left_decay_product[..., anchor_row + 1 :, :],
+        ),
+        axis=-2,
+    )
+
+  for block_index in range(chunk_size // row_block_size):
+    row_start = block_index * row_block_size
+    row_end = row_start + row_block_size
+    decay_block = cumulative_log_decay[..., row_start:row_end, :]
+    anchor = decay_block[..., _pairwise_anchor_row(row_block_size), :]
+
+    right_exponent = anchor[..., None, :] - cumulative_log_decay[..., :row_end, :]
+    right_factor = jnp.exp(right_exponent)
+    weighted_right = right[..., :row_end, :].astype(jnp.float32) * right_factor
+    left_factor = jnp.exp(decay_block - anchor[..., None, :])
+    weighted_left_system = (
+        left_system[..., row_start:row_end, :].astype(jnp.float32) * left_factor
+    )
+    weighted_left_intra = (
+        left_intra[..., row_start:row_end, :].astype(jnp.float32) * left_factor
+    )
+    cotangent_system_block = system_cotangent[..., row_start:row_end, :row_end]
+    cotangent_intra_block = intra_cotangent[..., row_start:row_end, :row_end]
+
+    def _pad_rows(values):
+      if row_end == chunk_size:
+        return values
+      return jnp.concatenate(
+          (
+              values,
+              jnp.zeros(
+                  leading_shape + (chunk_size - row_end, channel_dim),
+                  dtype=jnp.float32,
+              ),
+          ),
+          axis=-2,
+      )
+
+    stacked_left_cotangent = _pairwise_matmul(
+        jnp.concatenate((cotangent_system_block, cotangent_intra_block), axis=-2),
+        weighted_right,
+    )
+    weighted_left_system_cotangent = stacked_left_cotangent[..., :row_block_size, :]
+    weighted_left_intra_cotangent = stacked_left_cotangent[..., row_block_size:, :]
+    weighted_right_system_cotangent = _matmul_tn(
+        cotangent_system_block,
+        weighted_left_system,
+        precision=_PAIRWISE_MATMUL_PRECISION,
+    )
+    weighted_right_intra_cotangent = _matmul_tn(
+        cotangent_intra_block,
+        weighted_left_intra,
+        precision=_PAIRWISE_MATMUL_PRECISION,
+    )
+    left_cotangent_system_blocks.append(weighted_left_system_cotangent * left_factor)
+    left_cotangent_intra_blocks.append(weighted_left_intra_cotangent * left_factor)
+    right_cotangent_system = right_cotangent_system + _pad_rows(
+        weighted_right_system_cotangent * right_factor
+    )
+    right_cotangent_intra = right_cotangent_intra + _pad_rows(
+        weighted_right_intra_cotangent * right_factor
+    )
+
+    left_decay_product_system = weighted_left_system_cotangent * weighted_left_system
+    left_decay_product_intra = weighted_left_intra_cotangent * weighted_left_intra
+    right_decay_product_system = _pad_rows(
+        weighted_right_system_cotangent * weighted_right
+    )
+    right_decay_product_intra = _pad_rows(
+        weighted_right_intra_cotangent * weighted_right
+    )
+    decay_from_right_system = decay_from_right_system - right_decay_product_system
+    decay_from_right_intra = decay_from_right_intra - right_decay_product_intra
+    decay_from_left_system_blocks.append(
+        _fold_anchor(left_decay_product_system, right_decay_product_system)
+    )
+    decay_from_left_intra_blocks.append(
+        _fold_anchor(left_decay_product_intra, right_decay_product_intra)
+    )
+
+  return (
+      jnp.concatenate(left_cotangent_system_blocks, axis=-2),
+      jnp.concatenate(left_cotangent_intra_blocks, axis=-2),
+      right_cotangent_system,
+      right_cotangent_intra,
+      jnp.concatenate(decay_from_left_system_blocks, axis=-2) + decay_from_right_system,
+      jnp.concatenate(decay_from_left_intra_blocks, axis=-2) + decay_from_right_intra,
   )
 
 
@@ -710,9 +925,10 @@ def _solve_transposed_unit_lower_triangular_inverse(
     rhs: jax.Array,
 ) -> jax.Array:
   """Solves ``(I + tril(system, -1)).T X = rhs`` through the explicit inverse."""
-  return _solve_apply_matmul(
-      _transpose(_unit_lower_inverse(system)),
+  return _matmul_tn(
+      _unit_lower_inverse(system),
       rhs.astype(jnp.float32),
+      precision=_SOLVE_APPLY_MATMUL_PRECISION,
   )
 
 
@@ -793,18 +1009,7 @@ def _kda_fused_forward_kernel(
     return
 
   key_beta = key * beta[..., None]
-  system = _decayed_pairwise(
-      key_beta,
-      key,
-      cumulative_decay,
-      include_diagonal=False,
-  )
-  intra = _decayed_pairwise(
-      query,
-      key,
-      cumulative_decay,
-      include_diagonal=True,
-  )
+  system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
   if profile_stage == "pairwise":
     output_ref[0] = jnp.concatenate((system, intra), axis=-1).astype(output_ref.dtype)
     state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
@@ -832,8 +1037,15 @@ def _kda_fused_forward_kernel(
 
   state = state_scratch_ref[...].astype(jnp.float32)
   query_with_decay = query * jnp.exp(cumulative_decay)
-  inter_output = _state_matmul(query_with_decay, state)
-  corrected_value = u - _state_matmul(w, state)
+  # One [2C, K] x [K, V] MXU matmul serves both state reads. Output rows are
+  # independent dot products, so splitting the stacked result is bit-identical
+  # to the two separate half-height matmuls it replaces.
+  stacked_state_reads = _state_matmul(
+      jnp.concatenate((query_with_decay, w), axis=-2),
+      state,
+  )
+  inter_output = stacked_state_reads[..., :chunk_size, :]
+  corrected_value = u - stacked_state_reads[..., chunk_size:, :]
   output = inter_output + _matmul(intra, corrected_value)
 
   final_decay = cumulative_decay[..., -1, :]
@@ -908,18 +1120,7 @@ def _kda_fused_backward_kernel(
   cumulative_decay_exp = jnp.exp(cumulative_decay)
   key_beta = key * beta[..., None]
   value_beta = value * beta[..., None]
-  system = _decayed_pairwise(
-      key_beta,
-      key,
-      cumulative_decay,
-      include_diagonal=False,
-  )
-  intra = _decayed_pairwise(
-      query,
-      key,
-      cumulative_decay,
-      include_diagonal=True,
-  )
+  system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
   w_input = key_beta * cumulative_decay_exp
   combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
   if _SOLVE_METHOD == "inverse":
@@ -993,9 +1194,13 @@ def _kda_fused_backward_kernel(
 
   solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
   if _SOLVE_METHOD == "inverse":
-    combined_rhs_cotangent = _solve_apply_matmul(
-        _transpose(system_inverse),
+    # The MXU consumes the transposed inverse directly through the contraction
+    # dimension numbers; materializing the [64, 64] transpose first is a
+    # relayout the kernel never needed.
+    combined_rhs_cotangent = _matmul_tn(
+        system_inverse,
         solved_cotangent,
+        precision=_SOLVE_APPLY_MATMUL_PRECISION,
     )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
@@ -1028,25 +1233,18 @@ def _kda_fused_backward_kernel(
 
   (
       key_beta_system_cotangent,
-      key_system_cotangent,
-      system_decay_cotangent,
-  ) = _decayed_pairwise_backward(
-      key_beta,
-      key,
-      cumulative_decay,
-      system_cotangent,
-      include_diagonal=False,
-  )
-  (
       query_pairwise_cotangent,
+      key_system_cotangent,
       key_intra_cotangent,
+      system_decay_cotangent,
       intra_decay_cotangent,
-  ) = _decayed_pairwise_backward(
+  ) = _decayed_pairwise_backward_pair(
+      key_beta,
       query,
       key,
       cumulative_decay,
+      system_cotangent,
       intra_cotangent,
-      include_diagonal=True,
   )
   key_beta_cotangent = key_beta_cotangent + key_beta_system_cotangent
   key_cotangent = key_cotangent + key_system_cotangent + key_intra_cotangent
@@ -1167,18 +1365,7 @@ def _kda_backward_stage_a_kernel(
   cumulative_decay_exp = jnp.exp(cumulative_decay)
   key_beta = key * beta[..., None]
   value_beta = value * beta[..., None]
-  system = _decayed_pairwise(
-      key_beta,
-      key,
-      cumulative_decay,
-      include_diagonal=False,
-  )
-  intra = _decayed_pairwise(
-      query,
-      key,
-      cumulative_decay,
-      include_diagonal=True,
-  )
+  system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
   w_input = key_beta * cumulative_decay_exp
   combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
   if _SOLVE_METHOD == "inverse":
@@ -1239,9 +1426,13 @@ def _kda_backward_stage_a_kernel(
 
   solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
   if _SOLVE_METHOD == "inverse":
-    combined_rhs_cotangent = _solve_apply_matmul(
-        _transpose(system_inverse),
+    # The MXU consumes the transposed inverse directly through the contraction
+    # dimension numbers; materializing the [64, 64] transpose first is a
+    # relayout the kernel never needed.
+    combined_rhs_cotangent = _matmul_tn(
+        system_inverse,
         solved_cotangent,
+        precision=_SOLVE_APPLY_MATMUL_PRECISION,
     )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
@@ -1353,38 +1544,57 @@ def _kda_backward_stage_b_kernel(
     query = query_normalized * (1.0 / math.sqrt(key_dim))
   key_beta = key * beta[..., None]
 
-  if "no_system" in flags:
-    key_beta_system_cotangent = jnp.zeros_like(key_beta)
-    key_system_cotangent = jnp.zeros_like(key)
-    system_decay_cotangent = jnp.zeros_like(cumulative_decay)
-  else:
+  if "no_system" not in flags and "no_intra" not in flags:
+    # The production path: both VJPs share the right operand, the decay, and
+    # the per-block exponentials, so they run through one merged block pass.
     (
         key_beta_system_cotangent,
-        key_system_cotangent,
-        system_decay_cotangent,
-    ) = _decayed_pairwise_backward(
-        key_beta,
-        key,
-        cumulative_decay,
-        system_cotangent_in,
-        include_diagonal=False,
-    )
-  if "no_intra" in flags:
-    query_pairwise_cotangent = jnp.zeros_like(query)
-    key_intra_cotangent = jnp.zeros_like(key)
-    intra_decay_cotangent = jnp.zeros_like(cumulative_decay)
-  else:
-    (
         query_pairwise_cotangent,
+        key_system_cotangent,
         key_intra_cotangent,
+        system_decay_cotangent,
         intra_decay_cotangent,
-    ) = _decayed_pairwise_backward(
+    ) = _decayed_pairwise_backward_pair(
+        key_beta,
         query,
         key,
         cumulative_decay,
+        system_cotangent_in,
         intra_cotangent_in,
-        include_diagonal=True,
     )
+  else:
+    if "no_system" in flags:
+      key_beta_system_cotangent = jnp.zeros_like(key_beta)
+      key_system_cotangent = jnp.zeros_like(key)
+      system_decay_cotangent = jnp.zeros_like(cumulative_decay)
+    else:
+      (
+          key_beta_system_cotangent,
+          key_system_cotangent,
+          system_decay_cotangent,
+      ) = _decayed_pairwise_backward(
+          key_beta,
+          key,
+          cumulative_decay,
+          system_cotangent_in,
+          include_diagonal=False,
+      )
+    if "no_intra" in flags:
+      query_pairwise_cotangent = jnp.zeros_like(query)
+      key_intra_cotangent = jnp.zeros_like(key)
+      intra_decay_cotangent = jnp.zeros_like(cumulative_decay)
+    else:
+      (
+          query_pairwise_cotangent,
+          key_intra_cotangent,
+          intra_decay_cotangent,
+      ) = _decayed_pairwise_backward(
+          query,
+          key,
+          cumulative_decay,
+          intra_cotangent_in,
+          include_diagonal=True,
+      )
   key_beta_cotangent = key_beta_partial_ref[0] + key_beta_system_cotangent
   key_cotangent = key_partial_ref[0] + key_system_cotangent + key_intra_cotangent
   query_cotangent = query_partial_ref[0] + query_pairwise_cotangent
