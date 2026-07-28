@@ -84,10 +84,18 @@ class LossConfig(StrictModel):
     # "standard" materializes [B, T, V] logits (~4 GB compiled temporaries at
     # 337M/PDB-8, scaling with batch); "tokamax_fused" is hard-blocked on v4;
     # "chunked" is the pure-XLA Liger-style implementation — FLOP-neutral,
-    # peak logits memory [B, block_tokens, V].
+    # peak logits memory [B, block_tokens, V]. MEASURED 2026-07-28 on v4-64
+    # at 337M: chunked is numerics-clean (bf16-rounding-class overlay) and
+    # saves 2.14 GB at block 256, but the scan costs +42.5 ms/step at PDB 8
+    # (+24.5 at block 1024 — the fp32 dW accumulator round-trips HBM every
+    # block), and PDB 12, which only chunked fits, nets 1.096M tok/s against
+    # 1.156M at PDB 8 standard. Keep "standard" on v4 at this scale; chunked
+    # is for configs where the standard logits do not fit at the desired
+    # batch (the 1B campaign shapes).
     implementation: Literal["standard", "tokamax_fused", "chunked"] = "standard"
     # Sequence-block size for the chunked implementation; must divide the
-    # sequence length. 256 keeps the block logits at ~1 GB fp32 at PDB 8.
+    # sequence length. 256 keeps the block logits at ~1 GB fp32 at PDB 8;
+    # larger blocks trade memory for fewer dW-accumulator round trips.
     block_tokens: int = 256
 
     @model_validator(mode="after")
