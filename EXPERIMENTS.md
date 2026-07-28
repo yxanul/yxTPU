@@ -64,6 +64,8 @@ and status here. Detailed measurements and profile interpretation live in
 
 | EXP-039 | Run OPEN-002 on v4-64: WY-system statistics from real ClimbMix/SuperBPE tokens vs random tokens at the trained ckpt-95500 weights, 256 sampled systems per KDA layer, with direct TPU-arithmetic solve errors of the production inverse at one/three/six passes against fp64 on the kernel's exact right-hand sides | The best-case outcome of OPEN-002's decision table: every layer benign on both sources. kappa_2(I+A) p95 <= 8.1 (worst 10.4), doubling growth p95 mostly O(1..1e2) with a worst tail of 4.3e5 (real) / 2.1e6 (random) - nowhere near the 1e15-1e17 synthetic stress regimes or the ~1e12 EXP-032 trigger class, which this trained model's distribution simply does not produce. Decisive columns: three-pass solve error worst-case 2.3e-5 forward / 1.0e-5 transposed - two orders inside the few-times-1e-4 analytical-equivalence envelope - and one-pass at ~3e-3/6.8e-3, marginal. This qualifies the C1 ladder's first rung (solve formation + apply at three passes, bf16x3 emulation if Pallas HIGH still fails to compile) on direct evidence; the one-checkpoint caveat stands (mid/early-training systems are covered by the from-scratch 200-step gate runs, and the across-training-time axis of OPEN-002 remains open) | `results/v4-64-open002-20260728/`; script `pretraining/benchmarks/diagnose_open002_wy_real_text.py` |
 
+| EXP-040 | Lower the production inverse's formation and applies from six-pass fp32 to a three-pass bf16x3 emulation on v4 (C1), gated by EXP-039 | Precision.HIGH still fails Mosaic lowering (NotImplementedError, reconfirmed), so three passes are emulated by bf16 hi/lo splits with fp32 accumulation; `_SOLVE_INVERSE_PASSES=6` rolls back bit-identically (tested). Device gates: whole-kernel deltas vs the six-pass build 1-3e-4 rel L2 across all eight outputs (inside the few-times-1e-4 envelope, two orders below the accepted 1.86% one-pass-BF16 policy discrepancy), 200-step production overlay -2.7e-4 -> -5.7e-5 nats with healthy gradients, p10 step time 453.6 -> 444.4 ms (-9.2 ms; short of the 25-40 ms static estimate — the emulation's VPU splits and three matmul launches eat roughly half the theoretical MXU saving) | `results/v4-64-pr5-solve-20260728/`; W&B group `pr5-gate-solve3pass` |
+
 
 ## Open experiments
 
@@ -81,9 +83,14 @@ These are recorded so the reasoning is not lost. None has been run.
 
 Recursive doubling is rejected and is not selectable through the training
 configuration. The production fused kernel fixes the solve to the
-divide-and-conquer explicit inverse of EXP-036, with every solve matmul at the
-full six-pass FP32 decomposition; the `guarded_fp32` name refers to that
-policy, not to doubling. Like substitution, the inverse forms no matrix power
+divide-and-conquer explicit inverse of EXP-036; as of EXP-040 its formation
+and applies run at a three-pass bf16x3 emulation (Mosaic still rejects
+Precision.HIGH in Pallas), qualified by EXP-039's direct real-text
+measurements (worst-case solve error 2.3e-5 forward / 1.0e-5 transposed,
+whole-kernel deltas 1-3e-4 rel L2 on device) and a 200-step production
+overlay; `_SOLVE_INVERSE_PASSES = 6` restores the full fp32 decomposition
+bit-identically. One-pass remains rejected (~7e-3 solve error). The
+`guarded_fp32` name refers to this guarded-inverse policy, not to doubling. Like substitution, the inverse forms no matrix power
 and no series sum, so it sits in the stable algorithm class; 16-row serial
 substitution remains implemented in the kernel as the slower stable control.
 
