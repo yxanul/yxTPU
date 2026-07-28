@@ -193,6 +193,14 @@ class OptimizerConfig(StrictModel):
     # trajectory is not comparable across it). Gate on the 200-step
     # trajectory protocol and a 1B-token A/B before adopting.
     muon_per_head: bool = False
+    # Distribute Muon's Newton-Schulz across the data axis (the
+    # state-replicated first stage of K3 §5.2.2's design): every NS problem
+    # is computed on exactly one chip and all-gathered back, instead of
+    # replicated on all 32. Optimizer state and updates stay replicated, so
+    # the checkpoint layout is unchanged and per-matrix numerics match the
+    # replicated path. Gate: loss trajectories must overlay the replicated
+    # run at fp noise on the 15-step real-text sweep.
+    muon_distributed_ns: bool = False
     qk_clip_tau: float = 100.0
     qk_clip_epsilon: float = 1.0e-6
 
