@@ -230,6 +230,73 @@ def test_compensation_requires_per_head():
         raise AssertionError("compensation without per-head was accepted")
 
 
+def test_scale_only_control_excludes_per_head():
+    try:
+        _config(muon_per_head=True, muon_per_head_scale_only=True)
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("scale-only control combined with per-head")
+
+
+def test_per_head_scale_ratio_is_recorded_without_any_flag():
+    routes = _routes()
+    qkv = _route(routes, "gqa_qkv")
+    assert qkv.output_axes == (2, 3)  # matricization untouched
+    assert qkv.per_head_scale_ratio == pytest.approx(math.sqrt(8.0))
+    in_proj = _route_by_module(routes, "kda_matrix", "in_proj_qkv")
+    assert in_proj.per_head_scale_ratio == pytest.approx(math.sqrt(6.0))
+    wi = _route(routes, "mlp_input")
+    assert wi.per_head_scale_ratio == 1.0
+
+
+def test_scale_only_control_downscales_exactly_the_qkv_leaves():
+    """The control must equal the default transform with each QKV update
+    multiplied by 1/ratio — the per-head run's scale without its direction."""
+    default_config = _config(weight_decay=0.0)
+    control_config = _config(muon_per_head_scale_only=True, weight_decay=0.0)
+    model, params = _model_and_params(default_config)
+    gradients = jax.tree.map(jnp.ones_like, params)
+
+    default_transform, routes = build_optimizer(model, default_config.optimizer)
+    control_transform, _ = build_optimizer(model, control_config.optimizer)
+    default_updates, _ = default_transform.update(
+        gradients, default_transform.init(params), params
+    )
+    control_updates, _ = control_transform.update(
+        gradients, control_transform.init(params), params
+    )
+    ratios = {
+        route.path: (
+            route.per_head_scale_ratio if route.optimizer == "muon" else 1.0
+        )
+        for route in routes
+    }
+    checked_scaled = 0
+    for (path, expected), (_, actual) in zip(
+        nnx.to_flat_state(default_updates),
+        nnx.to_flat_state(control_updates),
+        strict=True,
+    ):
+        ratio = ratios[path]
+        expected_value = np.asarray(
+            expected.get_value() if hasattr(expected, "get_value") else expected
+        )
+        actual_value = np.asarray(
+            actual.get_value() if hasattr(actual, "get_value") else actual
+        )
+        np.testing.assert_allclose(
+            actual_value,
+            expected_value / ratio,
+            rtol=1e-6,
+            atol=1e-8,
+            err_msg=f"{path} ratio={ratio}",
+        )
+        if ratio != 1.0:
+            checked_scaled += 1
+    assert checked_scaled >= 2
+
+
 def test_transforms_initialize_and_update_under_every_flag_combination():
     for flags in (
         {"muon_per_head": True},

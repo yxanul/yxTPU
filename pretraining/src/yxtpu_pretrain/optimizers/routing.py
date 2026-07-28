@@ -36,6 +36,11 @@ class Route:
     # sqrt(max fans_standard) / sqrt(max fans_alternate) for alt-applied
     # routes (1.0 otherwise), so the shift can be cancelled explicitly.
     scale_compensation: float = 1.0
+    # The same ratio for routes that merely DECLARE a per-head alternate,
+    # computed regardless of which matricization is in force. This is what
+    # the scale-only control multiplies by 1/ratio: the joint update
+    # direction at exactly the per-head matricization's update scale.
+    per_head_scale_ratio: float = 1.0
 
 
 def _actual_axis(original_axis: int, scan_axis: int | None) -> int:
@@ -90,6 +95,7 @@ def classify_parameters(
             alt_kind = metadata.get("matrix_alt_kind")
             applied_kind = None
             scale_compensation = 1.0
+            per_head_scale_ratio = 1.0
             selected_in, selected_out = original_in, original_out
             if alt_kind is not None and alt_kind in enabled_kinds:
                 alt_in = tuple(metadata.get("matrix_alt_in_axes"))
@@ -98,16 +104,29 @@ def classify_parameters(
                 selected_in, selected_out = alt_in, alt_out
             reduction = tuple(_actual_axis(axis, scan_axis) for axis in selected_in)
             output = tuple(_actual_axis(axis, scan_axis) for axis in selected_out)
+            standard_reduction = tuple(
+                _actual_axis(axis, scan_axis) for axis in original_in
+            )
+            standard_output = tuple(
+                _actual_axis(axis, scan_axis) for axis in original_out
+            )
             if applied_kind is not None:
-                standard_reduction = tuple(
-                    _actual_axis(axis, scan_axis) for axis in original_in
-                )
-                standard_output = tuple(
-                    _actual_axis(axis, scan_axis) for axis in original_out
-                )
                 scale_compensation = math.sqrt(
                     _max_fan(shape, standard_reduction, standard_output)
                     / _max_fan(shape, reduction, output)
+                )
+            if alt_kind == "per_head":
+                per_head_reduction = tuple(
+                    _actual_axis(axis, scan_axis)
+                    for axis in metadata.get("matrix_alt_in_axes")
+                )
+                per_head_output = tuple(
+                    _actual_axis(axis, scan_axis)
+                    for axis in metadata.get("matrix_alt_out_axes")
+                )
+                per_head_scale_ratio = math.sqrt(
+                    _max_fan(shape, standard_reduction, standard_output)
+                    / _max_fan(shape, per_head_reduction, per_head_output)
                 )
             if set(reduction) & set(output):
                 raise ValueError(f"Muon parameter {path} has overlapping matrix axes")
@@ -128,6 +147,7 @@ def classify_parameters(
                     batch_axes=batch,
                     alt_kind=applied_kind,
                     scale_compensation=scale_compensation,
+                    per_head_scale_ratio=per_head_scale_ratio,
                 )
             )
         elif role in ADAMW_ROLES:
@@ -205,6 +225,36 @@ def _scale_compensation_tree(parameters, routes: list[Route]):
         factor = (
             route.scale_compensation
             if route.optimizer == "muon" and route.alt_kind == "per_head"
+            else 1.0
+        )
+        values.append((path, variable.replace(value=float(factor))))
+    variable_factors = nnx.from_flat_state(values)
+    pure_factors = nnx.as_pure(variable_factors)
+
+    def factors_for(current_updates):
+        first_value = nnx.to_flat_state(current_updates)[0][1]
+        return (
+            variable_factors
+            if isinstance(first_value, nnx.Variable)
+            else pure_factors
+        )
+
+    return factors_for
+
+
+def _per_head_scale_only_tree(parameters, routes: list[Route]):
+    """Per-leaf multipliers for the scale-only control: the joint update
+    direction at exactly the per-head matricization's consistent-rms scale
+    (1/ratio on QKV leaves declaring a per-head alternate, 1.0 elsewhere).
+    Reproducing the per-head run's loss with this control would attribute
+    that run's gain to the scale reduction, not the matricization."""
+    by_path = {route.path: route for route in routes}
+    values = []
+    for path, variable in nnx.to_flat_state(parameters):
+        route = by_path[path]
+        factor = (
+            1.0 / route.per_head_scale_ratio
+            if route.optimizer == "muon" and route.per_head_scale_ratio != 1.0
             else 1.0
         )
         values.append((path, variable.replace(value=float(factor))))
@@ -314,7 +364,14 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
             adam_learning_rate=learning_rate,
             muon_weight_dimension_numbers=dimensions,
         )
-        if config.muon_per_head_scale_compensation:
+        if config.muon_per_head_scale_only:
+            stages.append(
+                scaled_muon(
+                    update_scale_factors=_per_head_scale_only_tree(parameters, routes),
+                    **muon_arguments,
+                )
+            )
+        elif config.muon_per_head_scale_compensation:
             stages.append(
                 scaled_muon(
                     update_scale_factors=_scale_compensation_tree(parameters, routes),
