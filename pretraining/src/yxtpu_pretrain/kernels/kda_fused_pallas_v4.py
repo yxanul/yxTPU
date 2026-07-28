@@ -28,10 +28,12 @@ recomputes compact intra-chunk quantities, emits BF16 output, and stores only
 the FP32 state after that chunk for a future custom backward.
 
 This module deliberately fixes the validated precision and solver policy:
-one-pass BF16-operand matmuls for ordinary KDA work and a full-pass FP32
-divide-and-conquer explicit inverse for the WY solve and its transpose.
-Recursive doubling, stage exits, and unsafe precision controls live under
-``pretraining/benchmarks/kda_fused_experimental.py``.
+one-pass BF16-operand matmuls for ordinary KDA work and a divide-and-conquer
+explicit inverse for the WY solve and its transpose at three emulated fp32
+passes (``_SOLVE_INVERSE_PASSES``; qualified by EXP-039's direct real-text
+solve-error measurements, worst case 2.3e-5 — set to 6 for the full fp32
+decomposition). Recursive doubling, stage exits, and unsafe precision
+controls live under ``pretraining/benchmarks/kda_fused_experimental.py``.
 """
 
 from __future__ import annotations
@@ -193,7 +195,29 @@ _SOLVE_MATMUL_PRECISION = lax.Precision.HIGHEST
 # log2(chunk) stages. Measured on the 272.9M hybrid, dropping only these
 # applications to one BF16 pass still reaches NaN at step two. The whole solve
 # needs the full passes; keep this at ``highest``.
+#
+# Both constants above now guard only the non-production doubling/substitution
+# control paths. The production inverse runs at the pass count below.
 _SOLVE_APPLY_MATMUL_PRECISION = lax.Precision.HIGHEST
+
+# Pass count for the production inverse's formation and applies. EXP-039
+# (OPEN-002 run at ckpt 95500) measured the decisive quantities directly with
+# TPU arithmetic on real-text and random-token systems at trained weights:
+# every layer benign (kappa_2 worst 10.4, doubling growth worst 4.3e5 — the
+# 1e12..1e17 catastrophe class never appears), three-pass solve error
+# worst-case 2.3e-5 forward / 1.0e-5 transposed on the kernel's exact
+# right-hand sides — two orders inside the few-times-1e-4 equivalence
+# envelope — while one pass sits at ~7e-3, marginal. Three passes therefore
+# halve the solve's dominant MXU cost at a directly-qualified accuracy.
+#
+# Mosaic still rejects ``lax.Precision.HIGH`` inside Pallas kernels
+# (NotImplementedError in the dot lowering, reconfirmed 2026-07-28 on the
+# current pin), so three passes are emulated: each fp32 operand splits into a
+# bf16 high part plus a bf16 residual, and the three significant cross
+# products accumulate through one-pass matmuls in fp32. The dropped low*low
+# term is bounded at ~2^-16 relative — below the three-pass target. Set to 6
+# to restore the full fp32 decomposition (bit-identical rollback).
+_SOLVE_INVERSE_PASSES = 3
 
 # Coupling between diagonal blocks in the substitution solve. These matmuls do
 # not form powers, but the real-text/correlated-key qualification sweep still
@@ -273,6 +297,55 @@ def _solve_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
 def _solve_apply_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Applies one power of the series to the running solution."""
   return _matmul(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
+
+
+def _split_bf16(values: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Splits an fp32 array into a bf16 high part and a bf16 residual."""
+  values = values.astype(jnp.float32)
+  high = values.astype(jnp.bfloat16)
+  low = (values - high.astype(jnp.float32)).astype(jnp.bfloat16)
+  return high, low
+
+
+def _bf16x3_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Three-pass fp32 matmul emulation: hi@hi + hi@lo + lo@hi in fp32."""
+  left_high, left_low = _split_bf16(left)
+  right_high, right_low = _split_bf16(right)
+  result = _matmul(left_high, right_high, precision=lax.Precision.DEFAULT)
+  result = result + _matmul(left_high, right_low, precision=lax.Precision.DEFAULT)
+  result = result + _matmul(left_low, right_high, precision=lax.Precision.DEFAULT)
+  return result
+
+
+def _bf16x3_matmul_tn(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Three-pass emulation of ``_matmul_tn`` (transposed-left contraction)."""
+  left_high, left_low = _split_bf16(left)
+  right_high, right_low = _split_bf16(right)
+  result = _matmul_tn(left_high, right_high, precision=lax.Precision.DEFAULT)
+  result = result + _matmul_tn(left_high, right_low, precision=lax.Precision.DEFAULT)
+  result = result + _matmul_tn(left_low, right_high, precision=lax.Precision.DEFAULT)
+  return result
+
+
+def _solve_form_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Formation matmuls of the production inverse (see _SOLVE_INVERSE_PASSES)."""
+  if _SOLVE_INVERSE_PASSES == 3:
+    return _bf16x3_matmul(left, right)
+  return _matmul(left, right, precision=_SOLVE_MATMUL_PRECISION)
+
+
+def _solve_inverse_apply_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Dense apply of the already-formed inverse to a right-hand side."""
+  if _SOLVE_INVERSE_PASSES == 3:
+    return _bf16x3_matmul(left, right)
+  return _matmul(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
+
+
+def _solve_inverse_apply_matmul_tn(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Transposed apply of the formed inverse through contraction dimensions."""
+  if _SOLVE_INVERSE_PASSES == 3:
+    return _bf16x3_matmul_tn(left, right)
+  return _matmul_tn(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
 
 
 def _solve_coupling_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
@@ -934,19 +1007,23 @@ def _unit_lower_inverse(system: jax.Array) -> jax.Array:
   inverse = identity - base_lower * _block_row_mask(rows, base, 1)
   for row in range(2, base):
     row_update = base_lower * _block_row_mask(rows, base, row)
-    inverse = inverse - _solve_matmul(row_update, inverse)
+    inverse = inverse - _solve_form_matmul(row_update, inverse)
 
   half = base
   while half < rows:
     coupling = lower * _half_coupling_mask(rows, half)
-    inverse = inverse - _solve_matmul(_solve_matmul(inverse, coupling), inverse)
+    inverse = inverse - _solve_form_matmul(
+        _solve_form_matmul(inverse, coupling), inverse
+    )
     half *= 2
   return inverse
 
 
 def _solve_unit_lower_triangular_inverse(system: jax.Array, rhs: jax.Array) -> jax.Array:
   """Solves ``(I + tril(system, -1)) X = rhs`` through the explicit inverse."""
-  return _solve_apply_matmul(_unit_lower_inverse(system), rhs.astype(jnp.float32))
+  return _solve_inverse_apply_matmul(
+      _unit_lower_inverse(system), rhs.astype(jnp.float32)
+  )
 
 
 def _solve_transposed_unit_lower_triangular_inverse(
@@ -954,10 +1031,9 @@ def _solve_transposed_unit_lower_triangular_inverse(
     rhs: jax.Array,
 ) -> jax.Array:
   """Solves ``(I + tril(system, -1)).T X = rhs`` through the explicit inverse."""
-  return _matmul_tn(
+  return _solve_inverse_apply_matmul_tn(
       _unit_lower_inverse(system),
       rhs.astype(jnp.float32),
-      precision=_SOLVE_APPLY_MATMUL_PRECISION,
   )
 
 
@@ -1156,7 +1232,7 @@ def _kda_fused_backward_kernel(
     # One formation serves both the forward recompute here and the transposed
     # solve below; the transpose of the inverse is free inside the matmul.
     system_inverse = _unit_lower_inverse(system)
-    solved = _solve_apply_matmul(system_inverse, combined_rhs)
+    solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
   elif _SOLVE_METHOD == "substitution":
     system_inverse = None
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
@@ -1226,10 +1302,9 @@ def _kda_fused_backward_kernel(
     # The MXU consumes the transposed inverse directly through the contraction
     # dimension numbers; materializing the [64, 64] transpose first is a
     # relayout the kernel never needed.
-    combined_rhs_cotangent = _matmul_tn(
+    combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
         system_inverse,
         solved_cotangent,
-        precision=_SOLVE_APPLY_MATMUL_PRECISION,
     )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
@@ -1399,7 +1474,7 @@ def _kda_backward_stage_a_kernel(
   combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
   if _SOLVE_METHOD == "inverse":
     system_inverse = _unit_lower_inverse(system)
-    solved = _solve_apply_matmul(system_inverse, combined_rhs)
+    solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
   elif _SOLVE_METHOD == "substitution":
     system_inverse = None
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
@@ -1458,10 +1533,9 @@ def _kda_backward_stage_a_kernel(
     # The MXU consumes the transposed inverse directly through the contraction
     # dimension numbers; materializing the [64, 64] transpose first is a
     # relayout the kernel never needed.
-    combined_rhs_cotangent = _matmul_tn(
+    combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
         system_inverse,
         solved_cotangent,
-        precision=_SOLVE_APPLY_MATMUL_PRECISION,
     )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
