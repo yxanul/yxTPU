@@ -52,8 +52,9 @@ class NoPEGQA(nnx.Module):
         declare_dense_kernel(
             self.qkv_proj,
             ParamRole.GQA_QKV,
-            head_in_axes=(0,),
-            head_out_axes=(2,),
+            alt_in_axes=(0,),
+            alt_out_axes=(2,),
+            alt_kind="per_head",
         )
         self.out_proj = DenseGeneral(
             in_features_shape=(self.num_query_heads, self.head_dim),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 
 import jax
@@ -12,6 +13,7 @@ from flax import nnx
 from yxtpu_pretrain.config import OptimizerConfig
 from yxtpu_pretrain.layers.roles import ADAMW_ROLES, MUON_ROLES, ParamRole
 from yxtpu_pretrain.optimizers.distributed_muon import distributed_muon
+from yxtpu_pretrain.optimizers.scaled_muon import scaled_muon
 
 Path = tuple[str | int, ...]
 
@@ -25,6 +27,15 @@ class Route:
     reduction_axes: tuple[int, ...] = ()
     output_axes: tuple[int, ...] = ()
     batch_axes: tuple[int, ...] = ()
+    # Kind tag of the alternate matricization this route adopted, or None
+    # when the standard declaration is in force.
+    alt_kind: str | None = None
+    # optax's consistent-rms rule scales each orthogonalized update by
+    # 0.2 * sqrt(max(fan_in, fan_out)), so switching matricization silently
+    # changes the effective per-parameter update scale. This records
+    # sqrt(max fans_standard) / sqrt(max fans_alternate) for alt-applied
+    # routes (1.0 otherwise), so the shift can be cancelled explicitly.
+    scale_compensation: float = 1.0
 
 
 def _actual_axis(original_axis: int, scan_axis: int | None) -> int:
@@ -33,15 +44,32 @@ def _actual_axis(original_axis: int, scan_axis: int | None) -> int:
     return original_axis + 1
 
 
-def classify_parameters(parameters, *, muon_per_head: bool = False) -> list[Route]:
+def _max_fan(shape: tuple[int, ...], reduction, output) -> float:
+    fan_in = math.prod(shape[axis] for axis in reduction)
+    fan_out = math.prod(shape[axis] for axis in output)
+    return float(max(fan_in, fan_out))
+
+
+def classify_parameters(
+    parameters,
+    *,
+    muon_per_head: bool = False,
+    muon_kda_out_proj_whole: bool = False,
+) -> list[Route]:
     """Classifies every trainable parameter and raises on the first gap.
 
-    ``muon_per_head`` switches Muon-routed parameters that declare an
-    alternate per-head matricization (Kimi K3 §2.5) onto it: axes outside the
-    per-head in/out groups become Muon batch axes, so Newton-Schulz runs one
-    block per head. Parameters without the alternate keep their standard
-    matricization under either setting.
+    Each flag enables one kind of declared alternate Muon matricization:
+    ``muon_per_head`` moves QKV head axes into the Muon batch group so
+    Newton-Schulz runs one block per head (Kimi K3 §2.5);
+    ``muon_kda_out_proj_whole`` switches the KDA out_proj from its historical
+    heads-only reduction to the whole-matrix (heads*dim -> embed) form.
+    Parameters without a matching alternate keep their standard matricization.
     """
+    enabled_kinds = set()
+    if muon_per_head:
+        enabled_kinds.add("per_head")
+    if muon_kda_out_proj_whole:
+        enabled_kinds.add("kda_out_proj_whole")
     routes: list[Route] = []
     for path, variable in nnx.to_flat_state(parameters):
         metadata = variable.get_metadata()
@@ -57,20 +85,30 @@ def classify_parameters(parameters, *, muon_per_head: bool = False) -> list[Rout
         if role in MUON_ROLES:
             original_in = tuple(metadata.get("matrix_in_axes", ()))
             original_out = tuple(metadata.get("matrix_out_axes", ()))
-            if muon_per_head:
-                head_in = metadata.get("matrix_head_in_axes")
-                head_out = metadata.get("matrix_head_out_axes")
-                if (head_in is None) != (head_out is None):
-                    raise ValueError(
-                        f"Muon parameter {path} declares only one per-head axis group"
-                    )
-                if head_in is not None:
-                    original_in = tuple(head_in)
-                    original_out = tuple(head_out)
             if not original_in or not original_out:
                 raise ValueError(f"Muon parameter {path} does not declare both matrix axis groups")
-            reduction = tuple(_actual_axis(axis, scan_axis) for axis in original_in)
-            output = tuple(_actual_axis(axis, scan_axis) for axis in original_out)
+            alt_kind = metadata.get("matrix_alt_kind")
+            applied_kind = None
+            scale_compensation = 1.0
+            selected_in, selected_out = original_in, original_out
+            if alt_kind is not None and alt_kind in enabled_kinds:
+                alt_in = tuple(metadata.get("matrix_alt_in_axes"))
+                alt_out = tuple(metadata.get("matrix_alt_out_axes"))
+                applied_kind = alt_kind
+                selected_in, selected_out = alt_in, alt_out
+            reduction = tuple(_actual_axis(axis, scan_axis) for axis in selected_in)
+            output = tuple(_actual_axis(axis, scan_axis) for axis in selected_out)
+            if applied_kind is not None:
+                standard_reduction = tuple(
+                    _actual_axis(axis, scan_axis) for axis in original_in
+                )
+                standard_output = tuple(
+                    _actual_axis(axis, scan_axis) for axis in original_out
+                )
+                scale_compensation = math.sqrt(
+                    _max_fan(shape, standard_reduction, standard_output)
+                    / _max_fan(shape, reduction, output)
+                )
             if set(reduction) & set(output):
                 raise ValueError(f"Muon parameter {path} has overlapping matrix axes")
             covered = set(reduction) | set(output)
@@ -88,6 +126,8 @@ def classify_parameters(parameters, *, muon_per_head: bool = False) -> list[Rout
                     reduction_axes=reduction,
                     output_axes=output,
                     batch_axes=batch,
+                    alt_kind=applied_kind,
+                    scale_compensation=scale_compensation,
                 )
             )
         elif role in ADAMW_ROLES:
@@ -149,6 +189,39 @@ def _muon_mask_tree(parameters, routes: list[Route]):
     return mask_for
 
 
+def _scale_compensation_tree(parameters, routes: list[Route]):
+    """Per-leaf multipliers cancelling the consistent-rms shape-rule shift.
+
+    Only per-head-matricized routes are compensated: their scale shift is an
+    artifact of the shape rule (the same gradient block orthogonalized per
+    head instead of jointly), whereas the out_proj whole-matrix switch is
+    itself the change under test and keeps whatever scale its matricization
+    implies. Every other leaf carries 1.0.
+    """
+    by_path = {route.path: route for route in routes}
+    values = []
+    for path, variable in nnx.to_flat_state(parameters):
+        route = by_path[path]
+        factor = (
+            route.scale_compensation
+            if route.optimizer == "muon" and route.alt_kind == "per_head"
+            else 1.0
+        )
+        values.append((path, variable.replace(value=float(factor))))
+    variable_factors = nnx.from_flat_state(values)
+    pure_factors = nnx.as_pure(variable_factors)
+
+    def factors_for(current_updates):
+        first_value = nnx.to_flat_state(current_updates)[0][1]
+        return (
+            variable_factors
+            if isinstance(first_value, nnx.Variable)
+            else pure_factors
+        )
+
+    return factors_for
+
+
 def build_learning_rate_schedule(config: OptimizerConfig):
     """Builds the shared warmup/cosine schedule for the optimizer and telemetry.
 
@@ -187,7 +260,11 @@ def build_learning_rate_schedule(config: OptimizerConfig):
 def build_optimizer(model: nnx.Module, config: OptimizerConfig):
     """Builds an Optax transform and its audited route table."""
     parameters = nnx.state(model, nnx.Param)
-    routes = classify_parameters(parameters, muon_per_head=config.muon_per_head)
+    routes = classify_parameters(
+        parameters,
+        muon_per_head=config.muon_per_head,
+        muon_kda_out_proj_whole=config.muon_kda_out_proj_whole,
+    )
     clipping = optax.clip_by_global_norm(config.gradient_clip_norm)
     learning_rate = build_learning_rate_schedule(config)
     if config.name == "adamw":
@@ -237,7 +314,14 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
             adam_learning_rate=learning_rate,
             muon_weight_dimension_numbers=dimensions,
         )
-        if config.muon_distributed_ns:
+        if config.muon_per_head_scale_compensation:
+            stages.append(
+                scaled_muon(
+                    update_scale_factors=_scale_compensation_tree(parameters, routes),
+                    **muon_arguments,
+                )
+            )
+        elif config.muon_distributed_ns:
             mesh = getattr(model, "mesh", None)
             if mesh is None or "data" not in mesh.shape:
                 raise ValueError(
