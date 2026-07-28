@@ -94,6 +94,26 @@ State is dynamic; verify it before relying on this section.
   tests/test_kimi_delta_attention.py has 5 pre-existing failures when run
   on v4 hardware (sublane-gather in the non-v4 kernels; identical at
   4de5b4a) - only its v4-path tests are meaningful gates there.
+- KDA pairwise pass 2026-07-28 (PR #2 gates; commits 32f0c6d, 8792cd6 landed
+  on main): merged system/intra pairwise + q@S/w@S state reads + exp(-inf)
+  trim verified BITWISE-identical on-device across all 8 fwd/bwd outputs
+  (benchmarks/verify_kda_v4_kernel_equivalence.py --bitwise); 16-row pairwise
+  tiles (Kimi K3 §2.1.1 budget: |g|<=5 keeps one-sided rescaling under e^80)
+  moved only rounding — fp32 final_state agrees with the 8-row build to
+  ~3e-10 rel L2, d_log_decay 3.2e-2 (the cancellation-prone term). Four
+  200-step production-config gate runs (identical stream/seed, logs in
+  results/v4-64-pr2-gates-20260728/, W&B groups pr2-gate-*): baseline p10
+  472.7 ms reproduced; kernel branch 463.4 ms (-9.3) with loss overlay at fp
+  noise (3.1e-5 @50, <1e-6 @100, 8e-6 @200). Two optimizer variants stayed
+  flag-gated on the PR branch: distributed NS is numerics-clean but
+  perf-REJECTED on v4 (p10 497.4, +24.7 ms - the update all-gather with
+  2.45x padding inflation plus stacking copies exceeds the ~16 ms of
+  replicated NS it saves; NS measured at ~94% MXU efficiency via the
+  per-head delta, not the assumed ~50%); per-head Muon ran -0.073 nats
+  behind at step 200 with the gap closing monotonically, but the A/B is
+  confounded - optax's consistent-rms shape rule shifts per-parameter update
+  scales (KDA out_proj 11.31x smaller under its matricization fix, in_proj
+  1.73x, GQA qkv 1.22x), so isolation variants must run before any 1B A/B.
 - Batch prefetch 2026-07-23 (commit d8aece3): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array
