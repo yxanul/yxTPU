@@ -307,13 +307,32 @@ def _split_bf16(values: jax.Array) -> tuple[jax.Array, jax.Array]:
   return high, low
 
 
+def _bf16x3_matmul_split(left_high, left_low, right_high, right_low) -> jax.Array:
+  """Three-pass fp32 matmul emulation over pre-split operands.
+
+  Exposing the split level lets callers hoist splits of reused operands
+  (bit-identical: the same split values feed the same matmul sequence) —
+  Pallas lowers the traced jaxpr through Mosaic without XLA's CSE pass, so
+  duplicate splits are otherwise real VPU work.
+  """
+  result = _matmul(left_high, right_high, precision=lax.Precision.DEFAULT)
+  result = result + _matmul(left_high, right_low, precision=lax.Precision.DEFAULT)
+  result = result + _matmul(left_low, right_high, precision=lax.Precision.DEFAULT)
+  return result
+
+
 def _bf16x3_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Three-pass fp32 matmul emulation: hi@hi + hi@lo + lo@hi in fp32."""
   left_high, left_low = _split_bf16(left)
   right_high, right_low = _split_bf16(right)
-  result = _matmul(left_high, right_high, precision=lax.Precision.DEFAULT)
-  result = result + _matmul(left_high, right_low, precision=lax.Precision.DEFAULT)
-  result = result + _matmul(left_low, right_high, precision=lax.Precision.DEFAULT)
+  return _bf16x3_matmul_split(left_high, left_low, right_high, right_low)
+
+
+def _bf16x3_matmul_tn_split(left_high, left_low, right_high, right_low) -> jax.Array:
+  """Three-pass ``_matmul_tn`` emulation over pre-split operands."""
+  result = _matmul_tn(left_high, right_high, precision=lax.Precision.DEFAULT)
+  result = result + _matmul_tn(left_high, right_low, precision=lax.Precision.DEFAULT)
+  result = result + _matmul_tn(left_low, right_high, precision=lax.Precision.DEFAULT)
   return result
 
 
@@ -321,10 +340,7 @@ def _bf16x3_matmul_tn(left: jax.Array, right: jax.Array) -> jax.Array:
   """Three-pass emulation of ``_matmul_tn`` (transposed-left contraction)."""
   left_high, left_low = _split_bf16(left)
   right_high, right_low = _split_bf16(right)
-  result = _matmul_tn(left_high, right_high, precision=lax.Precision.DEFAULT)
-  result = result + _matmul_tn(left_high, right_low, precision=lax.Precision.DEFAULT)
-  result = result + _matmul_tn(left_low, right_high, precision=lax.Precision.DEFAULT)
-  return result
+  return _bf16x3_matmul_tn_split(left_high, left_low, right_high, right_low)
 
 
 def _solve_form_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
@@ -1005,6 +1021,41 @@ def _unit_lower_inverse(system: jax.Array) -> jax.Array:
   base_lower = lower * _blockdiag_strictly_lower_mask(rows, base)
 
   inverse = identity - base_lower * _block_row_mask(rows, base, 1)
+  if _SOLVE_INVERSE_PASSES == 3:
+    # Two bit-identical split reductions. (1) ``lower`` is fixed across every
+    # stage, and its masks are 0/1, so masking commutes with the bf16 split
+    # exactly: hi(x*m) == hi(x)*m and lo(x*m) == lo(x)*m. Split once, mask
+    # the halves. (2) Within a stage, ``inverse`` feeds both the inner-left
+    # and outer-right operands (and ``inner`` the outer-left): split each
+    # value once and reuse the halves.
+    lower_high, lower_low = _split_bf16(lower)
+    blockdiag_mask = _blockdiag_strictly_lower_mask(rows, base).astype(jnp.bfloat16)
+    for row in range(2, base):
+      row_mask = blockdiag_mask * _block_row_mask(rows, base, row).astype(
+          jnp.bfloat16
+      )
+      inverse_high, inverse_low = _split_bf16(inverse)
+      inverse = inverse - _bf16x3_matmul_split(
+          lower_high * row_mask, lower_low * row_mask, inverse_high, inverse_low
+      )
+
+    half = base
+    while half < rows:
+      coupling_mask = _half_coupling_mask(rows, half).astype(jnp.bfloat16)
+      inverse_high, inverse_low = _split_bf16(inverse)
+      inner = _bf16x3_matmul_split(
+          inverse_high,
+          inverse_low,
+          lower_high * coupling_mask,
+          lower_low * coupling_mask,
+      )
+      inner_high, inner_low = _split_bf16(inner)
+      inverse = inverse - _bf16x3_matmul_split(
+          inner_high, inner_low, inverse_high, inverse_low
+      )
+      half *= 2
+    return inverse
+
   for row in range(2, base):
     row_update = base_lower * _block_row_mask(rows, base, row)
     inverse = inverse - _solve_form_matmul(row_update, inverse)
@@ -1232,7 +1283,17 @@ def _kda_fused_backward_kernel(
     # One formation serves both the forward recompute here and the transposed
     # solve below; the transpose of the inverse is free inside the matmul.
     system_inverse = _unit_lower_inverse(system)
-    solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
+    if _SOLVE_INVERSE_PASSES == 3:
+      # The formed inverse serves both this apply and the transposed apply
+      # below: split it once and reuse the halves (bit-identical - the same
+      # split values feed the same matmul sequence).
+      system_inverse_high, system_inverse_low = _split_bf16(system_inverse)
+      rhs_high, rhs_low = _split_bf16(combined_rhs)
+      solved = _bf16x3_matmul_split(
+          system_inverse_high, system_inverse_low, rhs_high, rhs_low
+      )
+    else:
+      solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
   elif _SOLVE_METHOD == "substitution":
     system_inverse = None
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
@@ -1302,10 +1363,19 @@ def _kda_fused_backward_kernel(
     # The MXU consumes the transposed inverse directly through the contraction
     # dimension numbers; materializing the [64, 64] transpose first is a
     # relayout the kernel never needed.
-    combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
-        system_inverse,
-        solved_cotangent,
-    )
+    if _SOLVE_INVERSE_PASSES == 3:
+      cotangent_high, cotangent_low = _split_bf16(solved_cotangent)
+      combined_rhs_cotangent = _bf16x3_matmul_tn_split(
+          system_inverse_high,
+          system_inverse_low,
+          cotangent_high,
+          cotangent_low,
+      )
+    else:
+      combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
+          system_inverse,
+          solved_cotangent,
+      )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
         system,
@@ -1474,7 +1544,17 @@ def _kda_backward_stage_a_kernel(
   combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
   if _SOLVE_METHOD == "inverse":
     system_inverse = _unit_lower_inverse(system)
-    solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
+    if _SOLVE_INVERSE_PASSES == 3:
+      # The formed inverse serves both this apply and the transposed apply
+      # below: split it once and reuse the halves (bit-identical - the same
+      # split values feed the same matmul sequence).
+      system_inverse_high, system_inverse_low = _split_bf16(system_inverse)
+      rhs_high, rhs_low = _split_bf16(combined_rhs)
+      solved = _bf16x3_matmul_split(
+          system_inverse_high, system_inverse_low, rhs_high, rhs_low
+      )
+    else:
+      solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
   elif _SOLVE_METHOD == "substitution":
     system_inverse = None
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
@@ -1533,10 +1613,19 @@ def _kda_backward_stage_a_kernel(
     # The MXU consumes the transposed inverse directly through the contraction
     # dimension numbers; materializing the [64, 64] transpose first is a
     # relayout the kernel never needed.
-    combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
-        system_inverse,
-        solved_cotangent,
-    )
+    if _SOLVE_INVERSE_PASSES == 3:
+      cotangent_high, cotangent_low = _split_bf16(solved_cotangent)
+      combined_rhs_cotangent = _bf16x3_matmul_tn_split(
+          system_inverse_high,
+          system_inverse_low,
+          cotangent_high,
+          cotangent_low,
+      )
+    else:
+      combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
+          system_inverse,
+          solved_cotangent,
+      )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
         system,
