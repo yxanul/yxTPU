@@ -43,6 +43,23 @@ class KDAConfig(StrictModel):
             raise ValueError("the production KDA kernel is specialized to chunk_size=64")
         if self.key_head_dim != 128 or self.value_head_dim != 128:
             raise ValueError("the production KDA kernel requires a 128x128 recurrent state")
+        # The gate bound is a kernel compute parameter, not only a stability
+        # knob (Kimi K3 §2.1.1): the fused kernel's 16-row pairwise tiling is
+        # budgeted for |log decay| <= 5 per token, which keeps the one-sided
+        # rescaling factor below e^80, inside the fp32/bf16 exponent range.
+        # A lower bound would silently halve the safe tile size.
+        if self.precision == "guarded_fp32" and not self.safe_gate:
+            raise ValueError(
+                "the fused KDA kernel requires safe_gate: its pairwise tiling "
+                "factors decay into per-block rescalings whose exponent range "
+                "is only bounded when the log decay is"
+            )
+        if self.safe_gate and not -5.0 <= self.gate_lower_bound < 0.0:
+            raise ValueError(
+                "gate_lower_bound must lie in [-5, 0): the fused kernel's "
+                "pairwise tiling budget (kda_fused_pallas_v4) is derived from "
+                "this bound and must be revisited together with it"
+            )
         return self
 
 
