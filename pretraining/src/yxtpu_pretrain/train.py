@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import statistics
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -275,6 +277,54 @@ def _host_diagnostics(metrics) -> dict[str, float]:
     return result
 
 
+class _PrefetchedIterator:
+    """Background host-batch queue in front of a data iterator.
+
+    Masks the episodic >1 s host stalls (stream shard boundaries, flushes)
+    by keeping up to ``depth`` further host batches ready while the device
+    computes. Only the host fetch is threaded; global-array assembly stays
+    on the main thread. Batch order is preserved, so training losses are
+    bitwise identical to the unqueued loop. Attribute access (pipeline
+    stats, metadata, checkpoint state) forwards to the wrapped iterator;
+    ``queue_depth`` reports this queue's readiness instead.
+    """
+
+    _SENTINEL = object()
+
+    def __init__(self, iterator, depth: int):
+        self._iterator = iterator
+        self._queue = queue.Queue(maxsize=depth)
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._fill, name="host-batch-prefetch", daemon=True
+        )
+        self._thread.start()
+
+    def _fill(self) -> None:
+        try:
+            while True:
+                self._queue.put(next(self._iterator))
+        except BaseException as error:  # noqa: BLE001 - re-raised on the main thread
+            self._error = error
+            self._queue.put(self._SENTINEL)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        item = self._queue.get()
+        if item is self._SENTINEL:
+            raise self._error
+        return item
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
+
+    def __getattr__(self, name):
+        return getattr(self._iterator, name)
+
+
 def _device_batch(batch, mesh):
     if jax.process_count() > 1:
         return {
@@ -421,6 +471,10 @@ def run(
         process_index=jax.process_index(),
         process_count=jax.process_count(),
     )
+    if config.experiment.prefetch_batches > 1:
+        data_iterator = _PrefetchedIterator(
+            data_iterator, config.experiment.prefetch_batches - 1
+        )
     eval_iterator = (
         create_data_iterator(
             process_data.model_copy(update={"split": config.data.eval_split}),
