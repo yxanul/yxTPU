@@ -83,6 +83,49 @@ def test_three_pass_solve_stays_inside_the_qualified_envelope(monkeypatch):
   assert three_forward < 5.0e-4
 
 
+def test_bf16_split_commutes_with_binary_masks():
+  """hi(x*m) == hi(x)*m and lo(x*m) == lo(x)*m for 0/1 masks — the property
+  that lets the formation split ``lower`` once and mask the halves."""
+  values = jax.random.normal(jax.random.key(3), (64, 64), jnp.float32) * 40.0
+  mask = (jax.random.uniform(jax.random.key(4), (64, 64)) > 0.5).astype(jnp.float32)
+  masked_high, masked_low = kernel._split_bf16(values * mask)
+  high, low = kernel._split_bf16(values)
+  np.testing.assert_array_equal(
+      np.asarray(masked_high), np.asarray(high * mask.astype(jnp.bfloat16))
+  )
+  np.testing.assert_array_equal(
+      np.asarray(masked_low), np.asarray(low * mask.astype(jnp.bfloat16))
+  )
+
+
+def test_hoisted_inverse_is_bitwise_identical_to_per_call_splits():
+  """The shared-split formation must reproduce the naive form (fresh splits
+  of the masked coupling and of every operand at each call) bit for bit."""
+  system, _ = _correlated_system()
+
+  def naive_inverse(values):
+    rows = values.shape[-1]
+    lower = jnp.tril(values.astype(jnp.float32), k=-1)
+    index_rows, index_cols = kernel._iota_rows_cols(rows)
+    identity = (index_rows == index_cols).astype(jnp.float32)
+    base_lower = lower * kernel._blockdiag_strictly_lower_mask(rows, 2)
+    inverse = identity - base_lower * kernel._block_row_mask(rows, 2, 1)
+    half = 2
+    while half < rows:
+      coupling = lower * kernel._half_coupling_mask(rows, half)
+      inverse = inverse - kernel._bf16x3_matmul(
+          kernel._bf16x3_matmul(inverse, coupling), inverse
+      )
+      half *= 2
+    return inverse
+
+  assert kernel._SOLVE_INVERSE_PASSES == 3
+  np.testing.assert_array_equal(
+      np.asarray(kernel._unit_lower_inverse(system)),
+      np.asarray(naive_inverse(system)),
+  )
+
+
 def test_six_pass_rollback_reproduces_the_highest_precision_path(monkeypatch):
   system, rhs = _correlated_system()
   monkeypatch.setattr(kernel, "_SOLVE_INVERSE_PASSES", 6)
