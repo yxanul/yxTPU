@@ -114,6 +114,14 @@ State is dynamic; verify it before relying on this section.
   confounded - optax's consistent-rms shape rule shifts per-parameter update
   scales (KDA out_proj 11.31x smaller under its matricization fix, in_proj
   1.73x, GQA qkv 1.22x), so isolation variants must run before any 1B A/B.
+  Isolation runs 2026-07-28 (3x 200 steps, deltas vs the kernel reference;
+  logs iso_*.worker3.log in the same results dir): out_proj whole-matrix
+  alone +0.123 nats @200 (the 11.31x scale cut dominates - the historical
+  [8,131072] matricization is load-bearing at this horizon); per-head QKV
+  alone -0.038 nats @200 with the calmest grads (mean 0.60) and best p10
+  (460.2 ms) - K3 §2.5 reproduced, now a real 1B-A/B candidate; both +
+  exact scale compensation -0.015, inside the 0.016-nat envelope,
+  confirming the original -0.073 was the shape-rule artifact.
 - Batch prefetch 2026-07-23 (commit d8aece3): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array
