@@ -1,0 +1,57 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+[transformers] DeepseekV32Config got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+checkpoint restore: streaming iterator position was not saved; weights and optimizer resume, the stream restarts
+restored checkpoint step 95500
+real: captured 12 KDA layer calls
+real layer 0: done
+real layer 1: done
+real layer 2: done
+real layer 3: done
+real layer 4: done
+real layer 5: done
+real layer 6: done
+real layer 7: done
+real layer 8: done
+real layer 9: done
+real layer 10: done
+real layer 11: done
+random: captured 12 KDA layer calls
+random layer 0: done
+random layer 1: done
+random layer 2: done
+random layer 3: done
+random layer 4: done
+random layer 5: done
+random layer 6: done
+random layer 7: done
+random layer 8: done
+random layer 9: done
+random layer 10: done
+random layer 11: done
+wrote /tmp/open002.json
+==== real ====
+layer_0: kappa2 p95=3.5 growth p95=2.896e+00 beta p95=0.988 cos1 p95=0.574 | fwd err 1pass p95=2.932e-03 3pass p95=1.026e-05 6pass p95=4.941e-08
+layer_1: kappa2 p95=3.7 growth p95=5.719e+00 beta p95=0.989 cos1 p95=0.842 | fwd err 1pass p95=3.140e-03 3pass p95=1.060e-05 6pass p95=4.540e-08
+layer_2: kappa2 p95=3.9 growth p95=8.777e+00 beta p95=0.984 cos1 p95=0.939 | fwd err 1pass p95=3.156e-03 3pass p95=1.041e-05 6pass p95=4.477e-08
+layer_3: kappa2 p95=3.8 growth p95=4.775e+00 beta p95=0.947 cos1 p95=0.905 | fwd err 1pass p95=2.926e-03 3pass p95=9.762e-06 6pass p95=4.370e-08
+layer_4: kappa2 p95=4.3 growth p95=1.331e+01 beta p95=0.964 cos1 p95=0.945 | fwd err 1pass p95=2.635e-03 3pass p95=9.047e-06 6pass p95=4.530e-08
+layer_5: kappa2 p95=4.6 growth p95=3.499e+01 beta p95=0.969 cos1 p95=0.944 | fwd err 1pass p95=2.835e-03 3pass p95=9.750e-06 6pass p95=4.343e-08
+layer_6: kappa2 p95=3.7 growth p95=6.036e+00 beta p95=0.925 cos1 p95=0.954 | fwd err 1pass p95=3.440e-03 3pass p95=1.146e-05 6pass p95=4.448e-08
+layer_7: kappa2 p95=4.9 growth p95=4.986e+01 beta p95=0.963 cos1 p95=0.962 | fwd err 1pass p95=3.000e-03 3pass p95=1.064e-05 6pass p95=4.533e-08
+layer_8: kappa2 p95=4.9 growth p95=8.891e+01 beta p95=0.964 cos1 p95=0.930 | fwd err 1pass p95=3.095e-03 3pass p95=1.081e-05 6pass p95=4.422e-08
+layer_9: kappa2 p95=5.0 growth p95=1.191e+02 beta p95=0.959 cos1 p95=0.952 | fwd err 1pass p95=3.979e-03 3pass p95=1.406e-05 6pass p95=4.681e-08
+layer_10: kappa2 p95=8.1 growth p95=1.850e+04 beta p95=0.949 cos1 p95=0.964 | fwd err 1pass p95=5.283e-03 3pass p95=1.759e-05 6pass p95=4.911e-08
+layer_11: kappa2 p95=6.3 growth p95=1.886e+03 beta p95=0.954 cos1 p95=0.950 | fwd err 1pass p95=3.487e-03 3pass p95=1.208e-05 6pass p95=4.688e-08
+==== random ====
+layer_0: kappa2 p95=8.1 growth p95=9.272e+03 beta p95=1.000 cos1 p95=0.892 | fwd err 1pass p95=3.410e-03 3pass p95=1.747e-05 6pass p95=4.375e-08
+layer_1: kappa2 p95=4.1 growth p95=2.230e+01 beta p95=0.992 cos1 p95=0.931 | fwd err 1pass p95=3.473e-03 3pass p95=1.136e-05 6pass p95=3.934e-08
+layer_2: kappa2 p95=5.4 growth p95=1.029e+02 beta p95=0.962 cos1 p95=0.932 | fwd err 1pass p95=4.571e-03 3pass p95=1.476e-05 6pass p95=4.683e-08
+layer_3: kappa2 p95=6.2 growth p95=5.759e+02 beta p95=0.967 cos1 p95=0.961 | fwd err 1pass p95=3.922e-03 3pass p95=1.340e-05 6pass p95=4.039e-08
+layer_4: kappa2 p95=5.4 growth p95=2.959e+02 beta p95=0.977 cos1 p95=0.952 | fwd err 1pass p95=2.639e-03 3pass p95=9.193e-06 6pass p95=4.256e-08
+layer_5: kappa2 p95=7.0 growth p95=4.623e+03 beta p95=0.968 cos1 p95=0.947 | fwd err 1pass p95=3.556e-03 3pass p95=1.243e-05 6pass p95=4.295e-08
+layer_6: kappa2 p95=3.7 growth p95=1.513e+01 beta p95=0.947 cos1 p95=0.978 | fwd err 1pass p95=3.890e-03 3pass p95=1.347e-05 6pass p95=3.916e-08
+layer_7: kappa2 p95=5.0 growth p95=1.421e+02 beta p95=0.980 cos1 p95=0.975 | fwd err 1pass p95=3.454e-03 3pass p95=1.149e-05 6pass p95=4.106e-08
+layer_8: kappa2 p95=8.7 growth p95=2.154e+05 beta p95=0.991 cos1 p95=0.953 | fwd err 1pass p95=4.677e-03 3pass p95=1.593e-05 6pass p95=4.501e-08
+layer_9: kappa2 p95=4.4 growth p95=1.790e+03 beta p95=0.941 cos1 p95=0.961 | fwd err 1pass p95=3.930e-03 3pass p95=1.340e-05 6pass p95=4.177e-08
+layer_10: kappa2 p95=10.2 growth p95=1.442e+05 beta p95=0.869 cos1 p95=0.967 | fwd err 1pass p95=6.074e-03 3pass p95=2.132e-05 6pass p95=5.093e-08
+layer_11: kappa2 p95=6.0 growth p95=4.317e+02 beta p95=0.915 cos1 p95=0.940 | fwd err 1pass p95=3.743e-03 3pass p95=1.248e-05 6pass p95=4.276e-08
