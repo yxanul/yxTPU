@@ -11,6 +11,7 @@ from flax import nnx
 
 from yxtpu_pretrain.config import OptimizerConfig
 from yxtpu_pretrain.layers.roles import ADAMW_ROLES, MUON_ROLES, ParamRole
+from yxtpu_pretrain.optimizers.distributed_muon import distributed_muon
 
 Path = tuple[str | int, ...]
 
@@ -222,21 +223,29 @@ def build_optimizer(model: nnx.Module, config: OptimizerConfig):
                     _muon_mask_tree(parameters, routes),
                 )
             )
-        stages.append(
-            optax.contrib.muon(
-                learning_rate=learning_rate,
-                ns_steps=config.muon_ns_steps,
-                beta=config.muon_beta,
-                eps=config.muon_epsilon,
-                mu_dtype=jnp.bfloat16 if config.muon_ns_bf16 else None,
-                consistent_rms=config.muon_consistent_rms,
-                weight_decay=config.weight_decay,
-                adam_b1=config.beta1,
-                adam_b2=config.beta2,
-                adam_weight_decay=config.weight_decay,
-                adam_learning_rate=learning_rate,
-                muon_weight_dimension_numbers=dimensions,
-            )
+        muon_arguments = dict(
+            learning_rate=learning_rate,
+            ns_steps=config.muon_ns_steps,
+            beta=config.muon_beta,
+            eps=config.muon_epsilon,
+            mu_dtype=jnp.bfloat16 if config.muon_ns_bf16 else None,
+            consistent_rms=config.muon_consistent_rms,
+            weight_decay=config.weight_decay,
+            adam_b1=config.beta1,
+            adam_b2=config.beta2,
+            adam_weight_decay=config.weight_decay,
+            adam_learning_rate=learning_rate,
+            muon_weight_dimension_numbers=dimensions,
         )
+        if config.muon_distributed_ns:
+            mesh = getattr(model, "mesh", None)
+            if mesh is None or "data" not in mesh.shape:
+                raise ValueError(
+                    "muon_distributed_ns requires a model carrying a mesh with "
+                    "a data axis"
+                )
+            stages.append(distributed_muon(mesh, **muon_arguments))
+        else:
+            stages.append(optax.contrib.muon(**muon_arguments))
         transform = optax.chain(*stages)
     return transform, routes
