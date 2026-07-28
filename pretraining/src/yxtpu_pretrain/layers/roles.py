@@ -52,16 +52,40 @@ def declare_parameter(
     *,
     matrix_in_axes: Iterable[int] = (),
     matrix_out_axes: Iterable[int] = (),
+    matrix_head_in_axes: Iterable[int] | None = None,
+    matrix_head_out_axes: Iterable[int] | None = None,
 ) -> nnx.Param:
-    """Returns a parameter with optimizer semantics attached as NNX metadata."""
+    """Returns a parameter with optimizer semantics attached as NNX metadata.
+
+    ``matrix_head_in_axes``/``matrix_head_out_axes`` declare an optional
+    alternate Muon matricization used when the optimizer enables Per-Head
+    Muon (Kimi K3 §2.5): axes absent from both groups become Muon batch axes,
+    so Newton-Schulz runs one block per head instead of on the joint matrix.
+    ``None`` means the parameter has no per-head alternative and keeps its
+    standard matricization under either setting.
+    """
     return parameter.replace(
         role=str(role),
         matrix_in_axes=tuple(matrix_in_axes),
         matrix_out_axes=tuple(matrix_out_axes),
+        matrix_head_in_axes=(
+            None if matrix_head_in_axes is None else tuple(matrix_head_in_axes)
+        ),
+        matrix_head_out_axes=(
+            None if matrix_head_out_axes is None else tuple(matrix_head_out_axes)
+        ),
     )
 
 
-def declare_dense_kernel(module, role: ParamRole, *, in_axes=(0,), out_axes=None) -> None:
+def declare_dense_kernel(
+    module,
+    role: ParamRole,
+    *,
+    in_axes=(0,),
+    out_axes=None,
+    head_in_axes=None,
+    head_out_axes=None,
+) -> None:
     if out_axes is None:
         out_axes = tuple(range(1, module.kernel.get_value().ndim))
     module.kernel = declare_parameter(
@@ -69,6 +93,8 @@ def declare_dense_kernel(module, role: ParamRole, *, in_axes=(0,), out_axes=None
         role,
         matrix_in_axes=in_axes,
         matrix_out_axes=out_axes,
+        matrix_head_in_axes=head_in_axes,
+        matrix_head_out_axes=head_out_axes,
     )
     if module.bias is not None:
         module.bias = declare_parameter(module.bias, ParamRole.BIAS)
