@@ -18,6 +18,7 @@ class ParamRole(StrEnum):
     KDA_MATRIX = "kda_matrix"
     GQA_QKV = "gqa_qkv"
     GQA_OUTPUT = "gqa_output"
+    GQA_GATE = "gqa_gate"
     MLP_INPUT = "mlp_input"
     MLP_OUTPUT = "mlp_output"
     ATTNRES_PSEUDOQUERY = "attnres_pseudoquery"
@@ -34,6 +35,7 @@ MUON_ROLES = frozenset(
         ParamRole.KDA_MATRIX,
         ParamRole.GQA_QKV,
         ParamRole.GQA_OUTPUT,
+        ParamRole.GQA_GATE,
         ParamRole.MLP_INPUT,
         ParamRole.MLP_OUTPUT,
         ParamRole.VIT_MATRIX,

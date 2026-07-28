@@ -73,6 +73,35 @@ class NoPEGQA(nnx.Module):
             out_axes=(2,),
         )
 
+        if config.output_gate:
+            # Head-specific sigmoid output gate (G1 of arXiv:2505.06708; the
+            # design K3 §2.1.2 adopts for its global-attention layers): the
+            # per-head SDPA output is gated elementwise by sigmoid(W_g x)
+            # BEFORE the output projection — gating after W_o cannot break
+            # the W_V*W_O low-rank bottleneck — with x the post-pre-norm
+            # hidden state that also feeds QKV. Deliberately a separate GEMM:
+            # fusing gate heads into qkv_proj would touch apply_gqa_muonclip's
+            # certified fused-slice layout. Standard init (sigma(~0) ~ 0.5,
+            # the paper's trained configuration), no bias.
+            self.gate_proj = DenseGeneral(
+                in_features_shape=emb_dim,
+                out_features_shape=(self.num_query_heads, self.head_dim),
+                dtype=dtype,
+                weight_dtype=weight_dtype,
+                kernel_axes=("embed", "q_heads", "kv_head_dim"),
+                matmul_precision="default",
+                rngs=rngs,
+            )
+            declare_dense_kernel(
+                self.gate_proj,
+                ParamRole.GQA_GATE,
+                alt_in_axes=(0,),
+                alt_out_axes=(2,),
+                alt_kind="per_head",
+            )
+        else:
+            self.gate_proj = None
+
         if config.rope:
             from maxtext.layers.embeddings import RotaryEmbedding
 
@@ -217,5 +246,9 @@ class NoPEGQA(nnx.Module):
                 )
                 self.attention_op.max_logits.value = reduced
                 self.max_logits.value = reduced
+        if self.gate_proj is not None:
+            # Sigmoid in fp32, consistent with the KDA output gate.
+            gate = jax.nn.sigmoid(self.gate_proj(hidden_states).astype(jnp.float32))
+            output = (output.astype(jnp.float32) * gate).astype(self.dtype)
         output = self.out_proj(output.astype(self.dtype))
         return jax.ad_checkpoint.checkpoint_name(output, "out_proj")

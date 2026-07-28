@@ -72,6 +72,15 @@ class AttentionConfig(StrictModel):
     block_q_dkv: int = 2048
     fused_qkv: bool = True
     rope: bool = False
+    # Head-specific sigmoid output gate (G1 of arXiv:2505.06708; the design
+    # K3 §2.1.2 adopts for its global-attention layers): the per-head SDPA
+    # output is gated elementwise by sigmoid(W_g x) BEFORE the output
+    # projection, x being the post-pre-norm hidden state that also feeds
+    # QKV. Architecture change (new parameters, checkpoint-incompatible
+    # across the flag); with the flag off the module is not constructed, so
+    # today's model is reproduced bit-identically. Costs q_heads*head_dim*
+    # emb_dim params per GQA layer (+4.2M at 337M, +18.9M at 1b_deep).
+    output_gate: bool = False
 
     @model_validator(mode="after")
     def validate_gqa(self) -> AttentionConfig:
