@@ -356,6 +356,16 @@ class ExperimentConfig(StrictModel):
     benchmark: bool = True
     token_budget: int | None = None
     acknowledge_no_checkpoint: bool = False
+    # Total host batches staged ahead of the device: 1 is the classic
+    # single-batch staging inside the step loop; values above 1 add a
+    # background thread keeping (prefetch_batches - 1) further host batches
+    # queued, masking the episodic >1 s stream-shard/flush stalls. Batch
+    # order is preserved, so losses are bitwise identical to depth 1. Depths
+    # above 1 are rejected when persisted iterator state must stay exact
+    # (checkpointing without allow_weights_only_resume), because the
+    # background thread necessarily runs the iterator ahead of the last
+    # trained step.
+    prefetch_batches: int = 1
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     diagnostics: DiagnosticsConfig = Field(default_factory=DiagnosticsConfig)
@@ -380,6 +390,18 @@ class ExperimentConfig(StrictModel):
             raise ValueError("checkpointing and acknowledge_no_checkpoint are mutually exclusive")
         if self.token_budget is not None and self.token_budget <= 0:
             raise ValueError("token_budget must be positive")
+        if self.prefetch_batches < 1:
+            raise ValueError("prefetch_batches must be at least 1")
+        if (
+            self.prefetch_batches > 1
+            and self.checkpoint.enabled
+            and not self.checkpoint.allow_weights_only_resume
+        ):
+            raise ValueError(
+                "prefetch_batches > 1 runs the data iterator ahead of the "
+                "last trained step; it requires checkpointing disabled or "
+                "allow_weights_only_resume"
+            )
         return self
 
 
