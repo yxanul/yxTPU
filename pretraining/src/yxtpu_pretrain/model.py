@@ -36,18 +36,22 @@ ACTIVATION_LOGICAL_AXES = (
 
 def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
     modules = [layer.decay_up, layer.output_gate_up]
-    # Per-Head Muon alternates (K3 §2.5), active only under
-    # optimizer.muon_per_head: the QKV projection orthogonalizes one
-    # [embed, head_dim] block per (q|k|v, head) slot, and out_proj uses the
-    # whole-matrix (heads*dim -> embed) matricization. Without the flag,
-    # out_proj keeps its historical heads-only reduction — reduction (0,),
-    # output (dim, embed) — warts and all, so the 50B-validated recipe is
-    # reproduced exactly.
+    # Two independently flag-gated alternate matricizations, so each
+    # trajectory effect can be isolated (the optax consistent-rms shape rule
+    # ties update scale to the matricization, so bundling them confounds any
+    # A/B): optimizer.muon_kda_out_proj_whole switches out_proj from its
+    # historical heads-only reduction — reduction (0,), output (dim, embed),
+    # an [8, 131072] matricization whose consistent-rms scale is 11.31x the
+    # whole-matrix one — to the whole-matrix (heads*dim -> embed) form;
+    # optimizer.muon_per_head (K3 §2.5) orthogonalizes the QKV projection one
+    # [embed, head_dim] block per (q|k|v, head) slot. With both flags off the
+    # 50B-validated recipe is reproduced exactly.
     declare_dense_kernel(
         layer.out_proj,
         ParamRole.KDA_MATRIX,
-        head_in_axes=(0, 1),
-        head_out_axes=(2,),
+        alt_in_axes=(0, 1),
+        alt_out_axes=(2,),
+        alt_kind="kda_out_proj_whole",
     )
     if layer.in_proj_mixer is not None:
         # The fused input projection is one KDA_MATRIX parameter. Muon would
@@ -59,8 +63,9 @@ def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
         declare_dense_kernel(
             layer.in_proj_qkv,
             ParamRole.KDA_MATRIX,
-            head_in_axes=(0,),
-            head_out_axes=(3,),
+            alt_in_axes=(0,),
+            alt_out_axes=(3,),
+            alt_kind="per_head",
         )
         modules.extend(
             (

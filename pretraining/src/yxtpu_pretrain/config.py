@@ -164,24 +164,61 @@ class OptimizerConfig(StrictModel):
     # the flag.
     muon_ns_bf16: bool = False
     # Per-Head Muon (Kimi K3 §2.5): orthogonalize the attention QKV
-    # projections one [embed, head_dim] block per head slot, and switch the
-    # KDA out_proj to its whole-matrix (heads*dim -> embed) matricization
-    # instead of the historical heads-only reduction. Changes Muon's
-    # matricization only — optimizer state shapes are unchanged, so
-    # checkpoints stay layout-compatible across the flag (the update
-    # trajectory is not comparable across it). Gate on the 200-step
-    # trajectory protocol and a 1B-token A/B before adopting.
+    # projections one [embed, head_dim] block per head slot. QKV only — the
+    # KDA out_proj matricization has its own flag below so the two trajectory
+    # effects can be gated separately. Beware the consistent-rms side effect:
+    # the shape rule ties update scale to the matricization, so per-head
+    # blocks receive smaller updates than the joint matrix (KDA in_proj
+    # 1.73x, GQA qkv 1.22x at the 337M shape) unless
+    # muon_per_head_scale_compensation cancels it. Optimizer state shapes are
+    # unchanged, so checkpoints stay layout-compatible across the flag (the
+    # update trajectory is not comparable across it).
     muon_per_head: bool = False
+    # Switch the KDA out_proj from its historical Muon matricization —
+    # reduction over the heads axis alone, an [8, 131072] matricization the
+    # 50B run was validated with — to the whole-matrix (heads*dim -> embed)
+    # form matching the GQA out_proj declaration. Note this also shrinks the
+    # consistent-rms update scale of those matrices 11.31x
+    # (sqrt(131072)/sqrt(1024) -> sqrt(1024) at the 337M shape): the flag
+    # tests the matricization fix *including* its scale consequence.
+    muon_kda_out_proj_whole: bool = False
+    # Cancel the consistent-rms shape-rule artifact on per-head-matricized
+    # QKV updates: each is multiplied by sqrt(max fans_joint) /
+    # sqrt(max fans_per_head) inside the Muon chain, before weight decay, so
+    # per-head orthogonalization is compared at the joint matricization's
+    # update scale. No global muon_consistent_rms retune can do this — the
+    # shift is per-parameter (1.22x-1.73x here).
+    muon_per_head_scale_compensation: bool = False
     # Distribute Muon's Newton-Schulz across the data axis (the
     # state-replicated first stage of K3 §5.2.2's design): every NS problem
     # is computed on exactly one chip and all-gathered back, instead of
     # replicated on all 32. Optimizer state and updates stay replicated, so
     # the checkpoint layout is unchanged and per-matrix numerics match the
-    # replicated path. Gate: loss trajectories must overlay the replicated
-    # run at fp noise on the 15-step real-text sweep.
+    # replicated path. MEASURED 2026-07-28 on v4-64 at 337M: numerics pass
+    # (fp-noise loss overlay) but p10 step time REGRESSES 463.4 -> 497.4 ms —
+    # the update all-gather (2.45x padding inflation across 9 collectives)
+    # costs more than the ~16 ms of replicated NS it replaces (NS runs at
+    # ~94% MXU efficiency, measured via the per-head delta). Kept for the 1B
+    # config where NS grows as d^3; do not enable on v4 at this scale.
     muon_distributed_ns: bool = False
     qk_clip_tau: float = 100.0
     qk_clip_epsilon: float = 1.0e-6
+
+    @model_validator(mode="after")
+    def validate_muon_flags(self) -> OptimizerConfig:
+        if self.muon_per_head_scale_compensation and not self.muon_per_head:
+            raise ValueError(
+                "muon_per_head_scale_compensation compensates the per-head "
+                "matricization's shape-rule scale shift and requires "
+                "muon_per_head"
+            )
+        if self.muon_per_head_scale_compensation and self.muon_distributed_ns:
+            raise ValueError(
+                "muon_per_head_scale_compensation and muon_distributed_ns "
+                "compose different Muon chains; the combination is not "
+                "implemented"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_schedule(self) -> OptimizerConfig:
