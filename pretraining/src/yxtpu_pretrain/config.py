@@ -210,6 +210,13 @@ class OptimizerConfig(StrictModel):
     # update scale. No global muon_consistent_rms retune can do this — the
     # shift is per-parameter (1.22x-1.73x here).
     muon_per_head_scale_compensation: bool = False
+    # The falsifying control for per-head Muon: KEEP the joint matricization
+    # and multiply each QKV update by 1/ratio — i.e. apply exactly the
+    # per-head run's update scale without its update direction. If this
+    # reproduces the per-head run's trajectory, that run's gain was a
+    # per-parameter LR effect (the QKV projections were over-stepped), not
+    # cross-head equalization; ship the scale, not the matricization.
+    muon_per_head_scale_only: bool = False
     # Distribute Muon's Newton-Schulz across the data axis (the
     # state-replicated first stage of K3 §5.2.2's design): every NS problem
     # is computed on exactly one chip and all-gathered back, instead of
@@ -233,11 +240,18 @@ class OptimizerConfig(StrictModel):
                 "matricization's shape-rule scale shift and requires "
                 "muon_per_head"
             )
-        if self.muon_per_head_scale_compensation and self.muon_distributed_ns:
+        if self.muon_per_head_scale_only and self.muon_per_head:
             raise ValueError(
-                "muon_per_head_scale_compensation and muon_distributed_ns "
-                "compose different Muon chains; the combination is not "
-                "implemented"
+                "muon_per_head_scale_only is the control FOR muon_per_head "
+                "(joint direction at per-head scale); the flags are mutually "
+                "exclusive"
+            )
+        if self.muon_distributed_ns and (
+            self.muon_per_head_scale_compensation or self.muon_per_head_scale_only
+        ):
+            raise ValueError(
+                "update-scale stages and muon_distributed_ns compose "
+                "different Muon chains; the combination is not implemented"
             )
         return self
 
