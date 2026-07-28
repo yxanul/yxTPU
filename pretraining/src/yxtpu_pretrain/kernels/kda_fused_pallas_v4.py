@@ -101,7 +101,19 @@ _SOLVE_INVERSE_BASE_BLOCK_SIZE = 2
 # rescales both operands around a shared per-channel anchor, so the block size
 # is bounded by how much channel decay may accumulate across it before the FP32
 # exponent range runs out, not by correctness.
-_PAIRWISE_ROW_BLOCK_SIZE = 8
+#
+# The safe-gate parameterization (kimi_delta_attention.py: log decay bounded to
+# [gate_lower_bound, 0), gate_lower_bound = -5) exists precisely to license
+# this tiling. Kimi K3 (§2.1.1, Eq. 5) fixes the same g_min = -5 and states the
+# resulting budget: the cumulative log-decay over a 16-token tile lies in
+# (-80, 0), so the one-sided reciprocal rescaling factor stays below
+# e^80 ~ 5.5e34, inside the shared fp32/bf16 exponent range (max ~3.4e38) —
+# which is why K3 runs 16-token tiles as dense tensor-core matmuls in BF16 at
+# production scale. 16 rows with last-row anchoring is exactly that budget;
+# 32 rows would need midpoint anchoring (e^80 per side) and 32 with last-row
+# anchoring overflows (e^160). The import-time assert below enforces the
+# envelope so neither knob can silently leave it.
+_PAIRWISE_ROW_BLOCK_SIZE = 16
 
 # The anchor cancels exactly between the two operands, so any row may serve as
 # it. Anchoring on the last row keeps the right operand at or below one and
@@ -109,6 +121,23 @@ _PAIRWISE_ROW_BLOCK_SIZE = 8
 # evenly and therefore tolerates twice the row block at equal worst-case
 # exponent.
 _PAIRWISE_ANCHOR_MIDPOINT = False
+
+# |log decay| per token is bounded by the safe gate's lower bound; the config
+# validator rejects models that exceed it (config.py enforces
+# gate_lower_bound >= -5 for the fused kernel). Changing either constant above
+# or that bound requires revisiting this budget together — the gate bound is a
+# kernel compute parameter, not only a stability knob.
+_PAIRWISE_GATE_LOG_BOUND = 5.0
+_PAIRWISE_MAX_SAFE_EXPONENT = 85.0
+_PAIRWISE_WORST_EXPONENT = _PAIRWISE_GATE_LOG_BOUND * (
+    _PAIRWISE_ROW_BLOCK_SIZE / 2 if _PAIRWISE_ANCHOR_MIDPOINT else _PAIRWISE_ROW_BLOCK_SIZE
+)
+assert _PAIRWISE_WORST_EXPONENT <= _PAIRWISE_MAX_SAFE_EXPONENT, (
+    "pairwise tiling leaves the fp32/bf16 exponent envelope: "
+    f"worst one-sided exponent {_PAIRWISE_WORST_EXPONENT} > "
+    f"{_PAIRWISE_MAX_SAFE_EXPONENT}; shrink _PAIRWISE_ROW_BLOCK_SIZE or enable "
+    "midpoint anchoring"
+)
 
 # Independent ``(batch, head)`` streams advanced by a single Pallas program.
 # The chunk axis carries the only real sequential dependency, so batching
