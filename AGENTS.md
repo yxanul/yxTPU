@@ -145,6 +145,25 @@ State is dynamic; verify it before relying on this section.
   splash attention ~12 ms (2.6%). Remaining wall tail is episodic >1 s
   step spikes (present in all runs; not data_wait - suspect W&B flush or
   stream shard boundaries) - a 2-3-batch prefetch queue would mask them.
+- Gate-run wall-time autopsy 2026-07-28 (pr5/pr6 logs, worker-3 records with
+  shifted data_wait pairing - the loop attributes a prefetch's cost to the
+  NEXT record): 200-step gate runs are HF-STREAMING-BOUND, not device-bound.
+  Mean step 810 ms vs the 444 ms compute floor, flat across the whole run
+  (no warmup ramp); the demanded 641k tok/s global (80k/host) exceeds what a
+  cold stream delivers, vs 137k/host sustained warm on the 50B run. Local
+  waits are serially exposed once they exceed the compute window (mean step
+  1140 vs floor+wait 1168 on wait-carrying steps), and 54% of the excess
+  appears as zero-local-wait slow steps - the max-of-8 collective coupling:
+  any host's stream stall stalls every chip. The old >1 s spike suspicion is
+  settled: it is stream stalls, NOT W&B flush (inter-step logging measures
+  9 ms), and the h2d assembly (~68 ms/step) stays hidden under compute. The
+  depth-3 prefetch queue cannot fix a sustained production deficit (queue
+  drains; pr4 wall equals pr5 wall). Consequences: p10 remains the only
+  honest gate metric for short runs; production steady-state is fine but its
+  residual ~2% mean-vs-max gap is this mechanism episodically (adopt
+  prefetch_batches 8-16 for the next campaign); a local pre-tokenized
+  gate-corpus cache (the gate stream head is deterministic at seed 42) would
+  make short runs device-bound and reproducible.
 - SuperBPE-50B run COMPLETE 2026-07-23 (W&B group superbpe-50b, two runs:
   02:04 crashed@59,446 by the zombie-launcher incident + 10:55 resumed from
   the 30B checkpoint to completion): kda_hybrid_128k + BlockAttnRes +
