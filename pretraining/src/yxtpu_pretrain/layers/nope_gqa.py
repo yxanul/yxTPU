@@ -47,7 +47,14 @@ class NoPEGQA(nnx.Module):
             matmul_precision="default",
             rngs=rngs,
         )
-        declare_dense_kernel(self.qkv_proj, ParamRole.GQA_QKV)
+        # Per-Head Muon alternate (K3 §2.5): one [embed, head_dim] block per
+        # fused q/k/v head slot when optimizer.muon_per_head is enabled.
+        declare_dense_kernel(
+            self.qkv_proj,
+            ParamRole.GQA_QKV,
+            head_in_axes=(0,),
+            head_out_axes=(2,),
+        )
         self.out_proj = DenseGeneral(
             in_features_shape=(self.num_query_heads, self.head_dim),
             out_features_shape=emb_dim,

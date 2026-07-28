@@ -32,8 +32,15 @@ def _actual_axis(original_axis: int, scan_axis: int | None) -> int:
     return original_axis + 1
 
 
-def classify_parameters(parameters) -> list[Route]:
-    """Classifies every trainable parameter and raises on the first gap."""
+def classify_parameters(parameters, *, muon_per_head: bool = False) -> list[Route]:
+    """Classifies every trainable parameter and raises on the first gap.
+
+    ``muon_per_head`` switches Muon-routed parameters that declare an
+    alternate per-head matricization (Kimi K3 §2.5) onto it: axes outside the
+    per-head in/out groups become Muon batch axes, so Newton-Schulz runs one
+    block per head. Parameters without the alternate keep their standard
+    matricization under either setting.
+    """
     routes: list[Route] = []
     for path, variable in nnx.to_flat_state(parameters):
         metadata = variable.get_metadata()
@@ -49,6 +56,16 @@ def classify_parameters(parameters) -> list[Route]:
         if role in MUON_ROLES:
             original_in = tuple(metadata.get("matrix_in_axes", ()))
             original_out = tuple(metadata.get("matrix_out_axes", ()))
+            if muon_per_head:
+                head_in = metadata.get("matrix_head_in_axes")
+                head_out = metadata.get("matrix_head_out_axes")
+                if (head_in is None) != (head_out is None):
+                    raise ValueError(
+                        f"Muon parameter {path} declares only one per-head axis group"
+                    )
+                if head_in is not None:
+                    original_in = tuple(head_in)
+                    original_out = tuple(head_out)
             if not original_in or not original_out:
                 raise ValueError(f"Muon parameter {path} does not declare both matrix axis groups")
             reduction = tuple(_actual_axis(axis, scan_axis) for axis in original_in)
@@ -169,7 +186,7 @@ def build_learning_rate_schedule(config: OptimizerConfig):
 def build_optimizer(model: nnx.Module, config: OptimizerConfig):
     """Builds an Optax transform and its audited route table."""
     parameters = nnx.state(model, nnx.Param)
-    routes = classify_parameters(parameters)
+    routes = classify_parameters(parameters, muon_per_head=config.muon_per_head)
     clipping = optax.clip_by_global_norm(config.gradient_clip_norm)
     learning_rate = build_learning_rate_schedule(config)
     if config.name == "adamw":
