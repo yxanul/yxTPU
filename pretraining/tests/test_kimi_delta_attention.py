@@ -149,6 +149,11 @@ def test_inverse_solve_handles_correlated_key_growth():
       unit_diagonal=True,
   )
   original_base = kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE
+  original_passes = kda_fused_pallas._SOLVE_INVERSE_PASSES
+  # These fp32-floor tolerances certify the six-pass rollback path; the
+  # production three-pass emulation is qualified separately against its
+  # EXP-039 envelope in test_kda_solve_precision.py.
+  kda_fused_pallas._SOLVE_INVERSE_PASSES = 6
   try:
     for base in (2, 4, 16):
       kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE = base
@@ -164,6 +169,7 @@ def test_inverse_solve_handles_correlated_key_growth():
       np.testing.assert_allclose(actual_t, expected_t, rtol=2e-5, atol=2e-5)
   finally:
     kda_fused_pallas._SOLVE_INVERSE_BASE_BLOCK_SIZE = original_base
+    kda_fused_pallas._SOLVE_INVERSE_PASSES = original_passes
 
 
 def test_inverse_solve_matches_xla_on_batched_streams():
@@ -183,8 +189,13 @@ def test_inverse_solve_matches_xla_on_batched_streams():
           jnp.swapaxes(a, -1, -2), b, lower=False, unit_diagonal=True
       )
   )(matrix, rhs)
-  actual = _solve_unit_lower_triangular_inverse(system, rhs)
-  actual_t = _solve_transposed_unit_lower_triangular_inverse(system, rhs)
+  original_passes = kda_fused_pallas._SOLVE_INVERSE_PASSES
+  kda_fused_pallas._SOLVE_INVERSE_PASSES = 6
+  try:
+    actual = _solve_unit_lower_triangular_inverse(system, rhs)
+    actual_t = _solve_transposed_unit_lower_triangular_inverse(system, rhs)
+  finally:
+    kda_fused_pallas._SOLVE_INVERSE_PASSES = original_passes
   np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
   np.testing.assert_allclose(actual_t, expected_t, rtol=2e-5, atol=2e-5)
 

@@ -26,10 +26,12 @@ state after each chunk for the custom backward. The XLA graph therefore never
 materializes a convolved, activated, split, or head-transposed QKV copy.
 
 This module deliberately fixes the validated precision and solver policy:
-one-pass BF16-operand matmuls for ordinary KDA work and a full-pass FP32
-divide-and-conquer explicit inverse for the WY solve and its transpose.
-Recursive doubling, stage exits, and unsafe precision controls live under
-``pretraining/benchmarks/kda_fused_experimental.py``.
+one-pass BF16-operand matmuls for ordinary KDA work and a divide-and-conquer
+explicit inverse for the WY solve and its transpose at three emulated fp32
+passes (``_SOLVE_INVERSE_PASSES``; qualified by EXP-039's direct real-text
+solve-error measurements, worst case 2.3e-5 — set to 6 for the full fp32
+decomposition). Recursive doubling, stage exits, and unsafe precision
+controls live under ``pretraining/benchmarks/kda_fused_experimental.py``.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ import math
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
@@ -97,7 +100,19 @@ _SOLVE_INVERSE_BASE_BLOCK_SIZE = 2
 # rescales both operands around a shared per-channel anchor, so the block size
 # is bounded by how much channel decay may accumulate across it before the FP32
 # exponent range runs out, not by correctness.
-_PAIRWISE_ROW_BLOCK_SIZE = 8
+#
+# The safe-gate parameterization (kimi_delta_attention.py: log decay bounded to
+# [gate_lower_bound, 0), gate_lower_bound = -5) exists precisely to license
+# this tiling. Kimi K3 (§2.1.1, Eq. 5) fixes the same g_min = -5 and states the
+# resulting budget: the cumulative log-decay over a 16-token tile lies in
+# (-80, 0), so the one-sided reciprocal rescaling factor stays below
+# e^80 ~ 5.5e34, inside the shared fp32/bf16 exponent range (max ~3.4e38) —
+# which is why K3 runs 16-token tiles as dense tensor-core matmuls in BF16 at
+# production scale. 16 rows with last-row anchoring is exactly that budget;
+# 32 rows would need midpoint anchoring (e^80 per side) and 32 with last-row
+# anchoring overflows (e^160). The import-time assert below enforces the
+# envelope so neither knob can silently leave it.
+_PAIRWISE_ROW_BLOCK_SIZE = 16
 
 # The anchor cancels exactly between the two operands, so any row may serve as
 # it. Anchoring on the last row keeps the right operand at or below one and
@@ -105,6 +120,23 @@ _PAIRWISE_ROW_BLOCK_SIZE = 8
 # evenly and therefore tolerates twice the row block at equal worst-case
 # exponent.
 _PAIRWISE_ANCHOR_MIDPOINT = False
+
+# |log decay| per token is bounded by the safe gate's lower bound; the config
+# validator rejects models that exceed it (config.py enforces
+# gate_lower_bound >= -5 for the fused kernel). Changing either constant above
+# or that bound requires revisiting this budget together — the gate bound is a
+# kernel compute parameter, not only a stability knob.
+_PAIRWISE_GATE_LOG_BOUND = 5.0
+_PAIRWISE_MAX_SAFE_EXPONENT = 85.0
+_PAIRWISE_WORST_EXPONENT = _PAIRWISE_GATE_LOG_BOUND * (
+    _PAIRWISE_ROW_BLOCK_SIZE / 2 if _PAIRWISE_ANCHOR_MIDPOINT else _PAIRWISE_ROW_BLOCK_SIZE
+)
+assert _PAIRWISE_WORST_EXPONENT <= _PAIRWISE_MAX_SAFE_EXPONENT, (
+    "pairwise tiling leaves the fp32/bf16 exponent envelope: "
+    f"worst one-sided exponent {_PAIRWISE_WORST_EXPONENT} > "
+    f"{_PAIRWISE_MAX_SAFE_EXPONENT}; shrink _PAIRWISE_ROW_BLOCK_SIZE or enable "
+    "midpoint anchoring"
+)
 
 # MXU precision for the in-kernel matmuls. FP32 operands on TPU are evaluated
 # by decomposing into BF16 passes: HIGHEST is six passes, HIGH is three (which
@@ -152,7 +184,32 @@ _SOLVE_MATMUL_PRECISION = lax.Precision.HIGHEST
 # log2(chunk) stages. Measured on the 272.9M hybrid, dropping only these
 # applications to one BF16 pass still reaches NaN at step two. The whole solve
 # needs the full passes; keep this at ``highest``.
+#
+# Both constants above now guard only the non-production doubling/substitution
+# control paths. The production inverse runs at the pass count below.
 _SOLVE_APPLY_MATMUL_PRECISION = lax.Precision.HIGHEST
+
+# Pass count for the production inverse's formation and applies. EXP-039
+# (OPEN-002 run at ckpt 95500) measured the decisive quantities directly with
+# TPU arithmetic on real-text and random-token systems at trained weights:
+# every layer benign (kappa_2 worst 10.4, doubling growth worst 4.3e5 — the
+# 1e12..1e17 catastrophe class never appears), three-pass solve error
+# worst-case 2.3e-5 forward / 1.0e-5 transposed on the kernel's exact
+# right-hand sides — two orders inside the few-times-1e-4 equivalence
+# envelope — while one pass sits at ~7e-3, marginal. Three passes therefore
+# halve the solve's dominant MXU cost at a directly-qualified accuracy.
+#
+# Mosaic still rejects ``lax.Precision.HIGH`` inside Pallas kernels
+# (NotImplementedError in the dot lowering, reconfirmed 2026-07-28 on the
+# current pin), so three passes are emulated: each fp32 operand splits into a
+# bf16 high part plus a bf16 residual, and the three significant cross
+# products accumulate through one-pass matmuls in fp32. The dropped low*low
+# term is bounded at ~2^-16 relative — below the three-pass target. Set to 6
+# to restore the full fp32 decomposition (bit-identical rollback). EXP-039's
+# qualification is arithmetic-level (bf16 split products with fp32
+# accumulation), so it carries to any TPU generation with the same MXU
+# numerics; the on-device gate for this module reruns on v6e.
+_SOLVE_INVERSE_PASSES = 3
 
 # Coupling between diagonal blocks in the substitution solve. These matmuls do
 # not form powers, but the real-text/correlated-key qualification sweep still
@@ -186,6 +243,33 @@ def _matmul(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Array:
   )
 
 
+def _matmul_tn(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Array:
+  """``_matmul(_transpose(left), right)`` without materializing the transpose.
+
+  Contracts the second-to-last axis of both operands so the MXU consumes the
+  transposed left operand directly; the ``[rows, chunk]`` relayout the
+  explicit transpose would spend VPU work on never exists.
+  """
+  if precision is None:
+    precision = _CHUNK_MATMUL_PRECISION
+  if left.ndim == 2:
+    return lax.dot_general(
+        left,
+        right,
+        (((0,), (0,)), ((), ())),
+        precision=precision,
+        preferred_element_type=jnp.float32,
+    )
+  batch_axes = tuple(range(left.ndim - 2))
+  return lax.dot_general(
+      left,
+      right,
+      (((left.ndim - 2,), (right.ndim - 2,)), (batch_axes, batch_axes)),
+      precision=precision,
+      preferred_element_type=jnp.float32,
+  )
+
+
 def _state_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Matmul for terms that read or write the cross-chunk recurrent state."""
   return _matmul(left, right, precision=_STATE_MATMUL_PRECISION)
@@ -204,6 +288,71 @@ def _solve_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
 def _solve_apply_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Applies one power of the series to the running solution."""
   return _matmul(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
+
+
+def _split_bf16(values: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Splits an fp32 array into a bf16 high part and a bf16 residual."""
+  values = values.astype(jnp.float32)
+  high = values.astype(jnp.bfloat16)
+  low = (values - high.astype(jnp.float32)).astype(jnp.bfloat16)
+  return high, low
+
+
+def _bf16x3_matmul_split(left_high, left_low, right_high, right_low) -> jax.Array:
+  """Three-pass fp32 matmul emulation over pre-split operands.
+
+  Exposing the split level lets callers hoist splits of reused operands
+  (bit-identical: the same split values feed the same matmul sequence) —
+  Pallas lowers the traced jaxpr through Mosaic without XLA's CSE pass, so
+  duplicate splits are otherwise real VPU work.
+  """
+  result = _matmul(left_high, right_high, precision=lax.Precision.DEFAULT)
+  result = result + _matmul(left_high, right_low, precision=lax.Precision.DEFAULT)
+  result = result + _matmul(left_low, right_high, precision=lax.Precision.DEFAULT)
+  return result
+
+
+def _bf16x3_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Three-pass fp32 matmul emulation: hi@hi + hi@lo + lo@hi in fp32."""
+  left_high, left_low = _split_bf16(left)
+  right_high, right_low = _split_bf16(right)
+  return _bf16x3_matmul_split(left_high, left_low, right_high, right_low)
+
+
+def _bf16x3_matmul_tn_split(left_high, left_low, right_high, right_low) -> jax.Array:
+  """Three-pass ``_matmul_tn`` emulation over pre-split operands."""
+  result = _matmul_tn(left_high, right_high, precision=lax.Precision.DEFAULT)
+  result = result + _matmul_tn(left_high, right_low, precision=lax.Precision.DEFAULT)
+  result = result + _matmul_tn(left_low, right_high, precision=lax.Precision.DEFAULT)
+  return result
+
+
+def _bf16x3_matmul_tn(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Three-pass emulation of ``_matmul_tn`` (transposed-left contraction)."""
+  left_high, left_low = _split_bf16(left)
+  right_high, right_low = _split_bf16(right)
+  return _bf16x3_matmul_tn_split(left_high, left_low, right_high, right_low)
+
+
+def _solve_form_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Formation matmuls of the production inverse (see _SOLVE_INVERSE_PASSES)."""
+  if _SOLVE_INVERSE_PASSES == 3:
+    return _bf16x3_matmul(left, right)
+  return _matmul(left, right, precision=_SOLVE_MATMUL_PRECISION)
+
+
+def _solve_inverse_apply_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Dense apply of the already-formed inverse to a right-hand side."""
+  if _SOLVE_INVERSE_PASSES == 3:
+    return _bf16x3_matmul(left, right)
+  return _matmul(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
+
+
+def _solve_inverse_apply_matmul_tn(left: jax.Array, right: jax.Array) -> jax.Array:
+  """Transposed apply of the formed inverse through contraction dimensions."""
+  if _SOLVE_INVERSE_PASSES == 3:
+    return _bf16x3_matmul_tn(left, right)
+  return _matmul_tn(left, right, precision=_SOLVE_APPLY_MATMUL_PRECISION)
 
 
 def _solve_coupling_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
@@ -315,7 +464,7 @@ def _decayed_pairwise(
     *,
     include_diagonal: bool,
 ) -> jax.Array:
-  """Forms a causal channel-decayed dot matrix with eight-row MXU matmuls."""
+  """Forms a causal channel-decayed dot matrix with row-blocked MXU matmuls."""
   chunk_size = left.shape[-2]
   channel_dim = cumulative_log_decay.shape[-1]
   leading_shape = left.shape[:-2]
@@ -356,6 +505,74 @@ def _decayed_pairwise(
   else:
     causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
   return values * causal
+
+
+def _decayed_pairwise_pair(
+    left_system: jax.Array,
+    left_intra: jax.Array,
+    right: jax.Array,
+    cumulative_log_decay: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  """Forms the strictly-lower system matrix and the causal intra matrix in one
+  shared row-block pass.
+
+  The two `_decayed_pairwise` calls in every kernel share ``right``, the
+  cumulative decay, and therefore every per-block anchor and exponential; only
+  the left operand differs. Stacking both left blocks into one MXU matmul per
+  row block is bit-identical to two separate calls: each output row is an
+  independent dot product, so row stacking cannot change any accumulation, and
+  the shared exponentials are computed once from identical inputs. Columns at
+  or beyond a block's row range are exact zeros in both formulations —
+  previously as ``exp(-inf)`` operand rows the matmul then multiplied, here as
+  explicit zero padding — so the ~44% of exponentials that were guaranteed
+  zeros are simply never evaluated.
+  """
+  chunk_size = left_system.shape[-2]
+  leading_shape = left_system.shape[:-2]
+  row_block_size = _PAIRWISE_ROW_BLOCK_SIZE
+  if chunk_size % row_block_size:
+    raise ValueError(
+        f"chunk size {chunk_size} must be divisible by row block size {row_block_size}"
+    )
+
+  system_blocks = []
+  intra_blocks = []
+  for block_index in range(chunk_size // row_block_size):
+    row_start = block_index * row_block_size
+    row_end = row_start + row_block_size
+    decay_block = cumulative_log_decay[..., row_start:row_end, :]
+    anchor = decay_block[..., _pairwise_anchor_row(row_block_size), :]
+
+    right_exponent = anchor[..., None, :] - cumulative_log_decay[..., :row_end, :]
+    weighted_right = right[..., :row_end, :].astype(jnp.float32) * jnp.exp(right_exponent)
+    left_factor = jnp.exp(decay_block - anchor[..., None, :])
+    stacked_left = jnp.concatenate(
+        (
+            left_system[..., row_start:row_end, :].astype(jnp.float32) * left_factor,
+            left_intra[..., row_start:row_end, :].astype(jnp.float32) * left_factor,
+        ),
+        axis=-2,
+    )
+    values = _pairwise_matmul(stacked_left, _transpose(weighted_right))
+    if row_end < chunk_size:
+      values = jnp.concatenate(
+          (
+              values,
+              jnp.zeros(
+                  leading_shape + (2 * row_block_size, chunk_size - row_end),
+                  dtype=jnp.float32,
+              ),
+          ),
+          axis=-1,
+      )
+    system_blocks.append(values[..., :row_block_size, :])
+    intra_blocks.append(values[..., row_block_size:, :])
+
+  system = jnp.concatenate(system_blocks, axis=-2)
+  intra = jnp.concatenate(intra_blocks, axis=-2)
+  strict_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  full_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+  return system * strict_causal, intra * full_causal
 
 
 def _decayed_pairwise_backward(
@@ -411,7 +628,9 @@ def _decayed_pairwise_backward(
     cotangent_block = output_cotangent[..., row_start:row_end, :]
 
     weighted_left_cotangent = _pairwise_matmul(cotangent_block, weighted_right)
-    weighted_right_cotangent = _pairwise_matmul(_transpose(cotangent_block), weighted_left)
+    weighted_right_cotangent = _matmul_tn(
+        cotangent_block, weighted_left, precision=_PAIRWISE_MATMUL_PRECISION
+    )
     left_cotangent_blocks.append(weighted_left_cotangent * left_factor)
     right_cotangent = right_cotangent + weighted_right_cotangent * right_factor
 
@@ -447,6 +666,153 @@ def _decayed_pairwise_backward(
       jnp.concatenate(left_cotangent_blocks, axis=-2),
       right_cotangent,
       jnp.concatenate(decay_cotangent_from_left_blocks, axis=-2) + decay_cotangent_from_right,
+  )
+
+
+def _decayed_pairwise_backward_pair(
+    left_system: jax.Array,
+    left_intra: jax.Array,
+    right: jax.Array,
+    cumulative_log_decay: jax.Array,
+    system_cotangent: jax.Array,
+    intra_cotangent: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Blockwise VJP for both decayed pairwise matrices in shared block passes.
+
+  Bit-identical to one `_decayed_pairwise_backward` call per matrix: the
+  stacked cotangent matmul keeps every output row an independent dot product,
+  trimmed contractions drop only exactly-zero terms (columns the causal masks
+  zeroed and rows the old code weighted by ``exp(-inf)``), and every reduction
+  feeding an anchor or decay cotangent keeps its original 64-row operand shape
+  so the reduction tree is unchanged. Cotangents are returned per matrix so
+  callers keep their existing accumulation order.
+  """
+  chunk_size = left_system.shape[-2]
+  channel_dim = left_system.shape[-1]
+  leading_shape = left_system.shape[:-2]
+  row_block_size = _PAIRWISE_ROW_BLOCK_SIZE
+  strict_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  full_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+  system_cotangent = system_cotangent.astype(jnp.float32) * strict_causal
+  intra_cotangent = intra_cotangent.astype(jnp.float32) * full_causal
+
+  right_cotangent_system = jnp.zeros(
+      leading_shape + (chunk_size, channel_dim), dtype=jnp.float32
+  )
+  right_cotangent_intra = jnp.zeros_like(right_cotangent_system)
+  decay_from_right_system = jnp.zeros_like(right_cotangent_system)
+  decay_from_right_intra = jnp.zeros_like(right_cotangent_system)
+  left_cotangent_system_blocks = []
+  left_cotangent_intra_blocks = []
+  decay_from_left_system_blocks = []
+  decay_from_left_intra_blocks = []
+  anchor_row = _pairwise_anchor_row(row_block_size) % row_block_size
+
+  def _fold_anchor(left_decay_product, right_decay_product):
+    anchor_cotangent = -jnp.sum(left_decay_product, axis=-2) + jnp.sum(
+        right_decay_product,
+        axis=-2,
+    )
+    if anchor_row == row_block_size - 1:
+      return jnp.concatenate(
+          (
+              left_decay_product[..., :-1, :],
+              left_decay_product[..., -1:, :] + anchor_cotangent[..., None, :],
+          ),
+          axis=-2,
+      )
+    return jnp.concatenate(
+        (
+            left_decay_product[..., :anchor_row, :],
+            left_decay_product[..., anchor_row : anchor_row + 1, :]
+            + anchor_cotangent[..., None, :],
+            left_decay_product[..., anchor_row + 1 :, :],
+        ),
+        axis=-2,
+    )
+
+  for block_index in range(chunk_size // row_block_size):
+    row_start = block_index * row_block_size
+    row_end = row_start + row_block_size
+    decay_block = cumulative_log_decay[..., row_start:row_end, :]
+    anchor = decay_block[..., _pairwise_anchor_row(row_block_size), :]
+
+    right_exponent = anchor[..., None, :] - cumulative_log_decay[..., :row_end, :]
+    right_factor = jnp.exp(right_exponent)
+    weighted_right = right[..., :row_end, :].astype(jnp.float32) * right_factor
+    left_factor = jnp.exp(decay_block - anchor[..., None, :])
+    weighted_left_system = (
+        left_system[..., row_start:row_end, :].astype(jnp.float32) * left_factor
+    )
+    weighted_left_intra = (
+        left_intra[..., row_start:row_end, :].astype(jnp.float32) * left_factor
+    )
+    cotangent_system_block = system_cotangent[..., row_start:row_end, :row_end]
+    cotangent_intra_block = intra_cotangent[..., row_start:row_end, :row_end]
+
+    def _pad_rows(values):
+      if row_end == chunk_size:
+        return values
+      return jnp.concatenate(
+          (
+              values,
+              jnp.zeros(
+                  leading_shape + (chunk_size - row_end, channel_dim),
+                  dtype=jnp.float32,
+              ),
+          ),
+          axis=-2,
+      )
+
+    stacked_left_cotangent = _pairwise_matmul(
+        jnp.concatenate((cotangent_system_block, cotangent_intra_block), axis=-2),
+        weighted_right,
+    )
+    weighted_left_system_cotangent = stacked_left_cotangent[..., :row_block_size, :]
+    weighted_left_intra_cotangent = stacked_left_cotangent[..., row_block_size:, :]
+    weighted_right_system_cotangent = _matmul_tn(
+        cotangent_system_block,
+        weighted_left_system,
+        precision=_PAIRWISE_MATMUL_PRECISION,
+    )
+    weighted_right_intra_cotangent = _matmul_tn(
+        cotangent_intra_block,
+        weighted_left_intra,
+        precision=_PAIRWISE_MATMUL_PRECISION,
+    )
+    left_cotangent_system_blocks.append(weighted_left_system_cotangent * left_factor)
+    left_cotangent_intra_blocks.append(weighted_left_intra_cotangent * left_factor)
+    right_cotangent_system = right_cotangent_system + _pad_rows(
+        weighted_right_system_cotangent * right_factor
+    )
+    right_cotangent_intra = right_cotangent_intra + _pad_rows(
+        weighted_right_intra_cotangent * right_factor
+    )
+
+    left_decay_product_system = weighted_left_system_cotangent * weighted_left_system
+    left_decay_product_intra = weighted_left_intra_cotangent * weighted_left_intra
+    right_decay_product_system = _pad_rows(
+        weighted_right_system_cotangent * weighted_right
+    )
+    right_decay_product_intra = _pad_rows(
+        weighted_right_intra_cotangent * weighted_right
+    )
+    decay_from_right_system = decay_from_right_system - right_decay_product_system
+    decay_from_right_intra = decay_from_right_intra - right_decay_product_intra
+    decay_from_left_system_blocks.append(
+        _fold_anchor(left_decay_product_system, right_decay_product_system)
+    )
+    decay_from_left_intra_blocks.append(
+        _fold_anchor(left_decay_product_intra, right_decay_product_intra)
+    )
+
+  return (
+      jnp.concatenate(left_cotangent_system_blocks, axis=-2),
+      jnp.concatenate(left_cotangent_intra_blocks, axis=-2),
+      right_cotangent_system,
+      right_cotangent_intra,
+      jnp.concatenate(decay_from_left_system_blocks, axis=-2) + decay_from_right_system,
+      jnp.concatenate(decay_from_left_intra_blocks, axis=-2) + decay_from_right_intra,
   )
 
 
@@ -676,21 +1042,60 @@ def _unit_lower_inverse(system: jax.Array) -> jax.Array:
   base_lower = lower * _blockdiag_strictly_lower_mask(rows, base)
 
   inverse = identity - base_lower * _block_row_mask(rows, base, 1)
+  if _SOLVE_INVERSE_PASSES == 3:
+    # Two bit-identical split reductions. (1) ``lower`` is fixed across every
+    # stage, and its masks are 0/1, so masking commutes with the bf16 split
+    # exactly: hi(x*m) == hi(x)*m and lo(x*m) == lo(x)*m. Split once, mask
+    # the halves. (2) Within a stage, ``inverse`` feeds both the inner-left
+    # and outer-right operands (and ``inner`` the outer-left): split each
+    # value once and reuse the halves.
+    lower_high, lower_low = _split_bf16(lower)
+    blockdiag_mask = _blockdiag_strictly_lower_mask(rows, base).astype(jnp.bfloat16)
+    for row in range(2, base):
+      row_mask = blockdiag_mask * _block_row_mask(rows, base, row).astype(
+          jnp.bfloat16
+      )
+      inverse_high, inverse_low = _split_bf16(inverse)
+      inverse = inverse - _bf16x3_matmul_split(
+          lower_high * row_mask, lower_low * row_mask, inverse_high, inverse_low
+      )
+
+    half = base
+    while half < rows:
+      coupling_mask = _half_coupling_mask(rows, half).astype(jnp.bfloat16)
+      inverse_high, inverse_low = _split_bf16(inverse)
+      inner = _bf16x3_matmul_split(
+          inverse_high,
+          inverse_low,
+          lower_high * coupling_mask,
+          lower_low * coupling_mask,
+      )
+      inner_high, inner_low = _split_bf16(inner)
+      inverse = inverse - _bf16x3_matmul_split(
+          inner_high, inner_low, inverse_high, inverse_low
+      )
+      half *= 2
+    return inverse
+
   for row in range(2, base):
     row_update = base_lower * _block_row_mask(rows, base, row)
-    inverse = inverse - _solve_matmul(row_update, inverse)
+    inverse = inverse - _solve_form_matmul(row_update, inverse)
 
   half = base
   while half < rows:
     coupling = lower * _half_coupling_mask(rows, half)
-    inverse = inverse - _solve_matmul(_solve_matmul(inverse, coupling), inverse)
+    inverse = inverse - _solve_form_matmul(
+        _solve_form_matmul(inverse, coupling), inverse
+    )
     half *= 2
   return inverse
 
 
 def _solve_unit_lower_triangular_inverse(system: jax.Array, rhs: jax.Array) -> jax.Array:
   """Solves ``(I + tril(system, -1)) X = rhs`` through the explicit inverse."""
-  return _solve_apply_matmul(_unit_lower_inverse(system), rhs.astype(jnp.float32))
+  return _solve_inverse_apply_matmul(
+      _unit_lower_inverse(system), rhs.astype(jnp.float32)
+  )
 
 
 def _solve_transposed_unit_lower_triangular_inverse(
@@ -698,8 +1103,8 @@ def _solve_transposed_unit_lower_triangular_inverse(
     rhs: jax.Array,
 ) -> jax.Array:
   """Solves ``(I + tril(system, -1)).T X = rhs`` through the explicit inverse."""
-  return _solve_apply_matmul(
-      _transpose(_unit_lower_inverse(system)),
+  return _solve_inverse_apply_matmul_tn(
+      _unit_lower_inverse(system),
       rhs.astype(jnp.float32),
   )
 
@@ -790,18 +1195,7 @@ def _kda_fused_forward_kernel(
     return
 
   key_beta = key * beta[..., None]
-  system = _decayed_pairwise(
-      key_beta,
-      key,
-      cumulative_decay,
-      include_diagonal=False,
-  )
-  intra = _decayed_pairwise(
-      query,
-      key,
-      cumulative_decay,
-      include_diagonal=True,
-  )
+  system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
   if profile_stage == "pairwise":
     diagnostic = jnp.concatenate((system, intra), axis=-1)
     output_ref[0] = jnp.swapaxes(diagnostic, 0, 1).astype(output_ref.dtype)
@@ -830,8 +1224,15 @@ def _kda_fused_forward_kernel(
 
   state = state_scratch_ref[...].astype(jnp.float32)
   query_with_decay = query * jnp.exp(cumulative_decay)
-  inter_output = _state_matmul(query_with_decay, state)
-  corrected_value = u - _state_matmul(w, state)
+  # One [2C, K] x [K, V] MXU matmul serves both state reads. Output rows are
+  # independent dot products, so splitting the stacked result is bit-identical
+  # to the two separate half-height matmuls it replaces.
+  stacked_state_reads = _state_matmul(
+      jnp.concatenate((query_with_decay, w), axis=-2),
+      state,
+  )
+  inter_output = stacked_state_reads[..., :chunk_size, :]
+  corrected_value = u - stacked_state_reads[..., chunk_size:, :]
   output = inter_output + _matmul(intra, corrected_value)
 
   final_decay = cumulative_decay[..., -1, :]
@@ -924,25 +1325,24 @@ def _kda_fused_backward_kernel(
   cumulative_decay_exp = jnp.exp(cumulative_decay)
   key_beta = key * beta[..., None]
   value_beta = value * beta[..., None]
-  system = _decayed_pairwise(
-      key_beta,
-      key,
-      cumulative_decay,
-      include_diagonal=False,
-  )
-  intra = _decayed_pairwise(
-      query,
-      key,
-      cumulative_decay,
-      include_diagonal=True,
-  )
+  system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
   w_input = key_beta * cumulative_decay_exp
   combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
   if _SOLVE_METHOD == "inverse":
     # One formation serves both the forward recompute here and the transposed
     # solve below; the transpose of the inverse is free inside the matmul.
     system_inverse = _unit_lower_inverse(system)
-    solved = _solve_apply_matmul(system_inverse, combined_rhs)
+    if _SOLVE_INVERSE_PASSES == 3:
+      # The formed inverse serves both this apply and the transposed apply
+      # below: split it once and reuse the halves (bit-identical - the same
+      # split values feed the same matmul sequence).
+      system_inverse_high, system_inverse_low = _split_bf16(system_inverse)
+      rhs_high, rhs_low = _split_bf16(combined_rhs)
+      solved = _bf16x3_matmul_split(
+          system_inverse_high, system_inverse_low, rhs_high, rhs_low
+      )
+    else:
+      solved = _solve_inverse_apply_matmul(system_inverse, combined_rhs)
   elif _SOLVE_METHOD == "substitution":
     system_inverse = None
     solved = _solve_unit_lower_triangular_substitution(system, combined_rhs)
@@ -980,6 +1380,12 @@ def _kda_fused_backward_kernel(
       _transpose(w), corrected_value_cotangent
   )
   state_cotangent_scratch_ref[...] = state_cotangent
+  # The wrapper only ever consumes the chunk-0 slot — the initial-state
+  # cotangent. The export is a single revisited block with a constant index
+  # map: the unconditional per-step write means the last reverse iteration
+  # (chunk 0) is what Mosaic flushes, so the surviving value is bit-identical
+  # while a full [B, NC, H, K, V] fp32 history of HBM writes becomes one
+  # [B, 1, H, K, V] block.
   state_before_cotangent_ref[0, 0] = state_cotangent
 
   query_cotangent = query_with_decay_cotangent * cumulative_decay_exp
@@ -1020,10 +1426,22 @@ def _kda_fused_backward_kernel(
 
   solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
   if _SOLVE_METHOD == "inverse":
-    combined_rhs_cotangent = _solve_apply_matmul(
-        _transpose(system_inverse),
-        solved_cotangent,
-    )
+    # The MXU consumes the transposed inverse directly through the contraction
+    # dimension numbers; materializing the [64, 64] transpose first is a
+    # relayout the kernel never needed.
+    if _SOLVE_INVERSE_PASSES == 3:
+      cotangent_high, cotangent_low = _split_bf16(solved_cotangent)
+      combined_rhs_cotangent = _bf16x3_matmul_tn_split(
+          system_inverse_high,
+          system_inverse_low,
+          cotangent_high,
+          cotangent_low,
+      )
+    else:
+      combined_rhs_cotangent = _solve_inverse_apply_matmul_tn(
+          system_inverse,
+          solved_cotangent,
+      )
   elif _SOLVE_METHOD == "substitution":
     combined_rhs_cotangent = _solve_transposed_unit_lower_triangular_substitution(
         system,
@@ -1055,25 +1473,18 @@ def _kda_fused_backward_kernel(
 
   (
       key_beta_system_cotangent,
-      key_system_cotangent,
-      system_decay_cotangent,
-  ) = _decayed_pairwise_backward(
-      key_beta,
-      key,
-      cumulative_decay,
-      system_cotangent,
-      include_diagonal=False,
-  )
-  (
       query_pairwise_cotangent,
+      key_system_cotangent,
       key_intra_cotangent,
+      system_decay_cotangent,
       intra_decay_cotangent,
-  ) = _decayed_pairwise_backward(
+  ) = _decayed_pairwise_backward_pair(
+      key_beta,
       query,
       key,
       cumulative_decay,
+      system_cotangent,
       intra_cotangent,
-      include_diagonal=True,
   )
   key_beta_cotangent = key_beta_cotangent + key_beta_system_cotangent
   key_cotangent = key_cotangent + key_system_cotangent + key_intra_cotangent
@@ -1412,13 +1823,7 @@ def _pallas_kda_fused_backward(
   )
   state_before_cotangent_spec = pl.BlockSpec(
       block_shape=(1, 1, heads, key_dim, value_dim),
-      index_map=lambda batch_index, reverse_chunk_index: (
-          batch_index,
-          num_chunks - 1 - reverse_chunk_index,
-          0,
-          0,
-          0,
-      ),
+      index_map=lambda batch_index, reverse_chunk_index: (batch_index, 0, 0, 0, 0),
   )
   conv_weight_cotangent_spec = pl.BlockSpec(
       block_shape=(1, conv_width, 3, heads, key_dim),
@@ -1439,7 +1844,7 @@ def _pallas_kda_fused_backward(
       beta.dtype,
   )
   state_before_cotangent_shape = jax.ShapeDtypeStruct(
-      state_history.shape,
+      (batch, 1, heads, key_dim, value_dim),
       jnp.float32,
   )
   (
@@ -1552,6 +1957,12 @@ def _pallas_kda_fused_fwd(qkv, conv_weight, log_decay, beta, initial_state):
       use_qk_norm=True,
       solve_method=_SOLVE_METHOD,
   )
+  # Under the cycle remat these two names are the whole consumer set of the
+  # forward pallas call, so a policy that saves both leaves the backward's
+  # recompute of this sequential walk dead (a zero-output shard_map husk in
+  # the jaxpr that XLA's HLO DCE then removes).
+  output = checkpoint_name(output, "kda_out")
+  state_history = checkpoint_name(state_history, "kda_state_history")
   return (output, final_state), (
       qkv,
       conv_weight,
