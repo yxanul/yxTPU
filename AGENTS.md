@@ -160,6 +160,20 @@ State is dynamic; verify it before relying on this section.
   Remaining copy tax (state-history stacks, qkv save copies, DMA queue
   pressure) needs kernel/layout work: bf16 state history and a flat
   [B,T,5632] mlpwi layout are the identified next levers.
+- Production-config test on v6e 2026-07-29 (kda_hybrid_128k +
+  block_attnres + muonclip, standard loss, synthetic, 100 steps): at the
+  EXACT v4 production shape (8x2048, default remat) the 16-chip slice runs
+  p10 245.2 ms / 1.068M tok/s / 20.1 GB - matching the whole 32-chip
+  v4-64's 1.098M with half the chips (1.95x per chip; ~14.7% MFU vs v4's
+  ~25.2% - the faster chip is hungrier). With the v6e recipe (PDB 16,
+  save_dot_except_mlp, dense_causal): p10 445.7 ms / 1.176M tok/s /
+  22.2 GB = +10% over shape-faithful, +7% absolute over the v4-64
+  production on half the chips, ~16.2% MFU - and PDB 16 x 16 chips is
+  exactly the 50B-run's 524,288 tokens/update, so the recipe is a
+  drop-in for a production campaign. AttnRes note: +13% step cost on v6e
+  (245.2 vs 216.9 without) vs the ~4% it settled at on v4 - the
+  bandwidth-bound depth reads cost relatively more here; the mixer_only
+  site ablation is worth revisiting before a v6e campaign.
 - bf16 state history 2026-07-29 (commit on `v6-kernels`; recipe-config
   re-profile prof273b first: at PDB 24 copies grew to 41.8% named-bucket /
   177.6 ms of the 419 ms step, KDA fwd+bwd 25%, fusions 20%, splash 7%):
