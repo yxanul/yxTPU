@@ -82,6 +82,26 @@ State is dynamic; verify it before relying on this section.
   tight-tolerance inverse tests in test_kimi_delta_attention.py now pin the
   six-pass rollback. The 200-step production-config overlay gate has NOT run
   yet on this port.
+- v6-only Mosaic pass 2026-07-29 (branch `v6-kernels`): every remaining
+  materialized matmul-operand transpose in the folded kernel's production
+  paths (10 sites: the pairwise right operand, the K-side state write, and
+  eight backward matmuls) moved into dot_general contraction dimension
+  numbers (`_matmul_nt`/`_matmul_tn`) — the relayouts v4's Mosaic could not
+  always lower and v5+ never needs. Verified BITWISE-identical on v6e across
+  all 7 fwd/bwd outputs x 3 seeds; core fwd+bwd 3.376 -> 3.330 ms (-1.4%,
+  4.84M -> 4.91M tok/s single-chip). Only the non-production
+  substitution/doubling control paths still transpose explicitly.
+- First real training measurement 2026-07-29 (worker 0 alone via the
+  single-host env combo, 4 chips, kda_hybrid_273m + muonclip + synthetic
+  8x2048, 200 steps, v6-kernels build, hardware profile v6e-8 overridden to
+  4 devices): mean 350.8k tok/s global = 87.7k tok/s/chip (1.82x the v4-64
+  per-chip 48.1k), steady step 186.3 ms at 65,536 tokens/step, compiled peak
+  18.9 GB, data_wait ~0.5 ms (synthetic). 6N-convention model FLOPs:
+  ~143.6 TFLOP/s/chip = ~15.6% MFU against v6e's 918 TFLOP/s bf16 peak
+  (v4-64 measured ~28.7% MFU on the same convention - the faster chip is
+  proportionally hungrier, and 273M at 8x2048 underfeeds it). Full-slice
+  16-chip multi-host run not yet attempted; configs/hardware/v6e-16.yml
+  hosts corrected 2 -> 4 to match the provisioned topology.
 
 ## Current training TPU
 
