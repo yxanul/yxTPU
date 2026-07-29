@@ -120,6 +120,17 @@ class SFTIterator:
         }
 
 
+# Floor on SuperBPE tokens per byte, used to drop records that cannot
+# possibly fit a row before paying to tokenize them (on the 8192 mix, 42%
+# of drawn records were tokenized only to be discarded, which dominated
+# refill cost). Corpus means measure 0.238 IF / 0.288 Knowledge / 0.309
+# Code / 0.319 Math, but highly repetitive spans compress further (~0.19
+# observed), so the floor sits well below all of them: dropping a record
+# that would have fit is a silent data-quality loss, while keeping an
+# oversize one merely costs the exact token check that follows.
+_MIN_TOKENS_PER_BYTE = 0.15
+
+
 class StreamingSFTIterator:
     """Rank-strided on-the-fly render+pack for single-epoch full-dataset SFT.
 
@@ -188,6 +199,10 @@ class StreamingSFTIterator:
         self._B, self._T = process_batch, sequence_length
         self._need = self._B * self._T + 1
         self._max_render = max_render_tokens
+        self._max_bytes = (
+            None if max_render_tokens is None
+            else int(max_render_tokens / _MIN_TOKENS_PER_BYTE)
+        )
         self._pack_whole = pack_whole
         self._pool: list[tuple[np.ndarray, np.ndarray]] = []
         self._exhausted = False
@@ -203,6 +218,7 @@ class StreamingSFTIterator:
         self.rows_consumed = 0
         self.rows_dropped = 0
         self.rows_dropped_oversize = 0
+        self.rows_dropped_prefilter = 0
         self.pad_tokens = 0
         self.records_drawn = 0
         self.tokens_rendered = 0
@@ -225,6 +241,7 @@ class StreamingSFTIterator:
             "rows_consumed": self.rows_consumed,
             "rows_dropped": self.rows_dropped,
             "rows_dropped_oversize": self.rows_dropped_oversize,
+            "rows_dropped_prefilter": self.rows_dropped_prefilter,
             "pad_tokens": self.pad_tokens,
             "records_drawn": self.records_drawn,
             "tokens_rendered": self.tokens_rendered,
@@ -259,6 +276,13 @@ class StreamingSFTIterator:
                    and "</think>" not in m["content"] for m in msgs):
                 self.rows_dropped += 1
                 continue
+            if self._max_bytes is not None:
+                size = sum(
+                    len(m["content"]) + len(m.get("reasoning", "")) for m in msgs
+                )
+                if size > self._max_bytes:
+                    self.rows_dropped_prefilter += 1
+                    continue
             batch.append(msgs)
         if not batch:
             return False
