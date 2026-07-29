@@ -1,0 +1,81 @@
+  {
+    "window": 512,
+    "batch": 4,
+    "device_ms": 13.9,
+    "host_roundtrip_ms": 4.9,
+    "total_ms_per_token": 18.8,
+    "logits_transfer_mb": 2.1,
+    "forward_tflop_per_token": 1.38,
+    "achieved_tflops": 99.2
+  },
+  {
+    "window": 512,
+    "batch": 16,
+    "device_ms": 18.5,
+    "host_roundtrip_ms": 10.7,
+    "total_ms_per_token": 29.2,
+    "logits_transfer_mb": 8.2,
+    "forward_tflop_per_token": 5.53,
+    "achieved_tflops": 299.3
+  },
+  {
+    "window": 1024,
+    "batch": 4,
+    "device_ms": 15.7,
+    "host_roundtrip_ms": 7.1,
+    "total_ms_per_token": 22.7,
+    "logits_transfer_mb": 2.1,
+    "forward_tflop_per_token": 2.76,
+    "achieved_tflops": 176.4
+  },
+  {
+    "window": 1024,
+    "batch": 16,
+    "device_ms": 26.4,
+    "host_roundtrip_ms": 11.5,
+    "total_ms_per_token": 37.9,
+    "logits_transfer_mb": 8.2,
+    "forward_tflop_per_token": 11.05,
+    "achieved_tflops": 418.4
+  },
+  {
+    "window": 2048,
+    "batch": 4,
+    "device_ms": 22.2,
+    "host_roundtrip_ms": 8.3,
+    "total_ms_per_token": 30.5,
+    "logits_transfer_mb": 2.1,
+    "forward_tflop_per_token": 5.53,
+    "achieved_tflops": 248.4
+  },
+  {
+    "window": 2048,
+    "batch": 16,
+    "device_ms": 46.4,
+    "host_roundtrip_ms": 11.2,
+    "total_ms_per_token": 57.5,
+    "logits_transfer_mb": 8.2,
+    "forward_tflop_per_token": 22.1,
+    "achieved_tflops": 476.6
+  },
+  {
+    "window": 4096,
+    "batch": 4,
+    "device_ms": 34.0,
+    "host_roundtrip_ms": 6.7,
+    "total_ms_per_token": 40.7,
+    "logits_transfer_mb": 2.1,
+    "forward_tflop_per_token": 11.05,
+    "achieved_tflops": 325.4
+  },
+  {
+    "window": 4096,
+    "batch": 16,
+    "device_ms": 87.5,
+    "host_roundtrip_ms": 11.5,
+    "total_ms_per_token": 98.9,
+    "logits_transfer_mb": 8.2,
+    "forward_tflop_per_token": 44.2,
+    "achieved_tflops": 505.3
+  }
+]
