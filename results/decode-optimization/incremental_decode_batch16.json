@@ -1,0 +1,27 @@
+  "recompute_ms_per_token": 424.2492613751286,
+  "cached_ms_per_token": 2.218689861279117,
+  "speedup": 191.21611757424304,
+  "greedy_agreement_prefix": [
+    24,
+    24,
+    24,
+    5,
+    24,
+    24,
+    24,
+    5,
+    24,
+    24,
+    24,
+    5,
+    24,
+    24,
+    24,
+    5
+  ],
+  "logit_max_relative_difference": 0.011966830119490623,
+  "mean_top1_top2_gap": 9.36545467376709,
+  "compare_tokens": 24,
+  "batch": 16,
+  "window": 4096
+}
