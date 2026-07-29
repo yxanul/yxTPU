@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from yxtpu_pretrain.sft.tokens import (
@@ -133,26 +135,51 @@ class StreamingSFTIterator:
         from datasets import load_dataset
 
         self._tok = tokenizer
+        self._file_counts = None
         if mixture:
             from datasets import interleave_datasets
+            from huggingface_hub import list_repo_files
 
+            # Every process streaming and JSON-parsing the full interleaved
+            # stream only to discard 7/8 of it before tokenizing is the
+            # dominant refill cost (~150 MB parsed per 512-row refill).
+            # Assigning each process a disjoint slice of every config's
+            # shard files makes the download itself sharded; striding is
+            # then already done and the record filter below must not run.
             seed = shuffle_seed if shuffle_seed is not None else 0
-            streams = [
-                load_dataset(dataset, name, split=split, streaming=True).shuffle(
-                    seed=seed, buffer_size=10_000
+            repo_files = list_repo_files(dataset, repo_type="dataset")
+            streams = []
+            self._file_counts = {}
+            for name, _ in mixture:
+                prefix = f"data/{split}/{name}/"
+                shard_files = sorted(f for f in repo_files if f.startswith(prefix))
+                if len(shard_files) < process_count:
+                    raise ValueError(
+                        f"{prefix} has {len(shard_files)} files, fewer than "
+                        f"{process_count} processes"
+                    )
+                mine = shard_files[process_index::process_count]
+                self._file_counts[name] = len(mine)
+                streams.append(
+                    load_dataset(
+                        "json",
+                        data_files=[f"hf://datasets/{dataset}/{f}" for f in mine],
+                        split="train",
+                        streaming=True,
+                    ).shuffle(seed=seed + process_index, buffer_size=10_000)
                 )
-                for name, _ in mixture
-            ]
             stream = interleave_datasets(
                 streams,
                 probabilities=[probability for _, probability in mixture],
-                seed=seed,
+                seed=seed + process_index,
                 stopping_strategy="all_exhausted",
             )
+            self._stride = False
         else:
             stream = load_dataset(dataset, split=split, streaming=True)
             if shuffle_seed is not None:
                 stream = stream.shuffle(seed=shuffle_seed, buffer_size=10_000)
+            self._stride = True
         self._sources = set(sources) if sources else None
         self._iter = iter(stream)
         self._pi, self._pc = process_index, process_count
@@ -177,6 +204,11 @@ class StreamingSFTIterator:
         self.rows_dropped = 0
         self.rows_dropped_oversize = 0
         self.pad_tokens = 0
+        self.records_drawn = 0
+        self.tokens_rendered = 0
+        self.refills = 0
+        self.refill_ms_total = 0.0
+        self.refill_ms_last = 0.0
         self.metadata = {
             "streaming": True,
             "dataset": dataset,
@@ -184,19 +216,36 @@ class StreamingSFTIterator:
             "split": split,
             "max_render_tokens": max_render_tokens,
             "pack_whole": pack_whole,
+            "sharded_files": self._file_counts,
         }
-        self.stats = {}
+
+    @property
+    def stats(self) -> dict[str, float]:
+        return {
+            "rows_consumed": self.rows_consumed,
+            "rows_dropped": self.rows_dropped,
+            "rows_dropped_oversize": self.rows_dropped_oversize,
+            "pad_tokens": self.pad_tokens,
+            "records_drawn": self.records_drawn,
+            "tokens_rendered": self.tokens_rendered,
+            "refills": self.refills,
+            "refill_ms_last": round(self.refill_ms_last, 1),
+            "refill_ms_total": round(self.refill_ms_total, 1),
+            "pool_records": len(self._pool),
+        }
 
     def _refill(self) -> bool:
+        began = time.perf_counter()
         batch = []
         while len(batch) < self._buffer_rows:
             try:
                 record = next(self._iter)
             except StopIteration:
                 break
+            self.records_drawn += 1
             index = self._row_idx
             self._row_idx += 1
-            if index % self._pc != self._pi:
+            if self._stride and index % self._pc != self._pi:
                 continue
             if self._sources and record.get("source") not in self._sources:
                 self.rows_dropped += 1
@@ -242,11 +291,15 @@ class StreamingSFTIterator:
                 (np.asarray(ids, np.int32), np.asarray(mask, np.float32))
             )
             self.rows_consumed += 1
+            self.tokens_rendered += len(ids)
         if self._pack_whole:
             self._pool.extend(rendered)
         elif rendered:
             self._ids = np.concatenate([self._ids] + [r[0] for r in rendered])
             self._mask = np.concatenate([self._mask] + [r[1] for r in rendered])
+        self.refill_ms_last = (time.perf_counter() - began) * 1000
+        self.refill_ms_total += self.refill_ms_last
+        self.refills += 1
         return True
 
     def _assemble_row(self):
