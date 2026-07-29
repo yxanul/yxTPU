@@ -115,6 +115,28 @@ State is dynamic; verify it before relying on this section.
   content, not hostname). Multi-host launch pattern that avoids the
   zombie-launcher class: foreground gcloud ssh --worker=all whose remote
   command nohup-backgrounds the trainer and exits immediately.
+- v6e profile 2026-07-29 (yx-pretrain profile subcommand - `train` with
+  profile_steps set does NOT trace; steps 80-84, 273m @ 16/dev, xplane on
+  the process-0 worker, summarizer needs the venv-TF proto fallback commit):
+  per ~321 ms step - copies 112.3 ms (35%!), xla fusions 104.0 (32%), KDA
+  bwd 46.3 (14.4%), KDA fwd 24.9 (7.8%), splash 14.1 (4.4%), conv 9.2
+  (2.9%). The copy tax is scan-carry layout conversions + remat-saved
+  buffers (state histories f32[16,32,8,128,128] per KDA layer ride the
+  cycle carry). remat_save_kda_residuals=false A/B: p10 336.6 vs 322.7 ms
+  - REJECTED on v6e too (recompute exceeds the copy saving), but it frees
+  5 GB (33.5 -> 28.5), which is the lever that makes 16x4096 fit. The
+  copy category is the top remaining optimization target (layout
+  assignment in the cycle scan, not the KDA kernels).
+- Loss-head A/B on v6e 2026-07-29 (337M kda_hybrid_128k, 100 steps,
+  steady p10 over steps 21-100): standard @ PDB 8 216.9 ms / 1.207M tok/s
+  / 19.1 GB. tokamax_fused @ PDB 8 238.6 ms (+10%) / 18.6 GB - REJECTED
+  for now: tokamax has no autotuned config for this shape on "TPU v6
+  lite" (Autotuning cache miss -> default tiles); revisit only after
+  tuning and caching a config. chunked not rerun (its v4 numbers lose at
+  PDB<=12 and its memory edge is moot here because standard @ PDB 16
+  FITS: 33.54 GB, p10 375.9 ms, 1.394M tok/s = +15.5% over PDB 8 =
+  ~87.1k tok/s/chip, ~19.2% MFU. New recommended v6e-16 production shape
+  for 337M: PDB 16 x 2048, ga=1, standard loss.
 
 ## Current training TPU
 
