@@ -54,6 +54,13 @@ def main() -> int:
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--sources", default=None)
     parser.add_argument("--shuffle-seed", type=int, default=None)
+    parser.add_argument(
+        "--mixture", default=None,
+        help="interleave configs of --dataset by record probability, "
+             "e.g. 'IF:0.28,Math:0.43,Knowledge:0.18,Code:0.11'")
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--max-render-tokens", type=int, default=None)
+    parser.add_argument("--pack-whole", action="store_true")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run", default="kda_hybrid_128k-muonclip-superbpe_50b")
@@ -104,6 +111,14 @@ def main() -> int:
     tokenizer = load_sft_tokenizer(config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
     process_batch = config.data.per_device_batch_size * jax.local_device_count()
     if args.stream:
+        mixture = None
+        if args.mixture:
+            mixture = []
+            for entry in args.mixture.split(","):
+                name, probability = entry.rsplit(":", 1)
+                mixture.append((name.strip(), float(probability)))
+            total = sum(probability for _, probability in mixture)
+            mixture = [(name, probability / total) for name, probability in mixture]
         iterator = StreamingSFTIterator(
             tokenizer, dataset=args.dataset,
             sequence_length=config.data.sequence_length,
@@ -111,6 +126,10 @@ def main() -> int:
             process_index=jax.process_index(), process_count=jax.process_count(),
             sources=args.sources.split(",") if args.sources else None,
             shuffle_seed=args.shuffle_seed,
+            mixture=mixture,
+            split=args.split,
+            max_render_tokens=args.max_render_tokens,
+            pack_whole=args.pack_whole,
         )
         if is_primary:
             print("streaming full dataset", flush=True)
