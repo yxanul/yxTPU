@@ -1,0 +1,327 @@
+{
+ "steps_in_trace": 5,
+ "mean_step_span_ms": 1242.786,
+ "compute_busy_ms_per_step": 1239.936,
+ "idle_or_unattributed_ms_per_step": 2.85,
+ "per_line_ms_per_step": {
+  "Async XLA Ops": 2885.042,
+  "XLA Ops": 1239.936,
+  "XLA TraceMe": 2.711
+ },
+ "by_opcode_ms_per_step": {
+  "fusion": 629.477,
+  "?": 439.098,
+  "copy": 110.06,
+  "all-reduce": 28.775,
+  "reshape": 16.975,
+  "reduce": 4.294,
+  "copy-done": 3.848,
+  "broadcast": 2.891,
+  "convert": 1.903,
+  "async-done": 0.918,
+  "reduce-precision": 0.909,
+  "pad": 0.332
+ },
+ "top_leaf_ops": [
+  {
+   "op": "fusion [?] (f32[8,2048]{1,0:T(8,128)S(3)}, bf16[8,2048,",
+   "ms_per_step": 67.978,
+   "calls_per_step": 120.0
+  },
+  {
+   "op": "fusion [fusion] bf16[8,2048,2,4224]{3,1,0,2:T(8,128)(2,1)} f",
+   "ms_per_step": 63.924,
+   "calls_per_step": 36.0
+  },
+  {
+   "op": "kda_backward_stage_a [?] (f32[1,96,2048,128]{3,2,1,0:T(8,128)}, f32[1",
+   "ms_per_step": 49.627,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [?] (f32[8,2048]{1,0:T(8,128)S(3)}, f32[8,2048]{",
+   "ms_per_step": 47.911,
+   "calls_per_step": 84.0
+  },
+  {
+   "op": "fusion [fusion] bf16[1,1536,2,4224]{3,1,2,0:T(8,128)(2,1)} f",
+   "ms_per_step": 42.657,
+   "calls_per_step": 24.0
+  },
+  {
+   "op": "fusion [fusion] f32[6,1536,1536]{2,1,0:T(8,128)S(3)} fusion(",
+   "ms_per_step": 40.223,
+   "calls_per_step": 61.0
+  },
+  {
+   "op": "kda_fused_forward_inverse_full_s8 [?] (bf16[1,96,2048,128]{3,2,1,0:T(8,128)(2,1)},",
+   "ms_per_step": 36.271,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "bitcast_add_fusion [fusion] f32[1536,128256]{1,0:T(8,128)} fusion(bf16[8",
+   "ms_per_step": 34.769,
+   "calls_per_step": 8.0
+  },
+  {
+   "op": "convolution_bitcast_fusion [fusion] bf16[8,2048,12,3,128]{1,4,2,3,0:T(8,128)(2,1",
+   "ms_per_step": 32.638,
+   "calls_per_step": 36.0
+  },
+  {
+   "op": "fusion [?] (f32[8,256]{1,0:T(8,128)S(3)}, f32[8,256,128",
+   "ms_per_step": 30.004,
+   "calls_per_step": 8.0
+  },
+  {
+   "op": "kda_backward_stage_b [?] (bf16[1,96,2048,128]{3,2,1,0:T(8,128)(2,1)},",
+   "ms_per_step": 28.907,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "multiply_bitcast_fusion [?] (bf16[8,2048,1,4224]{3,1,0,2:T(8,128)(2,1)},",
+   "ms_per_step": 27.092,
+   "calls_per_step": 24.0
+  },
+  {
+   "op": "fusion [fusion] bf16[8,2048,4608]{2,0,1:T(8,128)(2,1)} fusio",
+   "ms_per_step": 25.925,
+   "calls_per_step": 54.0
+  },
+  {
+   "op": "fusion [fusion] f32[8,8,256,1536]{3,2,0,1:T(8,128)} fusion(f",
+   "ms_per_step": 24.188,
+   "calls_per_step": 8.0
+  },
+  {
+   "op": "fusion [fusion] bf16[7,8,2048]{2,1,0:T(8,128)(2,1)S(3)} fusi",
+   "ms_per_step": 22.074,
+   "calls_per_step": 49.0
+  },
+  {
+   "op": "fusion [fusion] bf16[8,2048,2,4224]{3,1,2,0:T(8,128)(2,1)} f",
+   "ms_per_step": 21.296,
+   "calls_per_step": 12.0
+  },
+  {
+   "op": "fusion [fusion] f32[8,2048,1536]{2,1,0:T(8,128)} fusion(bf16",
+   "ms_per_step": 20.178,
+   "calls_per_step": 49.0
+  },
+  {
+   "op": "fusion [fusion] f32[8,2048,1536]{2,1,0:T(8,128)} fusion(f32[",
+   "ms_per_step": 19.454,
+   "calls_per_step": 42.0
+  },
+  {
+   "op": "all-reduce [all-reduce] f32[1536,128256]{0,1:T(8,128)} all-reduce(f3",
+   "ms_per_step": 18.962,
+   "calls_per_step": 1.0
+  },
+  {
+   "op": "all-reduce [?] (bf16[1,1536,128]{2,1,0:T(8,128)(2,1)}, bf16",
+   "ms_per_step": 18.503,
+   "calls_per_step": 6.0
+  },
+  {
+   "op": "splash_mha_fwd_segmented_residuals [?] (bf16[8,12,2048,128]{3,2,1,0:T(8,128)(2,1)},",
+   "ms_per_step": 18.463,
+   "calls_per_step": 12.0
+  },
+  {
+   "op": "splash_mha_dkv_segmented_no_residuals [?] (bf16[8,4,12,2048,128]{4,3,2,1,0:T(8,128)(2,",
+   "ms_per_step": 17.538,
+   "calls_per_step": 6.0
+  },
+  {
+   "op": "fusion [fusion] bf16[1,1536,3,12,128]{4,1,3,2,0:T(8,128)(2,1",
+   "ms_per_step": 16.79,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "convolution_add_fusion [fusion] f32[6,1536,8448]{2,1,0:T(8,128)} fusion(bf16",
+   "ms_per_step": 16.571,
+   "calls_per_step": 16.0
+  },
+  {
+   "op": "convolution_bitcast_fusion [fusion] bf16[1,4224,1536]{2,1,0:T(8,128)(2,1)} fusio",
+   "ms_per_step": 16.166,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [fusion] bf16[7,8,2048,1536]{3,2,1,0:T(8,128)(2,1)} f",
+   "ms_per_step": 15.442,
+   "calls_per_step": 7.0
+  },
+  {
+   "op": "all-reduce [?] (bf16[1,1536,2,4224]{3,1,2,0:T(8,128)(2,1)S(",
+   "ms_per_step": 15.006,
+   "calls_per_step": 6.0
+  },
+  {
+   "op": "multiply_convert_fusion [fusion] bf16[8,256,128256]{2,1,0:T(8,128)(2,1)} fusi",
+   "ms_per_step": 12.696,
+   "calls_per_step": 8.0
+  },
+  {
+   "op": "copy [copy] bf16[8,2048,12,3,128]{4,1,2,0,3:T(8,128)(2,1",
+   "ms_per_step": 11.781,
+   "calls_per_step": 36.0
+  },
+  {
+   "op": "copy [copy] bf16[8,2048,4608]{2,0,1:T(8,128)(2,1)} copy(",
+   "ms_per_step": 11.162,
+   "calls_per_step": 36.0
+  },
+  {
+   "op": "copy [copy] f32[8,2048,4608]{2,0,1:T(8,128)} copy(f32[8,",
+   "ms_per_step": 11.126,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "copy [copy] bf16[8,2048,12,3,128]{1,4,3,2,0:T(8,128)(2,1",
+   "ms_per_step": 11.086,
+   "calls_per_step": 36.0
+  },
+  {
+   "op": "copy [copy] f32[8,2048,12,3,128]{1,4,3,2,0:T(8,128)} cop",
+   "ms_per_step": 11.019,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [fusion] bf16[6,1536,1536]{2,1,0:T(8,128)(2,1)S(3)} f",
+   "ms_per_step": 10.596,
+   "calls_per_step": 60.0
+  },
+  {
+   "op": "all-reduce [all-reduce] bf16[128256,1536]{1,0:T(8,128)(2,1)} all-red",
+   "ms_per_step": 9.489,
+   "calls_per_step": 1.0
+  },
+  {
+   "op": "copy [copy] bf16[7,8,2048,1536]{3,2,1,0:T(8,128)(2,1)} c",
+   "ms_per_step": 9.41,
+   "calls_per_step": 12.0
+  },
+  {
+   "op": "constant_dynamic-slice_fusion [fusion] f32[1,8,32,12,128,128]{5,4,2,3,1,0:T(8,128)}",
+   "ms_per_step": 8.858,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [?] (bf16[8,2048,4608]{2,0,1:T(8,128)(2,1)}, bf1",
+   "ms_per_step": 8.697,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "copy [copy] f32[8,2048,1536]{1,2,0:T(8,128)} copy(f32[8,",
+   "ms_per_step": 8.661,
+   "calls_per_step": 42.0
+  },
+  {
+   "op": "fusion [fusion] bf16[8,2048,4224]{2,1,0:T(8,128)(2,1)} fusio",
+   "ms_per_step": 8.645,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [?] (bf16[12,128]{1,0:T(8,128)(2,1)}, bf16[8,204",
+   "ms_per_step": 8.466,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "constant_dynamic-update-slice_fusion [fusion] f32[6,8,32,12,128,128]{5,4,2,3,1,0:T(8,128)}",
+   "ms_per_step": 8.281,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [fusion] f32[8,256]{1,0:T(8,128)S(3)} fusion(f32[8,25",
+   "ms_per_step": 8.234,
+   "calls_per_step": 8.0
+  },
+  {
+   "op": "fusion [?] (bf16[8,2048,12,128]{3,1,2,0:T(8,128)(2,1)},",
+   "ms_per_step": 8.042,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "reshape [reshape] f32[1,96,2048,1]{3,2,1,0:T(8,128)} reshape(f",
+   "ms_per_step": 7.0,
+   "calls_per_step": 36.0
+  },
+  {
+   "op": "convolution_add_fusion [fusion] f32[6,1536,4608]{2,1,0:T(8,128)} fusion(bf16",
+   "ms_per_step": 6.969,
+   "calls_per_step": 12.0
+  },
+  {
+   "op": "fusion [fusion] bf16[8,2048,1536]{1,2,0:T(8,128)(2,1)} fusio",
+   "ms_per_step": 6.813,
+   "calls_per_step": 48.0
+  },
+  {
+   "op": "fusion [fusion] bf16[4,1,4608]{2,1,0:T(2,128)(2,1)S(3)} fusi",
+   "ms_per_step": 6.657,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [?] (f32[8,2048]{1,0:T(8,128)S(3)}, f32[8,2048,1",
+   "ms_per_step": 6.589,
+   "calls_per_step": 42.0
+  },
+  {
+   "op": "convolution_add_fusion [fusion] f32[6,1536,4224]{2,1,0:T(8,128)} fusion(bf16",
+   "ms_per_step": 6.46,
+   "calls_per_step": 12.0
+  },
+  {
+   "op": "add_bitcast_fusion [fusion] bf16[1,8,2048,1536]{2,3,1,0:T(8,128)(2,1)S(3",
+   "ms_per_step": 6.289,
+   "calls_per_step": 6.0
+  },
+  {
+   "op": "add_convert_fusion [fusion] f32[8,2048,12,3,128]{4,1,2,0,3:T(8,128)} fus",
+   "ms_per_step": 6.113,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [?] (bf16[8,2048,12,128]{3,1,2,0:T(8,128)(2,1)S(",
+   "ms_per_step": 6.047,
+   "calls_per_step": 24.0
+  },
+  {
+   "op": "multiply_add_fusion [?] (f32[128256,1536]{1,0:T(8,128)}, f32[128256,",
+   "ms_per_step": 6.01,
+   "calls_per_step": 1.0
+  },
+  {
+   "op": "fusion [?] (f32[8,2048]{1,0:T(8,128)}, f32[8,2048]{1,0:",
+   "ms_per_step": 5.967,
+   "calls_per_step": 6.0
+  },
+  {
+   "op": "copy [copy] bf16[8,2048,4608]{1,2,0:T(8,128)(2,1)} copy(",
+   "ms_per_step": 5.885,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [fusion] bf16[1,12,128,1536]{3,2,1,0:T(8,128)(2,1)} f",
+   "ms_per_step": 5.75,
+   "calls_per_step": 18.0
+  },
+  {
+   "op": "fusion [fusion] bf16[1,4224,1536]{2,1,0:T(8,128)(2,1)} fusio",
+   "ms_per_step": 5.414,
+   "calls_per_step": 6.0
+  },
+  {
+   "op": "multiply_reduce_fusion [?] (f32[6]{0:T(128)}, f32[6,1536,2,4224]{3,2,0,",
+   "ms_per_step": 5.107,
+   "calls_per_step": 4.0
+  },
+  {
+   "op": "scatter_custom_fusion [fusion] bf16[128256,1536]{1,0:T(8,128)(2,1)} fusion(",
+   "ms_per_step": 4.895,
+   "calls_per_step": 1.0
+  }
+ ]
+}
