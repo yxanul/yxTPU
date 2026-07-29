@@ -99,9 +99,22 @@ State is dynamic; verify it before relying on this section.
   18.9 GB, data_wait ~0.5 ms (synthetic). 6N-convention model FLOPs:
   ~143.6 TFLOP/s/chip = ~15.6% MFU against v6e's 918 TFLOP/s bf16 peak
   (v4-64 measured ~28.7% MFU on the same convention - the faster chip is
-  proportionally hungrier, and 273M at 8x2048 underfeeds it). Full-slice
-  16-chip multi-host run not yet attempted; configs/hardware/v6e-16.yml
-  hosts corrected 2 -> 4 to match the provisioned topology.
+  proportionally hungrier, and 273M at 8x2048 underfeeds it).
+  configs/hardware/v6e-16.yml hosts corrected 2 -> 4 to match the
+  provisioned topology.
+- Full-slice 16-chip run 2026-07-29 (all 4 workers, v6e-16 profile,
+  kda_hybrid_273m + muonclip + synthetic, 16/device x 2048, ga=1 =
+  524,288 tokens/update - the 50B-run update size - 200 steps, NT/TN
+  build 034d9f0): mean 1.621M tok/s global (max 1.629M) = 101.3k
+  tok/s/chip, step ~322.7 ms, ~165.9 TFLOP/s/chip = ~18.1% MFU (6N
+  convention). Beats the full 32-chip v4-64's 1.54M absolute on half the
+  chips. Batch 16 gives +15.5% per-chip over batch 8. estimated_peak
+  33.5 GB of the 34.36 GB (32 GiB) HBM - 16x2048 fits with ~0.8 GB
+  headroom, 16x4096 will not. data_wait ~0.7 ms, h2d ~3.2 ms (hidden).
+  jax process_index 0 landed on WORKER 1 for this run (again: filter by
+  content, not hostname). Multi-host launch pattern that avoids the
+  zombie-launcher class: foreground gcloud ssh --worker=all whose remote
+  command nohup-backgrounds the trainer and exits immediately.
 
 ## Current training TPU
 
