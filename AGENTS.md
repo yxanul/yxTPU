@@ -35,6 +35,54 @@ window is counted from the confirmed start date below:
   with `RESOURCE_EXHAUSTED` against the 4-chip serving quota. No resource was
   created.
 
+## Current v6e TPU
+
+State is dynamic; verify it before relying on this section.
+
+- TPU node: `yxtpu-v6e16-train`
+- Queued resource: `yxtpu-v6e16-train-qr`
+- Zone: `europe-west4-a`
+- Accelerator: `v6e-16` = 16 chips (v6e slice names count chips directly).
+  Multi-host: 4 workers, 4 chips each.
+- Provisioning: Spot — `spot: {}` confirmed on the queued resource and
+  `schedulingConfig.spot: true` on the node.
+- Runtime: `v2-alpha-tpuv6e`
+- Created: 2026-07-29 — provisioned in ~3 min on the first attempt (unlike
+  the four reclaimed v6e-32 attempts on 2026-07-22). The user's fallback
+  plan (drop to v6e-8 after 5 min of waiting) was not needed.
+- Last verified: 2026-07-29 — queued resource `ACTIVE`; node `READY` and
+  `HEALTHY`.
+- Setup completed 2026-07-29 on all 4 workers: repo at `main` (`cc2be02`,
+  full clone), `uv sync --locked --extra dev` (Python 3.13.14), HF token and
+  W&B key in place (both verified by live authentication), and JAX sees
+  4 local / 16 global devices from every worker.
+- v4 kernel-improvement port 2026-07-29 (branch `v6-kernels`):
+  the six v4 perf commits (6148d90..ed520fd) applied to the folded v5+/v6
+  kernel `kernels/kda_fused_pallas.py` — merged system/intra pairwise +
+  merged q@S/w@S state reads + exp(-inf) trim + transposed-apply-via-
+  contraction-dims, 16-row pairwise tiles (K3 budget + import-time assert),
+  three-pass bf16-split WY solve with hoisted splits
+  (`_SOLVE_INVERSE_PASSES=6` restores the fp32 decomposition bit-identically),
+  chunk-0-only state-cotangent export (the integrated backward wrote the full
+  [B,NC,H,K,V] fp32 history; wrapper only reads chunk 0), and
+  `checkpoint_name("kda_out"/"kda_state_history")` on the fwd rule so
+  `model.remat_save_kda_residuals` now covers the folded path too
+  (`28c7242`'s cumulative_decay recompute was already inherent — the
+  integrated backward recomputes it in-kernel). Gates on v6e worker 0
+  (single-host env combo, harness `benchmarks/verify_kda_kernel_equivalence.py`,
+  new-for-this-port): structural changes BITWISE-identical across all 7
+  fwd/bwd outputs x 3 seeds at pinned 8-row/6-pass; production 16/3 defaults
+  move d_log_decay 3.2e-2 rel L2 (same cancellation-prone term and magnitude
+  as the v4 gate) with 16-row-alone final_state at 4.2e-10 and 3-pass-alone
+  everything <=2.5e-4 (inside the EXP-039 envelope); benchmark validation vs
+  the analytical chunk_kda reference passes (failures: []). Perf on one v6e
+  chip, production shape 8x2048: core fwd+bwd median 4.94 -> 3.38 ms
+  (-31.6%), 3.32M -> 4.85M tok/s. CPU test twins added:
+  tests/test_kda_pairwise.py, tests/test_kda_solve_precision.py; the two
+  tight-tolerance inverse tests in test_kimi_delta_attention.py now pin the
+  six-pass rollback. The 200-step production-config overlay gate has NOT run
+  yet on this port.
+
 ## Current training TPU
 
 State is dynamic; verify it before relying on this section.
