@@ -1,0 +1,23 @@
+{
+  "checkpoint": "/home/a1111/yxtpu_sft_ckpts/20260729T134713Z-sft-kda_hybrid_128k-general-distillation/10000/state.pkl",
+  "generation": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "max_gen_toks": 1536,
+    "chat_template": true
+  },
+  "tasks": {
+    "ifeval": {
+      "seconds": 424,
+      "scores": {
+        "ifeval/inst_level_loose_acc": 26.3,
+        "ifeval/inst_level_strict_acc": 24.0,
+        "ifeval/prompt_level_loose_acc": 22.0,
+        "ifeval/prompt_level_strict_acc": 20.3,
+        "ifeval/sample_len": 54100.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}
