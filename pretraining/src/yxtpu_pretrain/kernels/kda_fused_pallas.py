@@ -1219,7 +1219,7 @@ def _kda_fused_forward_kernel(
   raw_qkv = qkv_ref[0].astype(jnp.float32)
   conv_weight = conv_weight_ref[...].astype(jnp.float32)
   log_decay = jnp.swapaxes(log_decay_ref[0].astype(jnp.float32), 0, 1)
-  beta = jnp.swapaxes(beta_ref[0][..., 0].astype(jnp.float32), 0, 1)
+  beta = jnp.swapaxes(beta_ref[0].astype(jnp.float32), 0, 1)
 
   @pl.when(chunk_index == 0)
   def _initialize_state():
@@ -1342,7 +1342,7 @@ def _kda_fused_backward_kernel(
   ]
   conv_weight = conv_weight_ref[...].astype(jnp.float32)
   log_decay = jnp.swapaxes(log_decay_ref[0].astype(jnp.float32), 0, 1)
-  beta = jnp.swapaxes(beta_ref[0][..., 0].astype(jnp.float32), 0, 1)
+  beta = jnp.swapaxes(beta_ref[0].astype(jnp.float32), 0, 1)
   output_cotangent = jnp.swapaxes(output_cotangent_ref[0].astype(jnp.float32), 0, 1)
 
   @pl.when(reverse_chunk_index == 0)
@@ -1470,7 +1470,7 @@ def _kda_fused_backward_kernel(
     log_decay_cotangent_ref[0] = jnp.swapaxes(decay_bar, 0, 1).astype(
         log_decay_cotangent_ref.dtype
     )
-    beta_cotangent_ref[0, ..., 0] = jnp.swapaxes(beta_bar, 0, 1).astype(
+    beta_cotangent_ref[0] = jnp.swapaxes(beta_bar, 0, 1).astype(
         beta_cotangent_ref.dtype
     )
 
@@ -1631,7 +1631,7 @@ def _kda_fused_backward_kernel(
     conv_weight_cotangent_ref[0] += weight_cotangent
 
   log_decay_cotangent_ref[0] = jnp.swapaxes(log_decay_cotangent, 0, 1)
-  beta_cotangent_ref[0, ..., 0] = jnp.swapaxes(beta_cotangent, 0, 1)
+  beta_cotangent_ref[0] = jnp.swapaxes(beta_cotangent, 0, 1)
 
 
 @functools.partial(
@@ -1711,9 +1711,13 @@ def _pallas_kda_fused_forward(
       block_shape=(1, chunk_size, heads, key_dim),
       index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0),
   )
+  # Beta rides as [B, T, H] without the former trailing singleton: that
+  # padded-to-128-lanes unit dim inflated every per-chunk operand block by
+  # 128x (256 KB staged per call for 2 KB of data). With heads as the lane
+  # dim the block is 16x-padded instead - an 8x traffic cut for free.
   beta_spec = pl.BlockSpec(
-      block_shape=(1, chunk_size, heads, 1),
-      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0, 0),
+      block_shape=(1, chunk_size, heads),
+      index_map=lambda batch_index, chunk_index: (batch_index, chunk_index, 0),
   )
   initial_state_spec = pl.BlockSpec(
       block_shape=(1, heads, key_dim, value_dim),
@@ -1776,7 +1780,7 @@ def _pallas_kda_fused_forward(
       qkv,
       conv_weight.astype(jnp.float32),
       log_decay.astype(jnp.float32),
-      beta.astype(jnp.float32)[..., None],
+      beta.astype(jnp.float32),
       initial_state.astype(jnp.float32),
   )
   # The public final state keeps its FP32 contract regardless of the history
@@ -1852,11 +1856,10 @@ def _pallas_kda_fused_backward(
       ),
   )
   reverse_beta_spec = pl.BlockSpec(
-      block_shape=(1, chunk_size, heads, 1),
+      block_shape=(1, chunk_size, heads),
       index_map=lambda batch_index, reverse_chunk_index: (
           batch_index,
           num_chunks - 1 - reverse_chunk_index,
-          0,
           0,
       ),
   )
@@ -1902,7 +1905,7 @@ def _pallas_kda_fused_backward(
       log_decay.dtype,
   )
   beta_cotangent_shape = jax.ShapeDtypeStruct(
-      (batch, sequence_length, heads, 1),
+      (batch, sequence_length, heads),
       beta.dtype,
   )
   state_before_cotangent_shape = jax.ShapeDtypeStruct(
@@ -1970,7 +1973,7 @@ def _pallas_kda_fused_backward(
       qkv,
       conv_weight.astype(jnp.float32),
       log_decay.astype(jnp.float32),
-      beta.astype(jnp.float32)[..., None],
+      beta.astype(jnp.float32),
       initial_state.astype(jnp.float32),
       state_history,
       output_cotangent,
@@ -1981,7 +1984,7 @@ def _pallas_kda_fused_backward(
       qkv_cotangent,
       jnp.sum(conv_weight_cotangent, axis=0).astype(conv_weight.dtype),
       log_decay_cotangent,
-      beta_cotangent[..., 0],
+      beta_cotangent,
       state_before_cotangent[:, 0],
   )
 

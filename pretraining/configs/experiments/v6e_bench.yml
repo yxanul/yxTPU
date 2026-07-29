@@ -1,0 +1,32 @@
+# v6e throughput-recipe benchmark preset (2026-07-29 campaign results in
+# AGENTS.md). Captures the v6e-16 recipe so runs need only a model, data,
+# and per-device batch size choice; v4 configs are untouched by any of it:
+# - save_dot_except_mlp: on v6e the MLP recompute on the MXU beats hauling
+#   mlpwi through HBM (v4 keeps its own default; this policy was never
+#   measured there).
+# - kda.dense_causal: certifies the all-ones segment mask of dense packing
+#   and skips the KDA pre-conv selects. WRONG for genuinely packed rows.
+# Per-device batch: 24 fits the 273m class; 16 fits the 128k-vocab 337M
+# (standard loss logits bound it); both give ga=1.
+name: v6e_bench
+steps: 100
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: true
+checkpoint:
+  enabled: false
+  destination: null
+  save_interval: 0
+  async_save: false
+  keep: 2
+  resume: true
+model_overrides:
+  remat_policy: save_dot_except_mlp
+  kda:
+    dense_causal: true
+data_overrides:
+  sequence_length: 2048
+  per_device_batch_size: 16
