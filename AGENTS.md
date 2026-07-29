@@ -137,6 +137,29 @@ State is dynamic; verify it before relying on this section.
   FITS: 33.54 GB, p10 375.9 ms, 1.394M tok/s = +15.5% over PDB 8 =
   ~87.1k tok/s/chip, ~19.2% MFU. New recommended v6e-16 production shape
   for 337M: PDB 16 x 2048, ga=1, standard loss.
+- Copy-tax attack 2026-07-29 (273m, 16 chips, 100-step A/Bs; copy
+  attribution via benchmarks/summarize_xplane_copies.py - async-copy
+  durations include queue wait, only sync self-time is honest): the
+  ~35% copy bucket decomposes into ~26 ms/step of mlpwi-residual traffic
+  (layout-transposed saves {2,4,1,3,0}, transposed carry stacking,
+  transposed backward reads - all from the remat policy saving mlpwi),
+  ~10 ms of copy_select on the saved qkv residual (the all-ones segment
+  mask), and ~6 ms of state-history stack/slice. Fixes, cumulative from
+  the 322.7 ms / 1.621M tok/s PDB-16 baseline: (1)
+  remat_policy=save_dot_except_mlp 307.7 ms / 1.702M (+5.0%) and peak
+  33.5 -> 18.4 GB - MLP recompute on the MXU beats hauling mlpwi through
+  HBM on v6e (v4 never measured this policy; its default stays); (2) the
+  freed memory funds PDB 24: 435.5 ms / 1.806M (+6.1%, 25.3 GB; batch
+  returns are flattening - 32 would be ~34 GB, untested); (3)
+  kda.dense_causal=true (commit 985fb2e; certifies the all-ones mask and
+  skips the KDA pre-conv selects) 424.1 ms / 1.853M (+2.6%), loss overlay
+  at fp-fusion noise (6.263092 vs 6.263424 @100). NET: +14.3% tok/s with
+  zero kernel changes - 115.8k tok/s/chip, ~20.7% MFU. Recommended v6e-16
+  recipe for 273m-class on dense streams: PDB 24 x 2048, ga=1,
+  remat_policy=save_dot_except_mlp, kda.dense_causal=true, standard loss.
+  Remaining copy tax (state-history stacks, qkv save copies, DMA queue
+  pressure) needs kernel/layout work: bf16 state history and a flat
+  [B,T,5632] mlpwi layout are the identified next levers.
 
 ## Current training TPU
 
