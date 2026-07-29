@@ -1,0 +1,59 @@
+# Width-first ~1.08B hybrid: the shape kda_hybrid_1b_deep's header names as
+# its rejected alternative, kept as a measurable control. The deep config
+# spends the budget on 32 layers at d=1536 because Block AttnRes rewards
+# depth (more sources per depth read); this one spends it on 16 layers at
+# d=2048 because TPU v6e's MXU is 256x256 (v4's was 128x128), so every dense
+# GEMM dimension here is a whole number of MXU tiles: d 2048 = 8x256,
+# fused-SwiGLU output 2*5632 = 11264 = 44x256, KDA fused in-projection
+# 3*16*128 = 6144 = 24x256. d=2048 is also 4x512, inside the v4 GEMM shape
+# rules the deep config cites, so this remains a two-generation config.
+#
+# What it cannot fix: the KDA kernel fixes dk=dv=128, so the recurrent-state
+# matmuls fill at most half of a v6e MXU pass at any model width. Only the
+# dense GEMMs (the majority of step time per the 2026-07-29 v6e profile)
+# scale with d.
+#
+# Parameters land ~1.6% under the deep config (1.076B vs 1.093B); MFU is
+# computed from the trainer's reported parameter_count, so the comparison
+# stays fair. Depth-dependent costs differ by construction and are part of
+# what is being measured: four AttnRes blocks instead of eight, half the
+# scan iterations, half the per-layer residual/carry traffic.
+name: kda_hybrid_1b_wide
+vocab_size: 128256
+emb_dim: 2048
+num_layers: 16
+cycle: [kda, kda, kda, gqa]
+num_cycles: 4
+mlp_dim: 5632
+fused_mlp: true
+rms_norm_epsilon: 1.0e-5
+dtype: bfloat16
+weight_dtype: float32
+param_scan_axis: 1
+remat_policy: minimal_with_context
+residual_policy: block_attnres
+logits_via_embedding: true
+dropout_rate: 0.0
+kda:
+  chunk_size: 64
+  num_heads: 16
+  key_head_dim: 128
+  value_head_dim: 128
+  conv_kernel_size: 4
+  gate_rank: 128
+  qk_norm: true
+  safe_gate: true
+  gate_lower_bound: -5.0
+  precision: guarded_fp32
+attention:
+  implementation: tokamax_splash
+  num_query_heads: 16
+  num_kv_heads: 4
+  head_dim: 128
+  block_q: 1024
+  block_q_dkv: 2048
+  fused_qkv: true
+  rope: false
+loss:
+  implementation: chunked
+  block_tokens: 256

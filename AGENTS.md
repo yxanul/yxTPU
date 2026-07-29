@@ -50,8 +50,15 @@ State is dynamic; verify it before relying on this section.
 - Created: 2026-07-29 — provisioned in ~3 min on the first attempt (unlike
   the four reclaimed v6e-32 attempts on 2026-07-22). The user's fallback
   plan (drop to v6e-8 after 5 min of waiting) was not needed.
-- Last verified: 2026-07-29 — queued resource `ACTIVE`; node `READY` and
-  `HEALTHY`.
+- PREEMPTED 2026-07-29 ~19:55 UTC after ~1.5 h of use: queued resource
+  `SUSPENDED` with `stateInitiator: SERVICE`, node deleted, all four hosts
+  and their local run logs gone (the in-flight 1B-wide measurement was
+  lost; everything else had been committed and pushed continuously). A
+  preempted Spot queued resource cannot be resumed or `reset` — delete the
+  queued resource and create a new one. This was the first preemption of
+  the day; the slice ran from ~18:25 to ~19:55 UTC unharmed.
+- Last verified ACTIVE: 2026-07-29 18:25 UTC — queued resource `ACTIVE`;
+  node `READY` and `HEALTHY`.
 - Setup completed 2026-07-29 on all 4 workers: repo at `main` (`cc2be02`,
   full clone), `uv sync --locked --extra dev` (Python 3.13.14), HF token and
   W&B key in place (both verified by live authentication), and JAX sees
@@ -206,6 +213,51 @@ State is dynamic; verify it before relying on this section.
   1.185M tok/s. configs/experiments/v6e_bench.yml now captures the whole
   v6e recipe (save_dot_except_mlp + dense_causal + PDB defaults) so v6e
   runs are one flag and v4 configs never see any of it.
+- 1B scale-up on v6e 2026-07-29 (kda_hybrid_1b_deep, muonclip, synthetic,
+  v6e_bench recipe, PDB 4 = the largest the memory allows): params
+  1,094,795,040, p10 607.4 ms, 215.5k tok/s global (13.5k/chip),
+  88.5 TFLOP/s/chip = 9.6% MFU, peak 31.77 GB (args 9.55 = fp32 params
+  4.38 + Muon momentum 4.38; temp 22.2). FINDING - a bigger, more
+  MXU-aligned model is WORSE MFU here, not better: this step does 19% LESS
+  6N work than the 337M/PDB-24 step (5.38e13 vs 6.63e13 FLOPs/chip) yet
+  takes 37% LONGER. MFU on this slice is governed by tokens-per-chip and
+  params-proportional overhead, not by dimension alignment - at PDB 4 the
+  4.38 GB gradient all-reduce, the REPLICATED Muon Newton-Schulz (cost
+  grows d^3 with width per commit ee5df15), the fp32 optimizer elementwise
+  pass (~17.6 GB of traffic), the chunked-loss dW round trips, and eight
+  AttnRes blocks over 32 layers all amortize over 4x fewer tokens.
+  Consequences: only 2.6 GB of headroom, so gradient accumulation (which
+  needs a param-sized ~4.4 GB accumulator) OOMs at PDB 4, and PDB 8 is
+  impossible. FSDP IS NOT WIRED for weights - the mesh schema has an fsdp
+  axis, but runtime/leaf_config.py's _logical_axis_rules maps only
+  `embed_vocab` to it; weight matrices carry `embed` (undeclared ->
+  replicated) and `mlp` -> `tensor` (=1), so fsdp=4 would shard activations
+  exactly as data=16 already does and leave 1B of weights replicated: no
+  memory relief. Real FSDP needs new axis rules plus optimizer/checkpoint
+  validation - a project, not a flag.
+  configs/models/kda_hybrid_1b_wide.yml added as the width-first control
+  (emb 2048 = 8x256, L16, mlp 5632, H16, 1.076B, also 4x512 so it stays
+  v4-legal); its PDB-4 run was in flight when the slice was preempted and
+  is UNMEASURED.
+- Two Muon levers identified for the 1B/v6e regime, both UNRUN (the slice
+  was preempted first), both default-false flags in shared optimizer code
+  so testing or adopting them cannot change any v4 run - adoption belongs
+  in configs/experiments/v6e_bench.yml, never in the shared defaults:
+  (1) optimizer.muon_ns_bf16 (commit 878bb28) - bf16 momentum + bf16 NS
+  end-to-end. Halves the 4.38 GB Muon momentum (~2.2 GB freed, the exact
+  constraint blocking a bigger batch) and turns the NS matmuls from fp32
+  six-pass into one-pass. The v4 verdict was perf-NEUTRAL at 337M with an
+  explicit revisit condition - "revisit at larger widths where NS FLOPs
+  grow quadratically" - and 1B on a bandwidth-bound v6e is that condition.
+  CAVEAT: toggling it changes the optimizer-state pytree, so a v6e run
+  using it cannot resume the existing 50B/SFT optimizer state (weights-only
+  resume, which the SFT stage already does, sidesteps this).
+  (2) optimizer.muon_distributed_ns (commit ee5df15) - shards NS over the
+  data axis. v4-REJECTED at +24.7 ms because the update all-gather's 2.45x
+  padding inflation across 32 chips exceeded the ~16 ms of replicated NS it
+  saved; on 16 chips (less padding waste) with d^3-larger NS the trade may
+  flip. Both need a real-data numerics gate before campaign use - synthetic
+  loss curves cannot validate them.
 - bf16 state history 2026-07-29 (commit on `v6-kernels`; recipe-config
   re-profile prof273b first: at PDB 24 copies grew to 41.8% named-bucket /
   177.6 ms of the 419 ms step, KDA fwd+bwd 25%, fusions 20%, splash 7%):
