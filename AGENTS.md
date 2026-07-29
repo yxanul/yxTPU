@@ -160,6 +160,30 @@ State is dynamic; verify it before relying on this section.
   Remaining copy tax (state-history stacks, qkv save copies, DMA queue
   pressure) needs kernel/layout work: bf16 state history and a flat
   [B,T,5632] mlpwi layout are the identified next levers.
+- bf16 state history 2026-07-29 (commit on `v6-kernels`; recipe-config
+  re-profile prof273b first: at PDB 24 copies grew to 41.8% named-bucket /
+  177.6 ms of the 419 ms step, KDA fwd+bwd 25%, fusions 20%, splash 7%):
+  _STATE_HISTORY_DTYPE = bf16 in the folded kernel. KEY FINDING: gradients
+  are BITWISE-identical to fp32 storage - every backward consumer of the
+  history rounds operands to bf16 in the MXU under the one-pass state
+  policy (a zeroed-history probe confirmed the backward genuinely consumes
+  the buffer; an early too-clean closeness gate was this, not a dead
+  operand). The equivalence is COUPLED to _STATE_MATMUL_PRECISION=DEFAULT;
+  raising it makes bf16 storage lossy. Training A/B at the recipe: p10
+  424.1 -> 416.7 ms, 1.853M -> 1.886M tok/s, peak 25.3 -> 22.4 GB; loss
+  overlay at fp-fusion noise. Freed memory admits PDB 32: 542.2 ms p10,
+  1.933M tok/s (+2.5%, 28.7 GB, ~120.8k tok/s/chip, ~21.5% MFU) - but
+  1.05M tokens/update is 2x the 50B-run update size, an LR-coupling
+  decision for any real campaign, not a free perf knob. Day total on the
+  16-chip slice: 1.621M -> 1.933M tok/s (+19.2%). Post-fix profile
+  residue, ranked: raw-qkv residual save copy ~10 ms/step (layout of the
+  saved [B,T,3,H,D] vs the cycle carry), MLP-recompute multiply_bitcast
+  ~10 ms (flat mlpwi layout would address), history stack/slice now ~7 ms
+  (halved), beta [B,T,H,1] fp32 operand staging ~5 ms (bf16 beta input is
+  a cheap kernel gate), async DMA queue pressure throughout; then splash
+  (7%) and the now-honest KDA/fusion compute. Strategic: 337M underfeeds
+  the chip - the 1B config and tokamax autotuning are where MFU moves
+  next.
 
 ## Current training TPU
 
