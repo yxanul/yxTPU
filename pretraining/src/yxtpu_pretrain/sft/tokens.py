@@ -27,6 +27,7 @@ SPECIAL_TOKENS = (
 )
 ROLE_TOKENS = {"system": 128001, "user": 128002, "assistant": 128003}
 IM_MIDDLE, IM_END = 128004, 128005
+THINK_OPEN, THINK_CLOSE = 128006, 128007
 DOCUMENT_SEPARATOR = 128000  # <|endoftext|>, matches pretraining packing
 
 CHAT_TEMPLATE = (
@@ -57,18 +58,49 @@ def load_sft_tokenizer(name: str, *, padded_vocab_size: int):
     return tokenizer
 
 
+def normalize_messages(record) -> list[dict]:
+    """Normalizes ShareGPT (``conversations``: from/value) and OpenAI-style
+    (``messages``: role/content) records to role/content dicts, carrying an
+    assistant turn's separate ``reasoning_content`` (UltraData think splits)
+    through as ``reasoning``."""
+    turns = record.get("messages") or record.get("conversations")
+    if not turns:
+        raise KeyError("record has neither messages nor conversations")
+    sharegpt_roles = {"human": "user", "gpt": "assistant", "system": "system"}
+    normalized = []
+    for turn in turns:
+        if "role" in turn:
+            role, content = turn["role"], turn["content"]
+        else:
+            role, content = sharegpt_roles[turn["from"]], turn["value"]
+        message = {"role": role, "content": content}
+        reasoning = turn.get("reasoning_content")
+        if reasoning:
+            if role != "assistant":
+                raise KeyError("reasoning_content on a non-assistant turn")
+            message["reasoning"] = reasoning
+        normalized.append(message)
+    return normalized
+
+
 def render_conversation(tokenizer, messages) -> tuple[list[int], list[int]]:
     """Token ids plus a per-token loss mask (assistant content and its
     <|im_end|> train; headers, system, and user turns do not). Starts with
-    the document separator so packing matches the pretraining convention."""
+    the document separator so packing matches the pretraining convention.
+    An assistant turn's ``reasoning`` renders ahead of its content between
+    the single-token think markers, all of it trainable."""
     ids = [DOCUMENT_SEPARATOR]
     mask = [0]
     encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
     for message in messages:
         role = message["role"]
         header = [ROLE_TOKENS[role], *encode(role), IM_MIDDLE]
-        body = encode(message["content"])
         trainable = 1 if role == "assistant" else 0
+        body = []
+        reasoning = message.get("reasoning")
+        if reasoning:
+            body.extend([THINK_OPEN, *encode(reasoning), THINK_CLOSE])
+        body.extend(encode(message["content"]))
         ids.extend(header)
         mask.extend([0] * len(header))
         ids.extend(body)
