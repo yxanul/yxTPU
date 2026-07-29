@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,23 @@ from lm_eval.api.model import TemplateLM
 from yxtpu_pretrain.config import ResolvedConfig
 from yxtpu_pretrain.runtime.data import load_fast_tokenizer
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
+
+@dataclasses.dataclass(frozen=True)
+class GenerationSettings:
+    """Everything ``generate_until`` needs beyond the model itself.
+
+    Present only when generative tasks are wanted: its absence keeps
+    scoring-only suites from silently sampling.
+    """
+
+    sampling: Any
+    max_gen_toks: int = 512
+    end_token: int = 128005  # <|im_end|>
+    pad_token: int = 128000  # <|endoftext|>
+    seed: int = 0
+    apply_chat_template: bool = True
+    strip_reasoning: bool = True
+
 
 _PRIMARY_METRICS = {
     "hellaswag": "acc_norm",
@@ -65,7 +83,15 @@ class JaxHarnessLM(TemplateLM):
 
     backend = "causal"
 
-    def __init__(self, config: ResolvedConfig, model, mesh, logical_axis_rules):
+    def __init__(
+        self,
+        config: ResolvedConfig,
+        model,
+        mesh,
+        logical_axis_rules,
+        *,
+        generation=None,
+    ):
         super().__init__()
         # Multi-host: every process runs the identical request stream
         # (simple_evaluate is fully seeded, so ordering is deterministic),
@@ -89,6 +115,18 @@ class JaxHarnessLM(TemplateLM):
         )
         self._score = _score_step()
         self._data_matrix = NamedSharding(mesh, PartitionSpec("data", None))
+        self.generation = generation
+        if generation is not None:
+            # Generative tasks need the chat tokenizer's specials (the SFT
+            # <|im_end|> is the stop token, and chat-templated prompts encode
+            # role markers), so the scoring tokenizer is replaced wholesale
+            # rather than extended per call.
+            from yxtpu_pretrain.sft.tokens import load_sft_tokenizer
+
+            self.tokenizer = load_sft_tokenizer(
+                config.data.tokenizer,
+                padded_vocab_size=config.model.vocab_size,
+            )
 
     @property
     def eot_token_id(self) -> int:
@@ -212,8 +250,118 @@ class JaxHarnessLM(TemplateLM):
         return results
 
     def generate_until(self, requests, disable_tqdm: bool = False) -> list[str]:
-        del requests, disable_tqdm
-        raise NotImplementedError("the selected evaluation suite uses loglikelihood scoring only")
+        """Serves generative tasks (IFEval, TriviaQA, BBH) from the cached
+        decoder.
+
+        Requests are grouped into fixed-size batches whose prompts share one
+        decode loop; each row stops on the chat end token, and the decoded
+        text is then cut at the first task-supplied stop string. Enabled only
+        when the adapter was built with a generation config, so scoring-only
+        suites keep failing loudly rather than silently sampling.
+        """
+        del disable_tqdm
+        if self.generation is None:
+            raise NotImplementedError(
+                "this adapter was built for loglikelihood scoring only; pass "
+                "generation=GenerationSettings(...) to serve generative tasks"
+            )
+        from yxtpu_pretrain.decode import generate
+
+        settings = self.generation
+        end_token = settings.end_token
+        prepared = []
+        for request in requests:
+            context, arguments = request.args
+            arguments = dict(arguments or {})
+            until = arguments.get("until") or []
+            if isinstance(until, str):
+                until = [until]
+            budget = int(arguments.get("max_gen_toks", settings.max_gen_toks))
+            prepared.append((context, until, budget))
+
+        outputs: list[str] = []
+        width = self.batch_size
+        for start in range(0, len(prepared), width):
+            chunk = prepared[start : start + width]
+            budget = max(item[2] for item in chunk)
+            rendered = [
+                self._render_generation_prompt(context) for context, _, _ in chunk
+            ]
+            # Pad the final chunk by repeating its last prompt: the decoder
+            # takes a fixed batch, and the extra rows are discarded below.
+            while len(rendered) < width:
+                rendered.append(rendered[-1])
+            longest = max(len(row) for row in rendered)
+            keep = self.max_length - budget - 8
+            if longest > keep:
+                rendered = [row[-keep:] if len(row) > keep else row for row in rendered]
+                longest = max(len(row) for row in rendered)
+            lengths = np.asarray([len(row) for row in rendered], np.int32)
+            padded = np.full((width, longest), settings.pad_token, np.int32)
+            for index, row in enumerate(rendered):
+                padded[index, : len(row)] = row
+            with logical_mesh_context(self.mesh, self.logical_axis_rules):
+                samples, _ = generate(
+                    self.model,
+                    jnp.asarray(padded),
+                    jnp.asarray(lengths),
+                    jax.random.key(settings.seed + start),
+                    max_new_tokens=budget,
+                    sampling=settings.sampling,
+                    end_token=end_token,
+                    max_length=longest + budget + 8,
+                )
+            samples = np.asarray(samples)
+            for index, (_, until, _) in enumerate(chunk):
+                row = list(samples[index, int(lengths[index]) - 1 :])
+                stops = [i for i, token in enumerate(row) if token == end_token]
+                generated = row[: stops[0]] if stops else row
+                text = self.tokenizer.decode(generated)
+                text = self._strip_reasoning(text)
+                for stop in until:
+                    if stop and stop in text:
+                        text = text.split(stop)[0]
+                outputs.append(text)
+        return outputs
+
+    def _render_generation_prompt(self, context: str) -> list[int]:
+        """Chat-templates the prompt for an instruction-tuned checkpoint.
+
+        A model trained to answer inside a role-tagged template is being
+        asked the wrong question if the raw context is fed to it, so the
+        template is applied unless explicitly disabled for a base model.
+        """
+        from yxtpu_pretrain.sft.tokens import (
+            DOCUMENT_SEPARATOR,
+            IM_END,
+            IM_MIDDLE,
+            ROLE_TOKENS,
+        )
+
+        encode = lambda text: self.tokenizer.encode(text, add_special_tokens=False)
+        if not self.generation.apply_chat_template:
+            return [DOCUMENT_SEPARATOR, *encode(context)]
+        return [
+            DOCUMENT_SEPARATOR,
+            ROLE_TOKENS["user"], *encode("user"), IM_MIDDLE,
+            *encode(context), IM_END,
+            ROLE_TOKENS["assistant"], *encode("assistant"), IM_MIDDLE,
+        ]
+
+    def _strip_reasoning(self, text: str) -> str:
+        """Drops the think block so tasks score the answer, not the trace.
+
+        A reply whose think block never closed has no answer to score, and
+        returning the trace would let a runaway generation accidentally
+        satisfy a substring check; those score as empty instead.
+        """
+        if not self.generation.strip_reasoning:
+            return text
+        if "</think>" in text:
+            return text.split("</think>", 1)[1].lstrip()
+        if "<think>" in text:
+            return ""
+        return text
 
 
 def flatten_harness_metrics(results: dict[str, Any]) -> dict[str, float]:

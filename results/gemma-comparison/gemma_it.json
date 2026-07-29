@@ -1,0 +1,61 @@
+{
+  "panel": "it",
+  "reference": "Gemma 3 IT 270M",
+  "checkpoint": "/home/a1111/yxtpu_sft_ckpts/20260729T134713Z-sft-kda_hybrid_128k-general-distillation/10000/state.pkl",
+  "rows": [
+    {
+      "task": "arc_challenge",
+      "shots": 0,
+      "ours": 30.9,
+      "gemma": 28.2,
+      "delta": 2.7
+    },
+    {
+      "task": "hellaswag",
+      "shots": 0,
+      "ours": 46.0,
+      "gemma": 37.7,
+      "delta": 8.3
+    },
+    {
+      "task": "piqa",
+      "shots": 0,
+      "ours": 69.2,
+      "gemma": 66.2,
+      "delta": 3.0
+    },
+    {
+      "task": "winogrande",
+      "shots": 0,
+      "ours": 54.9,
+      "gemma": 52.3,
+      "delta": 2.6
+    }
+  ],
+  "raw": {
+    "arc_challenge": {
+      "shots": 0,
+      "score": 30.9,
+      "acc": 0.28754266211604096,
+      "acc_norm": 0.30887372013651876
+    },
+    "hellaswag": {
+      "shots": 0,
+      "score": 46.0,
+      "acc": 0.36148177653853814,
+      "acc_norm": 0.4599681338378809
+    },
+    "piqa": {
+      "shots": 0,
+      "score": 69.2,
+      "acc": 0.6936887921653971,
+      "acc_norm": 0.691512513601741
+    },
+    "winogrande": {
+      "shots": 0,
+      "score": 54.9,
+      "acc": 0.5485398579321231,
+      "acc_norm": null
+    }
+  }
+}
