@@ -173,14 +173,27 @@ def test_oversize_conversations_drop_and_short_ones_survive(tokenizer, monkeypat
     assert iterator.rows_consumed == 2
 
 
-def test_mixture_interleaves_named_configs(tokenizer, monkeypatch):
+def test_mixture_shards_files_per_process_and_interleaves(tokenizer, monkeypatch):
     import datasets
+    import huggingface_hub
+
+    repo_files = [
+        f"data/think/Math/Math_think_part-{i:02d}.jsonl" for i in range(4)
+    ] + [
+        f"data/think/IF/IF_think_part-{i:02d}.jsonl" for i in range(3)
+    ] + ["README.md", "data/no_think/Math/x.jsonl"]
+    monkeypatch.setattr(
+        huggingface_hub, "list_repo_files",
+        lambda dataset, repo_type: list(repo_files), raising=False)
 
     loaded = []
 
-    def fake_load(dataset, name, split, streaming):
-        loaded.append((dataset, name, split))
-        return _FakeStream([_ultradata_record(f"{name}-{i}") for i in range(4)])
+    def fake_load(builder, data_files, split, streaming):
+        assert builder == "json" and split == "train" and streaming
+        loaded.append(data_files)
+        tag = len(loaded)
+        return _FakeStream(
+            [_ultradata_record(f"s{tag} r{i}") for i in range(4)])
 
     def fake_interleave(streams, probabilities, seed, stopping_strategy):
         assert stopping_strategy == "all_exhausted"
@@ -197,11 +210,26 @@ def test_mixture_interleaves_named_configs(tokenizer, monkeypatch):
         datasets, "interleave_datasets", fake_interleave, raising=False)
     iterator = StreamingSFTIterator(
         tokenizer, dataset="repo", sequence_length=64, process_batch=1,
-        process_index=0, process_count=1,
+        process_index=1, process_count=2,
         mixture=[("Math", 0.75), ("IF", 0.25)], split="think",
         pack_whole=True, max_render_tokens=65, shuffle_seed=11,
     )
     batches = list(iterator)
-    assert loaded == [("repo", "Math", "think"), ("repo", "IF", "think")]
+    # Process 1 of 2 takes the odd-indexed shard files of each config, and
+    # no records are stride-filtered on top of the file split.
+    assert loaded == [
+        ["hf://datasets/repo/data/think/Math/Math_think_part-01.jsonl",
+         "hf://datasets/repo/data/think/Math/Math_think_part-03.jsonl"],
+        ["hf://datasets/repo/data/think/IF/IF_think_part-01.jsonl"],
+    ]
     assert iterator.rows_consumed == 8
+    assert iterator.records_drawn == 8
+    assert iterator.metadata["sharded_files"] == {"Math": 2, "IF": 1}
     assert batches
+
+    with pytest.raises(ValueError, match="fewer than"):
+        StreamingSFTIterator(
+            tokenizer, dataset="repo", sequence_length=64, process_batch=1,
+            process_index=0, process_count=8,
+            mixture=[("IF", 1.0)], split="think",
+        )

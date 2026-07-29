@@ -23,6 +23,7 @@ from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.metrics import MetricsWriter, NullMetricsWriter, WandbTracker
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
+from yxtpu_pretrain.runtime.data import PrefetchIterator
 from yxtpu_pretrain.sft.checkpoint import save_sft_checkpoint
 from yxtpu_pretrain.sft.data import SFTIterator, StreamingSFTIterator, build_packed_dataset
 from yxtpu_pretrain.sft.tokens import SPECIAL_TOKENS, load_sft_tokenizer
@@ -131,6 +132,11 @@ def main() -> int:
             max_render_tokens=args.max_render_tokens,
             pack_whole=args.pack_whole,
         )
+        # The refill (stream draw + render + tokenize) must overlap the
+        # device step: consumed synchronously it stalls the whole slice at
+        # every pool drain, and the other seven hosts inherit the stall
+        # through the first collective.
+        iterator = PrefetchIterator(iterator, depth=4)
         if is_primary:
             print("streaming full dataset", flush=True)
         run_packed = False
@@ -164,7 +170,13 @@ def main() -> int:
     step = 0
     tokens_seen = 0
     try:
-        for batch_host in iterator:
+        while True:
+            wait_began = time.perf_counter()
+            try:
+                batch_host = next(iterator)
+            except StopIteration:
+                break
+            data_wait_ms = (time.perf_counter() - wait_began) * 1000
             step += 1
             if step > config.experiment.steps:
                 step -= 1
@@ -184,18 +196,29 @@ def main() -> int:
                 "step": step, "loss": loss, "tokens": int(tokens),
                 "tokens_seen": tokens_seen,
                 "step_ms": (time.perf_counter() - began) * 1000,
+                "data_wait_ms": data_wait_ms,
+                "queue_depth": getattr(iterator, "queue_depth", None),
                 "grad_norm": float(host["grad_norm"]),
                 "learning_rate": _learning_rate(config, step),
             }
+            if step % 25 == 0 or step == 1:
+                record["data"] = dict(getattr(iterator, "stats", {}))
             metrics_writer.write(record)
             if is_primary:
                 print(json.dumps(record, sort_keys=True), flush=True)
-            tracker.log(
-                {"train": {"loss": loss}, "optimizer": {
+            payload = {
+                "train": {"loss": loss},
+                "optimizer": {
                     "grad_norm": record["grad_norm"],
-                    "learning_rate": record["learning_rate"]}},
-                step=step, tokens_seen=tokens_seen,
-            )
+                    "learning_rate": record["learning_rate"]},
+                "perf": {
+                    "step_ms": record["step_ms"],
+                    "data_wait_ms": data_wait_ms,
+                    "queue_depth": record["queue_depth"] or 0},
+            }
+            if "data" in record:
+                payload["data"] = record["data"]
+            tracker.log(payload, step=step, tokens_seen=tokens_seen)
             if step % config.experiment.checkpoint.save_interval == 0:
                 save_sft_checkpoint(save_dir, step, state, iterator, config)
         save_sft_checkpoint(save_dir, step, state, iterator, config)
