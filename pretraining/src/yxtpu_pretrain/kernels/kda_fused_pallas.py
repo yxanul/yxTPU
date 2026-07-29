@@ -21,8 +21,9 @@ invocation consumes one raw BF16 QKV chunk in the projection's natural
 ``[B, T, 3, H, D]`` layout and owns the whole mixer from there: the short
 causal depthwise convolution (whose raw-history tail rides along in VMEM
 scratch exactly like the state), SiLU, Q/K normalization, and the chunked KDA
-recurrence, emitting BF16 output in ``[B, T, H, D]`` and storing only the FP32
-state after each chunk for the custom backward. The XLA graph therefore never
+recurrence, emitting BF16 output in ``[B, T, H, D]`` and storing only the
+per-chunk state for the custom backward (``_STATE_HISTORY_DTYPE`` storage;
+the in-kernel recurrence and chunk-boundary states stay FP32). The XLA graph therefore never
 materializes a convolved, activated, split, or head-transposed QKV copy.
 
 This module deliberately fixes the validated precision and solver policy:
@@ -210,6 +211,25 @@ _SOLVE_APPLY_MATMUL_PRECISION = lax.Precision.HIGHEST
 # accumulation), so it carries to any TPU generation with the same MXU
 # numerics; the on-device gate for this module reruns on v6e.
 _SOLVE_INVERSE_PASSES = 3
+
+# Storage dtype of the per-chunk state history exported to HBM. The in-kernel
+# recurrence, the chunk-boundary states, and the public final state stay FP32
+# (the guarded policy is untouched); this history is read back only as the
+# backward's pre-chunk state for recompute and cotangent math. Under the
+# one-pass state policy (_STATE_MATMUL_PRECISION = DEFAULT) every backward
+# consumer of this buffer rounds its operands to bf16 in the MXU — including
+# the final-decay cotangent reduction, which Mosaic lowers as a dot — so
+# bf16 storage rounds exactly where the arithmetic already rounds: the
+# on-device gate measured BITWISE-identical gradients against fp32 storage
+# (only the public final_state, which training discards, carries the ~2^-9
+# rounding). This equivalence is COUPLED to the one-pass state policy:
+# raising _STATE_MATMUL_PRECISION makes bf16 storage lossy and re-triggers
+# the full gate battery. The buffer is the largest resident of a training
+# step (per-KDA-layer [B, NC, H, 128, 128], stacked over cycles by the remat
+# policy), so halving it also halves the dominant save/stack/slice HBM
+# traffic the v6e copy profile identified. jnp.float32 restores the old
+# storage bit-identically.
+_STATE_HISTORY_DTYPE = jnp.bfloat16
 
 # Coupling between diagonal blocks in the substitution solve. These matmuls do
 # not form powers, but the real-text/correlated-key qualification sweep still
@@ -1223,7 +1243,7 @@ def _kda_fused_forward_kernel(
   if profile_stage == "preprocess":
     diagnostic = query + key + 1e-3 * cumulative_decay
     output_ref[0] = jnp.swapaxes(diagnostic, 0, 1).astype(output_ref.dtype)
-    state_after_ref[0, 0] = state_scratch_ref[...].astype(jnp.float32)
+    state_after_ref[0, 0] = state_scratch_ref[...].astype(state_after_ref.dtype)
     return
 
   key_beta = key * beta[..., None]
@@ -1231,7 +1251,7 @@ def _kda_fused_forward_kernel(
   if profile_stage == "pairwise":
     diagnostic = jnp.concatenate((system, intra), axis=-1)
     output_ref[0] = jnp.swapaxes(diagnostic, 0, 1).astype(output_ref.dtype)
-    state_after_ref[0, 0] = state_scratch_ref[...].astype(jnp.float32)
+    state_after_ref[0, 0] = state_scratch_ref[...].astype(state_after_ref.dtype)
     return
 
   value_beta = value * beta[..., None]
@@ -1251,7 +1271,7 @@ def _kda_fused_forward_kernel(
   w = solved[..., value_dim : value_dim + key_dim]
   if profile_stage == "solve":
     output_ref[0] = jnp.swapaxes(u + w, 0, 1).astype(output_ref.dtype)
-    state_after_ref[0, 0] = state_scratch_ref[...].astype(jnp.float32)
+    state_after_ref[0, 0] = state_scratch_ref[...].astype(state_after_ref.dtype)
     return
 
   state = state_scratch_ref[...].astype(jnp.float32)
@@ -1276,7 +1296,7 @@ def _kda_fused_forward_kernel(
   state_scratch_ref[...] = state
 
   output_ref[0] = jnp.swapaxes(output, 0, 1).astype(output_ref.dtype)
-  state_after_ref[0, 0] = state
+  state_after_ref[0, 0] = state.astype(state_after_ref.dtype)
 
 
 def _kda_fused_backward_kernel(
@@ -1713,7 +1733,7 @@ def _pallas_kda_fused_forward(
   )
   state_history_shape = jax.ShapeDtypeStruct(
       (batch, num_chunks, heads, key_dim, value_dim),
-      jnp.float32,
+      _STATE_HISTORY_DTYPE,
   )
   output, state_history = pl.pallas_call(
       functools.partial(
@@ -1759,7 +1779,9 @@ def _pallas_kda_fused_forward(
       beta.astype(jnp.float32)[..., None],
       initial_state.astype(jnp.float32),
   )
-  final_state = state_history[:, -1]
+  # The public final state keeps its FP32 contract regardless of the history
+  # storage dtype.
+  final_state = state_history[:, -1].astype(jnp.float32)
   return output, final_state, state_history
 
 
