@@ -174,6 +174,27 @@ State is dynamic; verify it before relying on this section.
   (245.2 vs 216.9 without) vs the ~4% it settled at on v4 - the
   bandwidth-bound depth reads cost relatively more here; the mixer_only
   site ablation is worth revisiting before a v6e campaign.
+- Honest step profile of the production config on v6e 2026-07-29
+  (kda_hybrid_128k + attnres + v6e recipe @ PDB 16; new tool
+  benchmarks/summarize_xplane_step.py - the earlier category tool mixed
+  the overlapping "Async XLA Ops" DMA line into compute totals and
+  counted while-loop parents; the new tool reconciles span/busy/idle
+  first): step span 442.5 ms vs wall p10 445.7 - the trace covers the
+  whole step - and the compute line is busy 436.7 ms = 98.7% DEVICE-DENSE
+  (~6 ms idle). The 16.2% 6N-MFU is therefore op-level efficiency, not
+  gaps: the async line carries 773 ms/step of overlapped DMA (queue-sum;
+  bandwidth saturated alongside compute), the KDA kernels run 71.2 ms
+  (16%, FLOPs not in 6N), identifiable loss-head/embedding pieces ~47+ ms
+  (22.8 ms one-call CE fusion, 16.2 ms d_embedding [128256,1024], 8.2 ms
+  select_reduce), MLP-recompute fusions ~20 ms (extra FLOPs 6N ignores),
+  compute-line copies only 34.7 ms (post-fixes), all-reduce 6.5 ms.
+  Structural v6e note: head_dim/state-dim-128 ops can fill at most half
+  of Trillium's 256x256 MXU (v4's was 128x128) - a real per-op ceiling
+  for this model family at emb 1024/d128. Counting recompute + KDA +
+  attention FLOPs, hardware utilization is ~20-22%; the rest is
+  bandwidth. The lever ladder is unchanged: wider model (1B, emb >= 2048)
+  to fill the MXU, then bandwidth diet (qkv residual layout, bf16 beta
+  operand, attnres mixer_only).
 - bf16 state history 2026-07-29 (commit on `v6-kernels`; recipe-config
   re-profile prof273b first: at PDB 24 copies grew to 41.8% named-bucket /
   177.6 ms of the 419 ms step, KDA fwd+bwd 25%, fusions 20%, splash 7%):
