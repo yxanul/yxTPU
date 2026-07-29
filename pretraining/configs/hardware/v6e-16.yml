@@ -2,7 +2,9 @@ name: v6e-16
 accelerator: v6e-16
 device_count: 16
 chips: 16
-hosts: 2
+# yxtpu-v6e16-train (europe-west4-a, 2026-07-29) provisioned as 4 hosts x 4
+# chips, not the 2 x 8 this profile originally assumed.
+hosts: 4
 mesh: {data: 16, fsdp: 1, tensor: 1, sequence: 1}
 # Identical to the certified v6e-8 flag set. The scoped-VMEM limit is load-
 # bearing for the fused Pallas KDA kernels and the Tokamax fused loss.

@@ -270,6 +270,34 @@ def _matmul_tn(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Arra
   )
 
 
+def _matmul_nt(left: jax.Array, right: jax.Array, *, precision=None) -> jax.Array:
+  """``_matmul(left, _transpose(right))`` without materializing the transpose.
+
+  Contracts the last axis of both operands so the MXU consumes the transposed
+  right operand directly. TPU v4's Mosaic backend needs sublane-gather
+  relayouts for several of the explicit transposes this replaces; v5 and
+  later lower the contraction directly, so the relayout never exists.
+  """
+  if precision is None:
+    precision = _CHUNK_MATMUL_PRECISION
+  if left.ndim == 2:
+    return lax.dot_general(
+        left,
+        right,
+        (((1,), (1,)), ((), ())),
+        precision=precision,
+        preferred_element_type=jnp.float32,
+    )
+  batch_axes = tuple(range(left.ndim - 2))
+  return lax.dot_general(
+      left,
+      right,
+      (((left.ndim - 1,), (right.ndim - 1,)), (batch_axes, batch_axes)),
+      precision=precision,
+      preferred_element_type=jnp.float32,
+  )
+
+
 def _state_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
   """Matmul for terms that read or write the cross-chunk recurrent state."""
   return _matmul(left, right, precision=_STATE_MATMUL_PRECISION)
@@ -497,7 +525,9 @@ def _decayed_pairwise(
       )
     weighted_right = right.astype(jnp.float32) * jnp.exp(right_exponent)
     weighted_left = left_block * jnp.exp(decay_block - anchor[..., None, :])
-    row_blocks.append(_pairwise_matmul(weighted_left, _transpose(weighted_right)))
+    row_blocks.append(
+        _matmul_nt(weighted_left, weighted_right, precision=_PAIRWISE_MATMUL_PRECISION)
+    )
 
   values = jnp.concatenate(row_blocks, axis=-2)
   if include_diagonal:
@@ -553,7 +583,9 @@ def _decayed_pairwise_pair(
         ),
         axis=-2,
     )
-    values = _pairwise_matmul(stacked_left, _transpose(weighted_right))
+    values = _matmul_nt(
+        stacked_left, weighted_right, precision=_PAIRWISE_MATMUL_PRECISION
+    )
     if row_end < chunk_size:
       values = jnp.concatenate(
           (
@@ -1238,7 +1270,9 @@ def _kda_fused_forward_kernel(
   final_decay = cumulative_decay[..., -1, :]
   state = state * jnp.exp(final_decay)[..., :, None]
   key_for_state = key * jnp.exp(final_decay[..., None, :] - cumulative_decay)
-  state = state + _state_matmul(_transpose(key_for_state), corrected_value)
+  state = state + _matmul_tn(
+      key_for_state, corrected_value, precision=_STATE_MATMUL_PRECISION
+  )
   state_scratch_ref[...] = state
 
   output_ref[0] = jnp.swapaxes(output, 0, 1).astype(output_ref.dtype)
@@ -1363,21 +1397,27 @@ def _kda_fused_backward_kernel(
   state_cotangent = state_cotangent_next * final_decay_exp[..., :, None]
   final_decay_exp_cotangent = jnp.sum(state_cotangent_next * state, axis=-1)
 
-  key_for_state_cotangent = _state_matmul(corrected_value, _transpose(state_cotangent_next))
+  key_for_state_cotangent = _matmul_nt(
+      corrected_value, state_cotangent_next, precision=_STATE_MATMUL_PRECISION
+  )
   corrected_value_cotangent = _state_matmul(key_for_state, state_cotangent_next)
-  intra_cotangent = _matmul(output_cotangent, _transpose(corrected_value))
-  corrected_value_cotangent = corrected_value_cotangent + _matmul(
-      _transpose(intra),
+  intra_cotangent = _matmul_nt(output_cotangent, corrected_value)
+  corrected_value_cotangent = corrected_value_cotangent + _matmul_tn(
+      intra,
       output_cotangent,
   )
-  query_with_decay_cotangent = _state_matmul(output_cotangent, _transpose(state))
-  state_cotangent = state_cotangent + _state_matmul(
-      _transpose(query_with_decay), output_cotangent
+  query_with_decay_cotangent = _matmul_nt(
+      output_cotangent, state, precision=_STATE_MATMUL_PRECISION
+  )
+  state_cotangent = state_cotangent + _matmul_tn(
+      query_with_decay, output_cotangent, precision=_STATE_MATMUL_PRECISION
   )
   u_cotangent = corrected_value_cotangent
-  w_cotangent = -_state_matmul(corrected_value_cotangent, _transpose(state))
-  state_cotangent = state_cotangent - _state_matmul(
-      _transpose(w), corrected_value_cotangent
+  w_cotangent = -_matmul_nt(
+      corrected_value_cotangent, state, precision=_STATE_MATMUL_PRECISION
+  )
+  state_cotangent = state_cotangent - _matmul_tn(
+      w, corrected_value_cotangent, precision=_STATE_MATMUL_PRECISION
   )
   state_cotangent_scratch_ref[...] = state_cotangent
   # The wrapper only ever consumes the chunk-0 slot — the initial-state
@@ -1452,7 +1492,7 @@ def _kda_fused_backward_kernel(
         system,
         solved_cotangent,
     )
-  system_cotangent = -_matmul(combined_rhs_cotangent, _transpose(solved))
+  system_cotangent = -_matmul_nt(combined_rhs_cotangent, solved)
   system_cotangent = system_cotangent * jnp.tril(
       jnp.ones((chunk_size, chunk_size), dtype=jnp.float32),
       k=-1,
