@@ -1411,7 +1411,11 @@ class KimiDeltaAttention(nnx.Module):
       log_decay = -decay_rate * jax.nn.softplus(raw_decay)
     beta = jax.nn.sigmoid(beta_logits.astype(jnp.float32))
 
-    if decoder_segment_ids is not None:
+    # Under kda.dense_causal the trainer certifies the segment mask is all
+    # ones, where every select below is exactly the identity; skipping them
+    # keeps the select from fusing into the saved qkv residual (measured as
+    # ~10 ms/step of copy_select work on v6e).
+    if decoder_segment_ids is not None and not self.config.kda_dense_causal:
       valid = decoder_segment_ids != 0
       if use_fused_kernel:
         # The fused path masks the raw projection output before the in-kernel

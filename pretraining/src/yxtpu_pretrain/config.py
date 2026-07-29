@@ -36,6 +36,15 @@ class KDAConfig(StrictModel):
     # Initialization is distribution-identical (fan_in-only initializer, all
     # blocks share fan_in = embed); AdamW dynamics are element-wise identical.
     fused_in_proj: bool = False
+    # Declares that every batch row is one dense causal stream (the segment
+    # mask the trainer feeds is all ones), letting the KDA layer skip its
+    # pre-conv segment select entirely. Under an all-ones mask the select is
+    # exactly the identity, so enabling this on dense packing is a pure graph
+    # simplification; it is WRONG for genuinely packed rows with per-document
+    # segment ids, which is why it defaults off. Measured motivation: the v6e
+    # profile shows the select fused into the saved qkv residual as ~10 ms of
+    # copy_select work per step (copies are 35% of the v6e step).
+    dense_causal: bool = False
 
     @model_validator(mode="after")
     def validate_production_shape(self) -> KDAConfig:
