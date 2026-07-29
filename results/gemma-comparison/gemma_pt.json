@@ -1,0 +1,87 @@
+{
+  "panel": "pt",
+  "reference": "Gemma 3 PT 270M",
+  "checkpoint": "step 76400",
+  "rows": [
+    {
+      "task": "arc_challenge",
+      "shots": 25,
+      "ours": 38.1,
+      "gemma": 29.0,
+      "delta": 9.1
+    },
+    {
+      "task": "arc_easy",
+      "shots": 0,
+      "ours": 62.3,
+      "gemma": 57.7,
+      "delta": 4.6
+    },
+    {
+      "task": "boolq",
+      "shots": 0,
+      "ours": 60.1,
+      "gemma": 61.4,
+      "delta": -1.3
+    },
+    {
+      "task": "hellaswag",
+      "shots": 10,
+      "ours": 50.7,
+      "gemma": 40.9,
+      "delta": 9.8
+    },
+    {
+      "task": "piqa",
+      "shots": 0,
+      "ours": 72.1,
+      "gemma": 67.7,
+      "delta": 4.4
+    },
+    {
+      "task": "winogrande",
+      "shots": 5,
+      "ours": 55.5,
+      "gemma": 52.0,
+      "delta": 3.5
+    }
+  ],
+  "raw": {
+    "arc_easy": {
+      "shots": 0,
+      "score": 62.3,
+      "acc": 0.6885521885521886,
+      "acc_norm": 0.622895622895623
+    },
+    "boolq": {
+      "shots": 0,
+      "score": 60.1,
+      "acc": 0.600611620795107,
+      "acc_norm": null
+    },
+    "piqa": {
+      "shots": 0,
+      "score": 72.1,
+      "acc": 0.7170837867247007,
+      "acc_norm": 0.720892274211099
+    },
+    "winogrande": {
+      "shots": 5,
+      "score": 55.5,
+      "acc": 0.5548539857932123,
+      "acc_norm": null
+    },
+    "hellaswag": {
+      "shots": 10,
+      "score": 50.7,
+      "acc": 0.39294961163114916,
+      "acc_norm": 0.5071698864767975
+    },
+    "arc_challenge": {
+      "shots": 25,
+      "score": 38.1,
+      "acc": 0.35494880546075086,
+      "acc_norm": 0.38139931740614336
+    }
+  }
+}
