@@ -195,6 +195,17 @@ State is dynamic; verify it before relying on this section.
   bandwidth. The lever ladder is unchanged: wider model (1B, emb >= 2048)
   to fill the MXU, then bandwidth diet (qkv residual layout, bf16 beta
   operand, attnres mixer_only).
+- Beta operand padding fix 2026-07-29 (branch `v6-kernels`): beta entered
+  the folded kernel as [B,T,H,1] and the trailing unit dim became the
+  128-padded lane dimension - 128x block inflation on every per-chunk
+  operand DMA. Now [B,T,H] (heads as the fully-occupied lane dim, 8x
+  traffic cut; head-major [B,H,T] would be denser still but Pallas
+  requires trailing block dims 128-divisible or full, and chunk 64 is
+  neither). BITWISE-identical on all 7 outputs; kernel core 3.324 ->
+  3.171 ms (-4.6%); production-config step p10 445.7 -> 442.1 ms /
+  1.185M tok/s. configs/experiments/v6e_bench.yml now captures the whole
+  v6e recipe (save_dot_except_mlp + dense_causal + PDB defaults) so v6e
+  runs are one flag and v4 configs never see any of it.
 - bf16 state history 2026-07-29 (commit on `v6-kernels`; recipe-config
   re-profile prof273b first: at PDB 24 copies grew to 41.8% named-bucket /
   177.6 ms of the 419 ms step, KDA fwd+bwd 25%, fusions 20%, splash 7%):
