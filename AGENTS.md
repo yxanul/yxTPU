@@ -59,6 +59,29 @@ State is dynamic; verify it before relying on this section.
   the day; the slice ran from ~18:25 to ~19:55 UTC unharmed.
 - Last verified ACTIVE: 2026-07-29 18:25 UTC — queued resource `ACTIVE`;
   node `READY` and `HEALTHY`.
+- Replacement attempt FAILED 2026-07-29 21:41 UTC: a `v6e-8` Spot request
+  (`yxtpu-v6e8-train-qr`, same zone) sat in `PROVISIONING` for ~40 minutes
+  — vs ~3 minutes end-to-end for the v6e-16 earlier the same day — then
+  went `FAILED` on its own and was deleted at 22:12 UTC. Both granted v6e
+  zones (`europe-west4-a`, `us-east1-d`) verified empty of nodes and
+  queued resources afterwards. Capacity in `europe-west4-a` clearly
+  tightened over the evening: one preemption of a running slice plus this
+  stalled 8-chip request, after a morning where 16 chips came instantly.
+  Two operational lessons worth keeping:
+  - `DeleteQueuedResource` is REJECTED while a resource is `PROVISIONING`
+    (allowed only from ACCEPTED / WAITING_FOR_RESOURCES / SUSPENDED /
+    FAILED). A stuck request cannot be cancelled on demand — it must be
+    waited out until it turns `ACTIVE` (then delete node, then queued
+    resource) or `FAILED`. Budget for that in cleanup scripts.
+  - The interactive shell here is **zsh**, which does NOT word-split
+    unquoted parameter expansions. A `P="--project=... --zone=..."` flag
+    bundle passed as `gcloud ... $P` arrives as ONE argument and gcloud
+    rejects it ("project property must be set to a valid project ID").
+    Write gcloud flags out explicitly, or use a proper array. Combined
+    with `2>/dev/null` this failure mode is silent and reads as "resource
+    already gone" — it cost two bogus cleanup passes here.
+  - `us-east1-d` carries the other granted 64-chip v6e Spot row and is
+    untried — the obvious next zone if europe-west4-a stays tight.
 - Setup completed 2026-07-29 on all 4 workers: repo at `main` (`cc2be02`,
   full clone), `uv sync --locked --extra dev` (Python 3.13.14), HF token and
   W&B key in place (both verified by live authentication), and JAX sees
