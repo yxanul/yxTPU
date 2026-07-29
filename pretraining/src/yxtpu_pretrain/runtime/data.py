@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import queue
 import threading
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -325,6 +327,109 @@ class PackedTokenBatcher(Iterator[Batch]):
         raise RuntimeError("streaming packed data is not checkpointable in this profile")
 
 
+_LOGGER = logging.getLogger(__name__)
+
+# Streaming reads cross the public internet for hours, and on a multi-host
+# slice one worker's stream failure aborts every worker through the
+# coordination service. The ladder below rides out roughly ten minutes of
+# hub unavailability (immediate retry first, then escalating waits) before
+# letting a genuine outage fail loudly.
+_STREAM_REBUILD_ATTEMPTS = 5
+_STREAM_REBUILD_BACKOFF_SECONDS = 60.0
+
+
+def _transient_stream_errors() -> tuple[type[BaseException], ...]:
+    """Error classes worth a stream rebuild: OSError covers TLS alerts and
+    torn sockets (ssl.SSLError, ConnectionError, EBADF); the HTTP clients'
+    bases cover everything huggingface_hub re-raises after its own retries."""
+    errors: list[type[BaseException]] = [OSError]
+    try:
+        import requests
+
+        errors.append(requests.exceptions.RequestException)
+    except ImportError:
+        pass
+    try:
+        import httpx
+
+        errors.extend((httpx.HTTPError, httpx.StreamError))
+    except ImportError:
+        pass
+    return tuple(errors)
+
+
+_TRANSIENT_STREAM_ERRORS = _transient_stream_errors()
+
+
+def _reset_hub_sessions() -> None:
+    """Drops huggingface_hub's pooled HTTP client so the rebuilt stream opens
+    fresh connections. A single TLS failure can leave the shared pool raising
+    EBADF on every later request, which starves the client library's own
+    retries; only a pool reset recovers from that state."""
+    try:
+        from huggingface_hub.utils import _http
+    except ImportError:
+        return
+    for name in ("close_session", "reset_sessions"):
+        reset = getattr(_http, name, None)
+        if reset is not None:
+            reset()
+            return
+
+
+class _ResilientRecordStream:
+    """Record iterator that rebuilds its streaming source across transient
+    network failures instead of propagating them into the training loop.
+
+    Recovery re-iterates the same lazy dataset after resetting the HTTP
+    session pool, so the consumer's partially accumulated state (packing
+    buffers, tokenizer batches) survives untouched. Each rebuild advances the
+    dataset epoch where supported, reshuffling so the fresh stream does not
+    systematically replay the served head of the previous order; without
+    epoch support the replay matches the accepted crash-and-resume
+    semantics. The retry budget is per incident."""
+
+    def __init__(self, dataset):
+        self._dataset = dataset
+        self._iterator = iter(dataset)
+        self.rebuilds = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._iterator)
+        except _TRANSIENT_STREAM_ERRORS as error:
+            return self._recover(error)
+
+    def _recover(self, error: BaseException):
+        for attempt in range(1, _STREAM_REBUILD_ATTEMPTS + 1):
+            wait = _STREAM_REBUILD_BACKOFF_SECONDS * (attempt - 1)
+            _LOGGER.warning(
+                "streaming source failed (%s: %s); rebuilding stream in %.0fs "
+                "(attempt %d/%d)",
+                type(error).__name__,
+                error,
+                wait,
+                attempt,
+                _STREAM_REBUILD_ATTEMPTS,
+            )
+            if wait:
+                time.sleep(wait)
+            _reset_hub_sessions()
+            self.rebuilds += 1
+            set_epoch = getattr(self._dataset, "set_epoch", None)
+            if set_epoch is not None:
+                set_epoch(self.rebuilds)
+            try:
+                self._iterator = iter(self._dataset)
+                return next(self._iterator)
+            except _TRANSIENT_STREAM_ERRORS as retry_error:
+                error = retry_error
+        raise error
+
+
 class StreamingHuggingFaceIterator(PackedTokenBatcher):
     """Streaming Hugging Face source with deterministic train/validation reservation."""
 
@@ -371,14 +476,19 @@ class StreamingHuggingFaceIterator(PackedTokenBatcher):
         self.process_index = process_index
         self.process_count = process_count
         tokenizer = load_fast_tokenizer(config.tokenizer, padded_vocab_size=vocab_size)
+        self._record_stream = _ResilientRecordStream(dataset)
         super().__init__(
-            dataset,
+            self._record_stream,
             tokenizer,
             config,
             global_batch_size=global_batch_size,
             vocab_size=vocab_size,
             validation=validation,
         )
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return {**super().stats, "stream_rebuilds": self._record_stream.rebuilds}
 
     @property
     def metadata(self) -> dict[str, Any]:
