@@ -19,7 +19,10 @@ from pathlib import Path
 try:
   from tensorboard_plugin_profile.protobuf import xplane_pb2
 except ImportError:  # pragma: no cover - fallback for newer xprof layouts
-  from xprof.protobuf import xplane_pb2
+  try:
+    from xprof.protobuf import xplane_pb2
+  except ImportError:  # pragma: no cover - the venv TF carries the proto too
+    from tensorflow.tsl.profiler.protobuf import xplane_pb2
 
 
 _NAMED_BUCKETS = (
