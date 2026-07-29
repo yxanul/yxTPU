@@ -159,18 +159,59 @@ def test_pack_whole_rows_hold_only_complete_conversations(tokenizer, monkeypatch
 
 
 def test_oversize_conversations_drop_and_short_ones_survive(tokenizer, monkeypatch):
+    """Both drop paths fire: the byte pre-filter on records far too long,
+    and the exact token check on one that slips under the byte cap."""
+    borderline = "reasoning about the problem in some detail, " * 8
+    assert len(borderline) < 65 / 0.15  # passes the pre-filter
+    assert len(tokenizer.encode(borderline, add_special_tokens=False)) > 65
     records = [
         _ultradata_record(0),
         _ultradata_record(1, reasoning="word " * 300),
-        _ultradata_record(2),
+        _ultradata_record(2, reasoning=borderline),
+        _ultradata_record(3),
     ]
     iterator = _make_iterator(
         tokenizer, records, monkeypatch, pack_whole=True,
         max_render_tokens=65, process_batch=1,
     )
     list(iterator)
+    assert iterator.rows_dropped_prefilter == 1
     assert iterator.rows_dropped_oversize == 1
     assert iterator.rows_consumed == 2
+
+
+def test_byte_prefilter_drops_giants_before_tokenizing(tokenizer, monkeypatch):
+    """Records that cannot possibly fit a row are dropped on their byte
+    length, never reaching the tokenizer; borderline ones still go through
+    the exact token check."""
+    from yxtpu_pretrain.sft import data as data_module
+
+    giant = "x" * (8193 * 10)
+    records = [
+        _ultradata_record(0),
+        _ultradata_record(1, reasoning=giant),
+        _ultradata_record(2),
+    ]
+    seen_texts = []
+    original = tokenizer.__call__
+
+    def counting_call(texts, **kwargs):
+        seen_texts.extend(texts)
+        return original(texts, **kwargs)
+
+    monkeypatch.setattr(tokenizer, "__call__", counting_call, raising=False)
+    iterator = _make_iterator(
+        tokenizer, records, monkeypatch, pack_whole=True,
+        max_render_tokens=8193, process_batch=1,
+    )
+    list(iterator)
+    assert iterator.rows_dropped_prefilter == 1
+    assert iterator.rows_dropped_oversize == 0
+    assert iterator.rows_consumed == 2
+    assert not any(giant in text for text in seen_texts)
+    # The threshold is a conservative floor: it must never drop a record
+    # that would actually have fit.
+    assert data_module._MIN_TOKENS_PER_BYTE < 0.238
 
 
 def test_mixture_shards_files_per_process_and_interleaves(tokenizer, monkeypatch):
