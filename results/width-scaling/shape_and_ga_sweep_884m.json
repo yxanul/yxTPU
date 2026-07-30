@@ -1,0 +1,13 @@
+{
+  "config": "kda_hybrid_d1536_l24 (884,503,512 params), standard loss, save_dot_except_mlp",
+  "hardware": "v4-64, 32 chips, 30.75 GB usable HBM/chip",
+  "results": [
+    {"setting": "pdb8 seq2048 ga1", "p10_ms": 1225.0, "tokens_per_update": 524288, "tokens_per_s": 427973, "status": "ok"},
+    {"setting": "pdb4 seq4096 ga1", "p10_ms": 1355.5, "tokens_per_update": 524288, "tokens_per_s": 386788, "status": "ok", "delta_pct": -9.6},
+    {"setting": "pdb8 seq2048 ga4", "status": "OOM", "hlo_temporaries_gb": 51.73},
+    {"setting": "pdb4 seq4096 ga4", "status": "OOM", "hlo_temporaries_gb": 52.02},
+    {"setting": "pdb8 seq2048 ga8", "status": "OOM", "hlo_temporaries_gb": 83.01},
+    {"setting": "pdb8 seq2048 ga1 + minimal_with_context remat", "status": "OOM"}
+  ],
+  "finding": "GA memory scales with the accumulation count (~8-9 GB per extra microbatch) because train.py:126 runs a Python for-loop over microbatches inside nnx.jit; the loop unrolls and every microbatch's activations stay live. A lax.scan carrying only the gradient accumulator would make GA memory-flat."
+}
