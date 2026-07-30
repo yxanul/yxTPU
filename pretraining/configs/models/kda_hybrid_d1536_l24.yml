@@ -39,6 +39,11 @@ attention:
   block_q_dkv: 2048
   fused_qkv: true
   rope: false
+# MEASURED 2026-07-29 on v4-64 at this config (884M, PDB 8 x 2048, 32 chips,
+# 40-step p10): chunked block 256 1254.2 ms, 512 1250.6, 1024 1249.5, 2048
+# 1268.7, standard 1225.0. Enlarging the chunk barely moves it (+0.4% at
+# best, and 2048 regresses), so the vocab head's ~20% of the step is the
+# 128k tied head itself, not chunk-size MXU starvation. Standard wins by
+# 2.3% and its logits fit here; revisit if per-device batch grows.
 loss:
-  implementation: chunked
-  block_tokens: 256
+  implementation: standard
