@@ -1,0 +1,13 @@
+{
+  "config": "kda_hybrid_d1536_l24 (884,503,512 params)",
+  "hardware": "v4-64, 32 chips, PDB 8 x 2048 = 524,288 tokens/update",
+  "protocol": "40 steps synthetic, p10 over steps >= 12, save_dot_except_mlp remat",
+  "results": [
+    {"loss_head": "chunked", "block_tokens": 256,  "p10_ms": 1254.2, "tokens_per_s": 418032, "loss_at_40": 3.5715},
+    {"loss_head": "chunked", "block_tokens": 512,  "p10_ms": 1250.6, "tokens_per_s": 419229, "loss_at_40": 3.5716},
+    {"loss_head": "chunked", "block_tokens": 1024, "p10_ms": 1249.5, "tokens_per_s": 419609, "loss_at_40": 3.5669},
+    {"loss_head": "chunked", "block_tokens": 2048, "p10_ms": 1268.7, "tokens_per_s": 413239, "loss_at_40": 3.5679},
+    {"loss_head": "standard", "block_tokens": null, "p10_ms": 1225.0, "tokens_per_s": 427973, "loss_at_40": 3.5708}
+  ],
+  "note": "peak_bytes_in_use reported 8.68 GB for every setting, so that counter does not capture the logits temporaries and cannot rank these on memory; the OOM path reports HLO temporaries separately."
+}
