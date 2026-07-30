@@ -1,0 +1,98 @@
+{
+ "student_vocab_size": 49152,
+ "teacher": "Qwen/Qwen3.5-0.8B",
+ "teacher_vocab_size": 248077,
+ "teacher_logit_width": 248320,
+ "divisible_by": [
+  128,
+  256,
+  512,
+  1024,
+  2048,
+  4096
+ ],
+ "mesh_shards": {
+  "8-way": 6144,
+  "16-way": 3072,
+  "32-way": 1536,
+  "64-way": 768
+ },
+ "embedding_params_d1024": 50331648,
+ "special_tokens": {
+  "<|endoftext|>": 49119,
+  "<|im_start|>": 49120,
+  "<|im_end|>": 49121,
+  "<|object_ref_start|>": 49122,
+  "<|object_ref_end|>": 49123,
+  "<|box_start|>": 49124,
+  "<|box_end|>": 49125,
+  "<|quad_start|>": 49126,
+  "<|quad_end|>": 49127,
+  "<|vision_start|>": 49128,
+  "<|vision_end|>": 49129,
+  "<|vision_pad|>": 49130,
+  "<|image_pad|>": 49131,
+  "<|video_pad|>": 49132,
+  "<tool_call>": 49133,
+  "</tool_call>": 49134,
+  "<|fim_prefix|>": 49135,
+  "<|fim_middle|>": 49136,
+  "<|fim_suffix|>": 49137,
+  "<|fim_pad|>": 49138,
+  "<|repo_name|>": 49139,
+  "<|file_sep|>": 49140,
+  "<tool_response>": 49141,
+  "</tool_response>": 49142,
+  "<think>": 49143,
+  "</think>": 49144,
+  "<|audio_start|>": 49145,
+  "<|audio_end|>": 49146,
+  "<tts_pad>": 49147,
+  "<tts_text_bos>": 49148,
+  "<tts_text_eod>": 49149,
+  "<tts_text_bos_single>": 49150,
+  "<|audio_pad|>": 49151
+ },
+ "eos_token": "<|im_end|>",
+ "pad_token": "<|endoftext|>",
+ "selection_corpus_mb": 544.9,
+ "distinct_types_in_corpus": 123194,
+ "closure_added": 8366,
+ "merges": 48863,
+ "train_occurrence_coverage": 0.9866668722721662,
+ "heldout_fertility": 1.0112555524262683,
+ "heldout_frac_1to1": 0.9882884042332023,
+ "fertility_by_domain": {
+  "pretrain": {
+   "fertility": 1.0104941156477036,
+   "frac_1to1": 0.9906309751434035,
+   "n": 80
+  },
+  "chat": {
+   "fertility": 1.0234104671280277,
+   "frac_1to1": 0.9815520592418863,
+   "n": 80
+  },
+  "reasoning": {
+   "fertility": 1.031272244676359,
+   "frac_1to1": 0.9792676424970919,
+   "n": 43
+  },
+  "tool-calling": {
+   "fertility": 1.0118035882908405,
+   "frac_1to1": 0.9857774968394437,
+   "n": 13
+  }
+ },
+ "teacher_prob_mass_mean": 0.987520158290863,
+ "teacher_prob_mass_p5": 0.9572836756706238,
+ "teacher_prob_mass_by_domain": {
+  "chat": 0.9830464720726013,
+  "pretrain": 0.993855893611908,
+  "reasoning": 0.9905847907066345,
+  "tool-calling": 0.982143223285675
+ },
+ "n_eval_positions": 9179,
+ "checks_passed": 41,
+ "checks_total": 41
+}
