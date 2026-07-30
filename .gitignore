@@ -22,3 +22,4 @@ results/**/maxtext-output/
 # Large upstream regression fixtures are not needed by these TPU experiments.
 maxtext/tests/assets/
 
+ckpt/
