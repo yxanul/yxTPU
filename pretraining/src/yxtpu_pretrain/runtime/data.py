@@ -360,6 +360,31 @@ def _transient_stream_errors() -> tuple[type[BaseException], ...]:
 
 _TRANSIENT_STREAM_ERRORS = _transient_stream_errors()
 
+# hub 1.x's retry handling can close its global httpx client mid-flight;
+# stale fsspec file handles then raise a bare RuntimeError on their next
+# read ("Cannot send a request, as the client has been closed") - observed
+# killing the yx49k campaign at step 46,650 on 2026-07-31 by slipping
+# through the class-based tuple. Recovery (fresh sessions + fresh
+# iterator) cures it exactly like a socket error, so transience is judged
+# by walking the exception cause chain and matching this message class,
+# not only by isinstance.
+_CLIENT_CLOSED_MARKERS = ("client has been closed", "client is closed")
+
+
+def _is_transient_stream_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _TRANSIENT_STREAM_ERRORS):
+            return True
+        if isinstance(current, RuntimeError) and any(
+            marker in str(current).lower() for marker in _CLIENT_CLOSED_MARKERS
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
 
 def _reset_hub_sessions() -> None:
     """Drops huggingface_hub's pooled HTTP client so the rebuilt stream opens
@@ -400,7 +425,11 @@ class _ResilientRecordStream:
     def __next__(self):
         try:
             return next(self._iterator)
-        except _TRANSIENT_STREAM_ERRORS as error:
+        except StopIteration:
+            raise
+        except Exception as error:
+            if not _is_transient_stream_error(error):
+                raise
             return self._recover(error)
 
     def _recover(self, error: BaseException):
@@ -425,7 +454,11 @@ class _ResilientRecordStream:
             try:
                 self._iterator = iter(self._dataset)
                 return next(self._iterator)
-            except _TRANSIENT_STREAM_ERRORS as retry_error:
+            except StopIteration:
+                raise
+            except Exception as retry_error:
+                if not _is_transient_stream_error(retry_error):
+                    raise
                 error = retry_error
         raise error
 

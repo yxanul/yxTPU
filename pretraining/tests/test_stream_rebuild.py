@@ -158,3 +158,42 @@ def test_batcher_survives_a_mid_batch_stream_failure(_fast_recovery):
     assert batch["input_ids"].shape == (2, 7)
     assert stream.rebuilds == 1
     assert batcher.batches_emitted == 1
+
+
+def test_closed_client_runtimeerror_triggers_rebuild(_fast_recovery):
+    """The 2026-07-31 campaign killer: hub closes its global httpx client
+    mid-retry and the next read raises a bare RuntimeError. That must
+    rebuild, not propagate."""
+    dataset = _FlakyDataset(
+        list(range(6)), fail_at=2,
+        error=RuntimeError("Cannot send a request, as the client has been closed."),
+    )
+    stream = _ResilientRecordStream(dataset)
+    consumed = [next(stream) for _ in range(6)]
+    assert consumed == [0, 1, 0, 1, 2, 3]
+    assert stream.rebuilds == 1
+
+
+def test_wrapped_transient_cause_triggers_rebuild(_fast_recovery):
+    """Library wrappers must not defeat transience detection: any transient
+    error in the cause chain qualifies."""
+    wrapped = ValueError("while iterating dataset shard")
+    wrapped.__cause__ = ConnectionResetError(104, "Connection reset by peer")
+    dataset = _FlakyDataset(list(range(4)), fail_at=1, error=wrapped)
+    stream = _ResilientRecordStream(dataset)
+    consumed = [next(stream) for _ in range(4)]
+    assert consumed == [0, 0, 1, 2]
+    assert stream.rebuilds == 1
+
+
+def test_unrelated_runtimeerror_still_propagates(_fast_recovery):
+    import pytest as _pytest
+
+    dataset = _FlakyDataset(
+        list(range(4)), fail_at=1, error=RuntimeError("tracer leak in step fn")
+    )
+    stream = _ResilientRecordStream(dataset)
+    assert next(stream) == 0
+    with _pytest.raises(RuntimeError, match="tracer leak"):
+        next(stream)
+    assert stream.rebuilds == 0
