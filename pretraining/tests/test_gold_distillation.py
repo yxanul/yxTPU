@@ -24,8 +24,11 @@ import pytest
 from yxtpu_pretrain.distillation import (
     align_by_byte_offsets,
     blockwise_logsumexp,
+    direct_teacher_ids,
     gold_position_loss,
     project_teacher_logits,
+    validate_student_to_teacher,
+    verify_direct_map,
 )
 
 
@@ -113,6 +116,141 @@ def test_masked_positions_receive_no_gradient():
     per_position = np.abs(np.asarray(gradient)).sum(-1)[0]
     assert per_position[0] > 0 and per_position[2] > 0
     assert per_position[1] == 0 and per_position[3] == 0
+
+
+def test_vocab_padding_is_excluded_from_the_normalizer():
+    """Qwen3.5 pads its head to 248,320 over a 248,077-token tokenizer, and
+    the pad rows are initialized parameters that emit real logits. Summing
+    them into the partition function deflates every matched log-probability
+    and inflates the residual."""
+    real_vocab, padded_width, student_vocab = 32, 48, 8
+    key_real, key_pad = jax.random.split(jax.random.key(6))
+    real = jax.random.normal(key_real, (2, 3, real_vocab)) * 2.0
+    padding = jax.random.normal(key_pad, (2, 3, padded_width - real_vocab)) * 2.0
+    padded = jnp.concatenate([real, padding], axis=-1)
+    mapping = jnp.arange(student_vocab, dtype=jnp.int32) * 2  # all < real_vocab
+
+    bounded, bounded_residual = project_teacher_logits(
+        padded, mapping, block=16, valid_vocab=real_vocab
+    )
+    reference, reference_residual = project_teacher_logits(
+        real, mapping, block=16
+    )
+    # Bounding recovers the unpadded answer exactly.
+    np.testing.assert_allclose(
+        np.asarray(bounded), np.asarray(reference), rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(bounded_residual), np.asarray(reference_residual),
+        rtol=1e-6, atol=1e-6,
+    )
+    # Without the bound the padding steals mass from every real token.
+    leaked, leaked_residual = project_teacher_logits(padded, mapping, block=16)
+    assert np.all(np.asarray(leaked) < np.asarray(reference))
+    assert np.all(np.asarray(leaked_residual) > np.asarray(reference_residual))
+
+
+# --------------------------------------------------------------- direct map
+
+
+class _ToyTokenizer:
+    """Greedy longest-match tokenizer over an explicit piece list."""
+
+    def __init__(self, pieces):
+        self._pieces = list(pieces)
+        self._index = {piece: i for i, piece in enumerate(self._pieces)}
+        self._longest = max(len(piece) for piece in self._pieces)
+
+    def encode(self, text, add_special_tokens=False):
+        ids, cursor = [], 0
+        while cursor < len(text):
+            for length in range(min(self._longest, len(text) - cursor), 0, -1):
+                piece = text[cursor:cursor + length]
+                if piece in self._index:
+                    ids.append(self._index[piece])
+                    cursor += length
+                    break
+            else:
+                raise ValueError(f"unencodable {text[cursor]!r}")
+        return ids
+
+    def decode(self, ids):
+        return "".join(self._pieces[int(i)] for i in ids)
+
+
+LETTERS = list("abcdefg ")
+
+
+def _toy_pair():
+    """A student with no merges against a teacher that has some."""
+    student = _ToyTokenizer(LETTERS)
+    teacher = _ToyTokenizer(LETTERS + ["ab", "cd", "abc"])
+    mapping = np.arange(len(LETTERS), dtype=np.int32)  # letters share ids
+    return student, teacher, mapping
+
+
+def test_direct_teacher_ids_supervises_position_for_position():
+    _, _, mapping = _toy_pair()
+    student_ids = jnp.asarray([[3, 0, 5], [1, 1, 2]], jnp.int32)
+    teacher_ids = direct_teacher_ids(student_ids, mapping)
+    assert teacher_ids.shape == student_ids.shape
+    np.testing.assert_array_equal(
+        np.asarray(teacher_ids), np.asarray(mapping)[np.asarray(student_ids)]
+    )
+
+
+def test_direct_map_round_trips_where_segmentation_differs():
+    """The property the whole strategy rests on: the teacher reads back the
+    same text even though it would have merged 'ab' into one token."""
+    student, teacher, mapping = _toy_pair()
+    report = verify_direct_map(student, teacher, mapping, ["abcd efg", "abc"])
+    assert report.roundtrip_rate == 1.0
+    assert not report.mismatches
+    # Teacher's own BPE is coarser, so the student's boundaries are extra.
+    assert report.fertility > 1.0
+    assert 0.0 < report.canonical_rate < 1.0
+
+
+def test_verify_direct_map_catches_a_map_that_does_not_round_trip():
+    student, teacher, mapping = _toy_pair()
+    broken = mapping.copy()
+    broken[0] = mapping[1]  # 'a' now decodes as 'b'
+    report = verify_direct_map(student, teacher, broken, ["abc", "cab"])
+    assert report.roundtrip_rate == 0.0
+    assert report.mismatches and report.mismatches[0][0] == "abc"
+
+
+def test_non_injective_map_is_rejected_before_it_biases_the_residual():
+    _, _, mapping = _toy_pair()
+    collided = mapping.copy()
+    collided[0] = collided[1]
+    with pytest.raises(ValueError, match="not injective"):
+        validate_student_to_teacher(collided)
+    # Why it matters: the doubled token is counted twice, so the true
+    # residual goes negative and project_teacher_logits silently clips it.
+    teacher_logits = jnp.zeros((1, 1, len(LETTERS)))
+    _, residual = project_teacher_logits(
+        teacher_logits, jnp.asarray(collided, jnp.int32), block=4
+    )
+    assert float(residual[0, 0]) == 0.0
+
+
+def test_validate_rejects_unmapped_and_out_of_range_entries():
+    with pytest.raises(ValueError, match="unmapped"):
+        validate_student_to_teacher(np.asarray([0, 1, -1], np.int32))
+    with pytest.raises(ValueError, match="beyond teacher vocab"):
+        validate_student_to_teacher(np.asarray([0, 1, 9], np.int32), teacher_vocab=5)
+    validate_student_to_teacher(np.asarray([4, 0, 2], np.int32), teacher_vocab=5)
+
+
+def test_the_real_yx49k_map_is_a_valid_injection():
+    mapping = np.load("tokenizers/yx49k/student_to_teacher.npy")
+    covered = np.load("tokenizers/yx49k/teacher_covered.npy")
+    validate_student_to_teacher(mapping, teacher_vocab=covered.shape[0])
+    assert mapping.shape == (49_152,)
+    # teacher_covered marks exactly the image of the map.
+    assert int(covered.sum()) == mapping.size
+    np.testing.assert_array_equal(np.flatnonzero(covered), np.sort(mapping))
 
 
 # ---------------------------------------------------------------- alignment

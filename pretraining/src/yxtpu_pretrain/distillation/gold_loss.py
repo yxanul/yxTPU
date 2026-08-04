@@ -21,6 +21,17 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+# Qwen3.5 declares ``vocab_size: 248320`` while its tokenizer defines only
+# 248,077 tokens: the family pads the embedding for sharding, and because
+# the rows are real initialized parameters (not zeros) they emit real, if
+# small, logits. Summing them into the partition function would deflate
+# every matched log-probability and inflate the reported residual, so the
+# boundary is passed explicitly rather than inferred from the logit width.
+# Prefer deriving it as ``teacher_covered.shape[0]``; these are the values
+# that artifact carries today, kept here so a mismatch fails loudly.
+QWEN35_LOGIT_WIDTH = 248_320
+QWEN35_VALID_VOCAB = 248_077
+
 
 def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
     """logsumexp over the last axis without materializing exp(logits).
@@ -64,6 +75,7 @@ def project_teacher_logits(
     student_to_teacher: jax.Array,
     *,
     block: int = 32_768,
+    valid_vocab: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Projects dense teacher logits onto (student vocab, residual bucket).
 
@@ -71,7 +83,18 @@ def project_teacher_logits(
     where ``matched_logprobs`` are the teacher's log-probabilities at the
     mapped ids and ``residual_mass`` is the probability the teacher assigns
     outside the student's image - the ULD tail collapsed to one number.
+
+    ``valid_vocab`` truncates the logit row to the tokenizer's real width
+    before normalizing, excluding the vocab padding the teacher carries for
+    sharding (see ``QWEN35_VALID_VOCAB``). Leaving it ``None`` normalizes
+    over everything the teacher emits, which is only correct when the head
+    has no padding - true of the synthetic vocabularies in the tests, not
+    of Qwen3.5.
     """
+    if valid_vocab is not None:
+        teacher_logits = jax.lax.slice_in_dim(
+            teacher_logits, 0, valid_vocab, axis=-1
+        )
     normalizer = blockwise_logsumexp(
         teacher_logits.astype(jnp.float32), block=block
     )
