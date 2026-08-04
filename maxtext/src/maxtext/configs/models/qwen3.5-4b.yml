@@ -26,6 +26,14 @@
 # degenerates to standard RoPE. Scoring text with plain RoPE is therefore
 # exact, not an approximation - and the logit parity check pins it.
 
+# The released weights are bfloat16, so base.yml's float32 default would
+# store them at twice the size for no precision gain. It is not free:
+# MaxText's layer scan carries the whole parameter set in as an input and
+# out as scanned state, so fp32 needs ~32.5G against a v4 chip's 30.75G of
+# HBM and the teacher will not load at all. Forward-only use, no optimizer
+# state, nothing here wants fp32.
+weight_dtype: "bfloat16"
+
 base_emb_dim: 2560
 base_num_decoder_layers: 32
 base_num_query_heads: 16

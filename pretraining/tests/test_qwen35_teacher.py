@@ -150,6 +150,10 @@ def test_the_shipped_4b_config_is_dense_and_matches_the_released_shapes():
     # Text-only scoring: every mrope position row is identical, so plain
     # RoPE is exact rather than an approximation.
     assert config["use_mrope"] is False
+    # Not cosmetic: base.yml defaults to float32, and at fp32 the layer
+    # scan needs ~32.5G against a v4 chip's 30.75G, so the teacher does not
+    # load. The released weights are bfloat16 anyway.
+    assert config["weight_dtype"] == "bfloat16"
 
 
 def test_every_hf_tensor_lands_in_a_real_maxtext_slot():
