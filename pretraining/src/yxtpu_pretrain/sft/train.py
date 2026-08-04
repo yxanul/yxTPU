@@ -67,6 +67,7 @@ def main() -> int:
         help="comma list of Mephisto repos; selects the yx49k native Qwen "
              "chat path instead of the K2.5 scheme")
     parser.add_argument("--system", default=None)
+    parser.add_argument("--shuffle-buffer", type=int, default=10_000)
     parser.add_argument("--model", default="kda_hybrid_128k")
     parser.add_argument("--data", default="climbmix_superbpe")
     parser.add_argument(
@@ -154,6 +155,8 @@ def main() -> int:
             process_count=jax.process_count(),
             epochs=args.epochs,
             system=args.system,
+            shuffle_buffer=args.shuffle_buffer,
+            seed=config.experiment.seed,
         )
         if is_primary:
             print(f"mephisto SFT: {args.mephisto} x{args.epochs} epochs", flush=True)

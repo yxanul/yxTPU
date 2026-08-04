@@ -93,11 +93,47 @@ def test_multi_assistant_rows_are_rejected(tokenizer):
 
 
 class _FakeStream:
+    """Minimal stand-in for an IterableDataset: take/shuffle/iteration."""
+
     def __init__(self, rows):
-        self._rows = rows
+        self._rows = list(rows)
+
+    def take(self, n):
+        return _FakeStream(self._rows[:n])
+
+    def shuffle(self, seed=0, buffer_size=None):
+        import random
+
+        rows = list(self._rows)
+        random.Random(seed).shuffle(rows)
+        return _FakeStream(rows)
 
     def __iter__(self):
         return iter(self._rows)
+
+
+def _fake_interleave(streams, probabilities, seed, stopping_strategy):
+    """Weighted draw that restarts exhausted sources, like all_exhausted."""
+    import random
+
+    rng = random.Random(seed)
+    pools = [list(s) for s in streams]
+    cursors = [0] * len(pools)
+    done = [False] * len(pools)
+    merged = []
+    while not all(done):
+        i = rng.choices(range(len(pools)), weights=probabilities)[0]
+        if not pools[i]:
+            done[i] = True
+            continue
+        if cursors[i] >= len(pools[i]):
+            done[i] = True
+            cursors[i] = 0
+            if all(done):
+                break
+        merged.append(pools[i][cursors[i]])
+        cursors[i] += 1
+    return _FakeStream(merged)
 
 
 def test_iterator_packs_whole_examples_and_cycles_epochs(tokenizer, monkeypatch):
@@ -112,6 +148,7 @@ def test_iterator_packs_whole_examples_and_cycles_epochs(tokenizer, monkeypatch)
         return _FakeStream(rows_a if "IF" in spec else rows_b)
 
     monkeypatch.setattr(datasets, "load_dataset", fake_load, raising=False)
+    monkeypatch.setattr(datasets, "interleave_datasets", _fake_interleave, raising=False)
     iterator = MephistoIterator(
         tokenizer,
         datasets=["Yxanul/Mephisto-IF_172k", "Yxanul/Mephisto-Knowledge_538k"],
@@ -120,8 +157,10 @@ def test_iterator_packs_whole_examples_and_cycles_epochs(tokenizer, monkeypatch)
     )
     batches = list(iterator)
     assert batches, "expected at least one packed batch"
-    # Two epochs over two sources: every row rendered twice.
-    assert iterator.rows_consumed == 2 * (len(rows_a) + len(rows_b))
+    # Two epochs over two sources. Weighted interleaving with
+    # all_exhausted oversamples the smaller source rather than draining
+    # it, so the count is bounded, not an identity.
+    assert iterator.rows_consumed >= 2 * max(len(rows_a), len(rows_b))
     assert iterator.epochs_started == 2  # one open per epoch, all sources
     batch = batches[0]
     assert batch["input_ids"].shape == (1, 256)
@@ -130,3 +169,54 @@ def test_iterator_packs_whole_examples_and_cycles_epochs(tokenizer, monkeypatch)
     filled = int(segments.sum())
     if filled < 256:
         assert not batch["loss_mask"][0, filled:].any()
+
+
+def test_sources_are_mixed_throughout_not_drained_in_sequence(tokenizer, monkeypatch):
+    """The gen-1 failure: round-robin left the back half of every epoch
+    single-source, and the model collapsed onto that format. Weighted
+    interleaving must keep both sources present across the whole epoch."""
+    import datasets
+
+    small = [dict(_record(f"IF{i}?", f"a{i}"), uid=f"IF_{i}") for i in range(50)]
+    large = [dict(_record(f"KN{i}?", f"b{i}"), uid=f"KN_{i}") for i in range(400)]
+
+    def fake_load(spec, split, streaming):
+        rows = small if "IF" in spec else large
+        return _FakeStream(list(rows))
+
+    monkeypatch.setattr(datasets, "load_dataset", fake_load, raising=False)
+    monkeypatch.setattr(datasets, "interleave_datasets", _fake_interleave, raising=False)
+    seen = []
+    real_render = None
+
+    it = MephistoIterator(
+        tokenizer,
+        datasets=["Yxanul/Mephisto-IF_172k", "Yxanul/Mephisto-Knowledge_538k:400"],
+        sequence_length=128, process_batch=1, process_index=0, process_count=1,
+        epochs=1, system=SYSTEM, shuffle_buffer=32, seed=3,
+    )
+    # Capture the source of every drawn row in order.
+    original_draw = it._draw
+
+    def tracking_draw():
+        row = original_draw()
+        if row is not None:
+            seen.append(row["uid"].split("_")[0])
+        return row
+
+    it._draw = tracking_draw
+    list(it)
+    assert len(seen) > 200
+    half = len(seen) // 2
+    first_if = seen[:half].count("IF")
+    second_if = seen[half:].count("IF")
+    # Both halves must contain the small source; round-robin scored 0 here.
+    assert first_if > 0 and second_if > 0, (first_if, second_if)
+
+
+def test_row_limits_are_parsed_and_applied(tokenizer):
+    it = MephistoIterator(
+        tokenizer, datasets=["repo/a", "repo/b:1234"],
+        sequence_length=64, process_batch=1, process_index=0, process_count=1,
+    )
+    assert it._specs == [("repo/a", None), ("repo/b", 1234)]
