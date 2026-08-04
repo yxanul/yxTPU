@@ -133,8 +133,11 @@ def expected_hf_shapes(g):
         shapes[f"{prefix}.mlp.up_proj.weight"] = (g["mlp"], g["emb"])
         shapes[f"{prefix}.mlp.down_proj.weight"] = (g["emb"], g["mlp"])
         if (layer + 1) % g["interval"] == 0:      # full attention
+            # Twice the query width: Qwen3NextFullAttention splits query and
+            # sigmoid gate from this one projection, per head. Reading it as
+            # ungated would halve the head count without changing a shape.
             shapes[f"{prefix}.self_attn.q_proj.weight"] = (
-                g["q_heads"] * g["head_dim"], g["emb"])
+                2 * g["q_heads"] * g["head_dim"], g["emb"])
             shapes[f"{prefix}.self_attn.k_proj.weight"] = (
                 g["kv_heads"] * g["head_dim"], g["emb"])
             shapes[f"{prefix}.self_attn.v_proj.weight"] = (
@@ -162,17 +165,6 @@ def expected_hf_shapes(g):
     return shapes
 
 
-def note_q_proj_carries_the_gate(g, actual):
-    """q_proj is twice the query width because it also carries the gate.
-
-    Qwen3NextFullAttention splits query and sigmoid gate from one
-    projection, which is why the released q_proj is 2x q_heads*head_dim.
-    Worth asserting: getting this wrong halves the head count silently.
-    """
-    expected_gated = 2 * g["q_heads"] * g["head_dim"]
-    return actual == (expected_gated, g["emb"])
-
-
 def dry_run(repo):
     from huggingface_hub import get_safetensors_metadata, hf_hub_download
 
@@ -191,12 +183,9 @@ def dry_run(repo):
         if name not in present:
             missing.append(name)
         elif present[name] != shape:
-            # The one legitimate divergence: q_proj carries query+gate.
-            if name.endswith("self_attn.q_proj.weight") and \
-                    note_q_proj_carries_the_gate(g, present[name]):
-                gated.append(name)
-            else:
-                mismatched.append((name, shape, present[name]))
+            mismatched.append((name, shape, present[name]))
+        elif name.endswith("self_attn.q_proj.weight"):
+            gated.append(name)
 
     text_keys = {k for k in present
                  if k.startswith(TEXT) and not k.startswith("mtp")}
@@ -256,12 +245,206 @@ def selftest_layout():
     print("layout self-test OK: interleave inverts MaxText's split")
 
 
+# --------------------------------------------------------------- materialize
+
+
+def abstract_tree(model_name="qwen3.5-4b", base=None, sequence=128,
+                  overrides=()):
+    """The target tree, read from the model that will consume it.
+
+    Deriving names, shapes and dtypes from ``nnx.eval_shape`` rather than
+    transcribing them keeps the converter honest: if the layer code changes
+    shape, filling fails loudly at the assignment instead of producing a
+    checkpoint that restores into the wrong slots.
+    """
+    import jax
+    from flax import nnx
+    from jax.sharding import Mesh
+
+    from maxtext import pyconfig
+    from maxtext.common.common_types import MODEL_MODE_TRAIN
+    from maxtext.models.models import Transformer
+
+    base = base or "../maxtext/src/maxtext/configs/base.yml"
+    argv = ["convert_qwen35_teacher", base]
+    if model_name:
+        argv.append(f"model_name={model_name}")
+    argv += [
+        "run_name=convert_qwen35_teacher", "per_device_batch_size=1",
+        f"max_target_length={sequence}", "skip_jax_distributed_system=true",
+        "enable_checkpointing=false", "attention=dot_product",
+        "scan_layers=true", *overrides,
+    ]
+    config = pyconfig.initialize(argv)
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("data", "model"))
+    abstract = nnx.eval_shape(lambda: Transformer(
+        config=config, mesh=mesh, quant=None, rngs=nnx.Rngs(0),
+        model_mode=MODEL_MODE_TRAIN))
+    _, params, _ = nnx.split(abstract, nnx.Param, ...)
+
+    tree: dict = {}
+    for path, value in nnx.to_flat_state(params):
+        node = tree
+        for part in path[:-1]:
+            node = node.setdefault(str(part), {})
+        node[str(path[-1])] = np.zeros(value.shape, dtype=value.dtype)
+    return config, tree
+
+
+def _put(tree, dotted, value, *, layer=None, axis=1):
+    """Assigns into the tree, or into one slice of its scan axis."""
+    node = tree
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        node = node[part]
+    target = node[parts[-1]]
+    if layer is None:
+        if target.shape != value.shape:
+            raise ValueError(f"{dotted}: want {target.shape}, got {value.shape}")
+        node[parts[-1]] = value.astype(target.dtype)
+        return
+    index = [slice(None)] * target.ndim
+    index[axis] = layer
+    expected = target[tuple(index)].shape
+    if expected != value.shape:
+        raise ValueError(
+            f"{dotted}[layer {layer}]: want {expected}, got {value.shape}")
+    target[tuple(index)] = value.astype(target.dtype)
+
+
+def load_hf_tensors(repo, needed):
+    """Pulls exactly the tensors we consume, one shard open per shard."""
+    from collections import defaultdict
+
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    index = json.load(open(hf_hub_download(repo, "model.safetensors.index.json")))
+    by_shard = defaultdict(list)
+    for name in needed:
+        by_shard[index["weight_map"][name]].append(name)
+
+    tensors = {}
+    for shard, names in sorted(by_shard.items()):
+        path = hf_hub_download(repo, shard)
+        with safe_open(path, framework="flax") as handle:
+            for name in names:
+                tensors[name] = np.asarray(handle.get_tensor(name))
+        print(f"  {shard}: {len(names)} tensors", flush=True)
+    return tensors
+
+
+def fill(tree, hf, g):
+    """Writes every HF tensor into its MaxText slot.
+
+    HF stores nn.Linear as [out, in]; MaxText wants [in, ..., out], hence
+    the transposes. Per-layer tensors go into slice ``cycle`` of the scan
+    axis, where ``cycle = layer // interval``.
+    """
+    interval = g["interval"]
+    _put(tree, "token_embedder.embedding", hf[f"{TEXT}.embed_tokens.weight"])
+    _put(tree, "decoder.decoder_norm.scale", hf[f"{TEXT}.norm.weight"])
+
+    for layer in range(g["layers"]):
+        cycle, slot = layer // interval, layer % interval
+        src = f"{TEXT}.layers.{layer}"
+        dst = f"decoder.layers.layer_{slot}"
+        _put(tree, f"{dst}.input_layernorm.scale",
+             hf[f"{src}.input_layernorm.weight"], layer=cycle)
+        _put(tree, f"{dst}.post_attention_layernorm.scale",
+             hf[f"{src}.post_attention_layernorm.weight"], layer=cycle)
+        # Dense SwiGLU: gate -> wi_0, up -> wi_1, down -> wo.
+        _put(tree, f"{dst}.mlp.wi_0.kernel",
+             hf[f"{src}.mlp.gate_proj.weight"].T, layer=cycle)
+        _put(tree, f"{dst}.mlp.wi_1.kernel",
+             hf[f"{src}.mlp.up_proj.weight"].T, layer=cycle)
+        _put(tree, f"{dst}.mlp.wo.kernel",
+             hf[f"{src}.mlp.down_proj.weight"].T, layer=cycle)
+
+        if (layer + 1) % interval == 0:
+            attn = f"{dst}.attention.attention"
+            # q_proj carries [query | gate] per head: HF views it as
+            # (..., q_heads, 2*head_dim), which is MaxText's layout exactly.
+            _put(tree, f"{attn}.query.kernel",
+                 hf[f"{src}.self_attn.q_proj.weight"].T.reshape(
+                     g["emb"], g["q_heads"], 2 * g["head_dim"]), layer=cycle)
+            _put(tree, f"{attn}.key.kernel",
+                 hf[f"{src}.self_attn.k_proj.weight"].T.reshape(
+                     g["emb"], g["kv_heads"], g["head_dim"]), layer=cycle)
+            _put(tree, f"{attn}.value.kernel",
+                 hf[f"{src}.self_attn.v_proj.weight"].T.reshape(
+                     g["emb"], g["kv_heads"], g["head_dim"]), layer=cycle)
+            _put(tree, f"{attn}.out.kernel",
+                 hf[f"{src}.self_attn.o_proj.weight"].T, layer=cycle)
+            _put(tree, f"{attn}.query_norm.scale",
+                 hf[f"{src}.self_attn.q_norm.weight"], layer=cycle)
+            _put(tree, f"{attn}.key_norm.scale",
+                 hf[f"{src}.self_attn.k_norm.weight"], layer=cycle)
+        else:
+            attn = f"{dst}.attention"
+            linear = f"{src}.linear_attn"
+            _put(tree, f"{attn}.in_proj_qkvz.kernel",
+                 fuse_qkvz(hf[f"{linear}.in_proj_qkv.weight"],
+                           hf[f"{linear}.in_proj_z.weight"], g).T, layer=cycle)
+            _put(tree, f"{attn}.in_proj_ba.kernel",
+                 fuse_ba(hf[f"{linear}.in_proj_b.weight"],
+                         hf[f"{linear}.in_proj_a.weight"], g).T, layer=cycle)
+            # HF conv1d is [channels, 1, kernel]; MaxText is
+            # (kernel, layer, 1, channels).
+            _put(tree, f"{attn}.conv1d.kernel",
+                 hf[f"{linear}.conv1d.weight"].transpose(2, 1, 0), layer=cycle)
+            _put(tree, f"{attn}.A_log", hf[f"{linear}.A_log"], layer=cycle)
+            _put(tree, f"{attn}.dt_bias", hf[f"{linear}.dt_bias"], layer=cycle)
+            _put(tree, f"{attn}.norm.rms_norm.scale",
+                 hf[f"{linear}.norm.weight"], layer=cycle)
+            _put(tree, f"{attn}.out_proj.kernel",
+                 hf[f"{linear}.out_proj.weight"].T, layer=cycle)
+    return tree
+
+
+def materialize(repo, output, base, devices):
+    import os
+
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    from huggingface_hub import hf_hub_download
+    from maxtext.checkpoint_conversion.utils.utils import (
+        save_weights_to_checkpoint,
+    )
+
+    g = geometry(json.load(open(hf_hub_download(repo, "config.json"))))
+    print("building the target tree from the model", flush=True)
+    _, tree = abstract_tree(base=base)
+    wanted = expected_hf_shapes(g)
+    print(f"loading {len(wanted):,} tensors from {repo}", flush=True)
+    hf = load_hf_tensors(repo, sorted(wanted))
+    print("filling", flush=True)
+    fill(tree, hf, g)
+
+    filled = sum(int(np.prod(v.shape)) for v in _leaves(tree))
+    print(f"filled {filled:,} params ({filled/1e9:.3f}B)", flush=True)
+    print(f"saving to {output}", flush=True)
+    save_weights_to_checkpoint(output, tree, devices, False, False)
+    print("done", flush=True)
+    return 0
+
+
+def _leaves(node):
+    for value in node.values():
+        if isinstance(value, dict):
+            yield from _leaves(value)
+        else:
+            yield value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default="Qwen/Qwen3.5-4B")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate the mapping from safetensors headers only")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--base", default=None,
+                        help="path to maxtext base.yml")
+    parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--output", default=None)
     arguments = parser.parse_args()
 
@@ -271,7 +454,9 @@ def main() -> int:
     if arguments.dry_run or not arguments.output:
         selftest_layout()
         return dry_run(arguments.repo)
-    raise SystemExit("materialization not implemented yet - see --dry-run")
+    selftest_layout()
+    return materialize(arguments.repo, arguments.output, arguments.base,
+                       arguments.devices)
 
 
 if __name__ == "__main__":
