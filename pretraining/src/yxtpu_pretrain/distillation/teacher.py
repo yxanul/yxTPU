@@ -110,6 +110,15 @@ class Qwen35Teacher:
             f"max_target_length={sequence}",
             "skip_jax_distributed_system=true", "enable_checkpointing=false",
             "scan_layers=true",
+            # All three, explicitly. ici_data_parallelism defaults to -1 and
+            # auto-fills every spare device, so asking only for tensor
+            # parallelism silently yields data=4/tensor=1 - which then tries
+            # to split a batch of 1 across 4 devices and raises
+            # IndivisibleError deep inside an activation sharding
+            # constraint. The teacher is scored batch-small and
+            # parameter-large, so tensor parallelism is what we want.
+            "ici_data_parallelism=1",
+            "ici_fsdp_parallelism=1",
             f"ici_tensor_parallelism={tensor_parallelism}",
             # Splash attention rejects this sharding ("the sharding must
             # divide the mask blocks evenly between devices"). Only 8 of 32
