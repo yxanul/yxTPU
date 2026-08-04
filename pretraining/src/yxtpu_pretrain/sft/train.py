@@ -80,6 +80,16 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run", default="kda_hybrid_128k-muonclip-superbpe_50b")
+    parser.add_argument(
+        "--init-pickle", default=None,
+        help="init weights from an SFT stage state.pkl instead of a "
+             "pretraining orbax checkpoint. Skips the new-token-row "
+             "re-init - an SFT checkpoint already trained those rows. The "
+             "optimizer starts fresh either way.")
+    parser.add_argument(
+        "--allow-device-mismatch", action="store_true",
+        help="run on fewer devices than the hardware profile declares "
+             "(single-host smokes); the mesh degrades to pure data parallel")
     parser.add_argument("--out-destination", default="/home/a1111/yxtpu_sft_ckpts")
     parser.add_argument("--steps-cap", type=int, default=2000)
     parser.add_argument(
@@ -112,35 +122,50 @@ def main() -> int:
         hardware="v4-64", experiment="superbpe_50b",
         overrides=base_overrides + list(args.overrides or []),
     )
-    mesh = create_mesh(config.hardware)
+    mesh = create_mesh(config.hardware,
+                       allow_device_mismatch=args.allow_device_mismatch)
     rules = make_leaf_config(config).logical_axis_rules
     with logical_mesh_context(mesh, rules):
         model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(config.experiment.seed))
         transform, _ = build_optimizer(model, config.optimizer)
         state = TrainStateNNX(model, nnx.Optimizer(model, transform, wrt=nnx.Param))
 
-    init_config = config.model_copy(deep=True)
-    init_config.experiment.checkpoint.destination = args.init_destination
-    init_config.experiment.checkpoint.enabled = True
-    loader = CheckpointIO(init_config, run_name=args.init_run)
-    start = loader.restore(state, _NoIterator())
-    loader.close()
-    if start == 0:
-        raise RuntimeError("no pretraining checkpoint found to initialize from")
-    with logical_mesh_context(mesh, rules):
-        state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
-        if args.mephisto:
-            from yxtpu_pretrain.sft.mephisto import UNTRAINED_SPECIAL_RANGE
-
-            low, high = UNTRAINED_SPECIAL_RANGE
-            new_rows = _reinit_new_token_rows(
-                model, new_ids=list(range(low, high)), trained_upto=low
-            )
-        else:
-            new_rows = _reinit_new_token_rows(model)
     is_primary = jax.process_index() == 0
+    if args.init_pickle:
+        import pickle
+
+        from yxtpu_pretrain.runtime.checkpoints import _persistent_state
+
+        target = _persistent_state(state)
+        with open(args.init_pickle, "rb") as handle:
+            nnx.replace_by_pure_dict(target, pickle.load(handle))
+        nnx.update(state, target)
+        start = args.init_pickle
+        new_rows = []
+        with logical_mesh_context(mesh, rules):
+            state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+    else:
+        init_config = config.model_copy(deep=True)
+        init_config.experiment.checkpoint.destination = args.init_destination
+        init_config.experiment.checkpoint.enabled = True
+        loader = CheckpointIO(init_config, run_name=args.init_run)
+        start = loader.restore(state, _NoIterator())
+        loader.close()
+        if start == 0:
+            raise RuntimeError("no pretraining checkpoint found to initialize from")
+        with logical_mesh_context(mesh, rules):
+            state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+            if args.mephisto:
+                from yxtpu_pretrain.sft.mephisto import UNTRAINED_SPECIAL_RANGE
+
+                low, high = UNTRAINED_SPECIAL_RANGE
+                new_rows = _reinit_new_token_rows(
+                    model, new_ids=list(range(low, high)), trained_upto=low
+                )
+            else:
+                new_rows = _reinit_new_token_rows(model)
     if is_primary:
-        print(f"initialized from step {start}; re-initialized rows {new_rows}", flush=True)
+        print(f"initialized from {start}; re-initialized rows {new_rows}", flush=True)
 
     if args.mephisto:
         # yx49k ships the Qwen3.5 chat template verbatim - no special ids to
