@@ -230,14 +230,30 @@ class MephistoIterator:
             filled += len(ids)
         if not filled:
             return None
+        # One segment id per packed example, positions restarting at each.
+        # Previously every real token shared segment 1 and positions ran
+        # straight through the row, so example k+1 attended into example k
+        # and read continuing positions. Student and teacher saw the same
+        # polluted prefix, so the GOLD pairing stayed sound - but the
+        # teacher's distribution at the start of a packed example was then
+        # conditioned on an unrelated preceding conversation, which is not
+        # the conditioning it generated under. Its targets were answering a
+        # question it was never asked.
+        segments = np.zeros(capacity, np.int32)
+        positions = np.zeros(capacity, np.int32)
+        offset = 0
+        for index, ids in enumerate(row_ids):
+            segments[offset:offset + len(ids)] = index + 1
+            positions[offset:offset + len(ids)] = np.arange(len(ids))
+            offset += len(ids)
         pad = capacity - filled
-        segments = np.ones(self._T, np.int32)
         if pad:
             row_ids.append(np.full(pad, ENDOFTEXT, np.int32))
             row_mask.append(np.zeros(pad, np.float32))
             self.pad_tokens += pad
-            segments[filled:] = 0
-        return np.concatenate(row_ids), np.concatenate(row_mask), segments
+            # Pad keeps segment 0, which excludes it from attention.
+        return (np.concatenate(row_ids), np.concatenate(row_mask),
+                segments[:self._T], positions[:self._T])
 
     @property
     def stats(self) -> dict[str, float]:
@@ -268,10 +284,11 @@ class MephistoIterator:
         ids = np.stack([row[0] for row in rows])
         mask = np.stack([row[1] for row in rows])
         segments = np.stack([row[2] for row in rows])
+        positions = np.stack([row[3] for row in rows])
         return {
             "input_ids": ids[:, :-1],
             "labels": ids[:, 1:],
             "loss_mask": mask[:, 1:],
             "segment_ids": segments,
-            "positions": self._positions,
+            "positions": positions,
         }
