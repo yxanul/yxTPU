@@ -75,7 +75,7 @@ def _find_weights(node, depth=0):
     raise ValueError(f"no parameter root under keys {list(node)}")
 
 
-def load_model(checkpoint, base, model_name, sequence):
+def load_model(checkpoint, base, model_name, sequence, attention="autoselected"):
     from jax.sharding import Mesh
     import orbax.checkpoint as ocp
 
@@ -88,6 +88,7 @@ def load_model(checkpoint, base, model_name, sequence):
         "run_name=score_teacher", "per_device_batch_size=1",
         f"max_target_length={sequence}", "skip_jax_distributed_system=true",
         "enable_checkpointing=false", "scan_layers=true",
+        f"attention={attention}",
     ])
     devices = np.array(jax.devices())
     mesh = Mesh(devices.reshape(1, -1), ("data", "model"))
@@ -205,6 +206,12 @@ def main() -> int:
     parser.add_argument("--model-name", default="qwen3.5-4b")
     parser.add_argument("--teacher", default="Qwen/Qwen3.5-4B")
     parser.add_argument("--mephisto", default="Yxanul/Mephisto-IF_172k")
+    # Unsharded on one v4 chip the scan carries the whole 4B parameter set
+    # in and out, which alone exceeds 30.75G of HBM regardless of batch or
+    # sequence. CPU sidesteps it, and weight layout - the thing actually
+    # under test here - is platform-independent.
+    parser.add_argument("--attention", default="autoselected",
+                        help="use dot_product on CPU; pallas needs an accelerator")
     parser.add_argument("--sequence", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--batches", type=int, default=8)
@@ -219,7 +226,7 @@ def main() -> int:
 
     config, model, mesh = load_model(
         arguments.checkpoint, arguments.base, arguments.model_name,
-        arguments.sequence)
+        arguments.sequence, arguments.attention)
 
     need = arguments.batch_size * arguments.batches * 2
     chat_rows = []
