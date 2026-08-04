@@ -1,0 +1,30 @@
+{
+  "checkpoint_step": 700000,
+  "model": "kda_hybrid_yx49k_l20",
+  "results": {
+    "mmlu_continuation@0": {
+      "score": 30.0,
+      "acc": 0.30002848597065945,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "winogrande@0": {
+      "score": 59.43,
+      "acc": 0.5943172849250198,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "mmlu@5": {
+      "score": 26.14,
+      "acc": 0.26135878080045577,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000005.json"
+    },
+    "winogrande@5": {
+      "score": 57.93,
+      "acc": 0.579321231254933,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000005.json"
+    }
+  }
+}
