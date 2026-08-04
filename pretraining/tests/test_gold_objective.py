@@ -155,6 +155,29 @@ def test_the_divergence_is_non_negative_and_zero_only_at_a_match(beta):
         assert (value == pytest.approx(0.0, abs=1e-6)) is expect_zero
 
 
+def test_small_beta_approaches_the_forward_kl():
+    """GKD Eq. (1): JSD(beta)/beta -> KL(teacher || student) as beta -> 0,
+    so the interior formula must weight the TEACHER by beta. The mirrored
+    orientation satisfies every symmetric property (non-negativity, zero at
+    a match) while quietly making beta=0.1 mean the paper's beta=0.9 -
+    only this limit tells the two apart."""
+    student_logits, labels, mask, matched, residual = _batch(seed=29)
+    common = dict(teacher_matched_logprobs=matched,
+                  teacher_residual_mass=residual,
+                  distill_weight=1.0, ce_weight=0.0)
+
+    _, at_zero = gold_objective(student_logits, labels, mask, beta=0.0, **common)
+    _, at_one = gold_objective(student_logits, labels, mask, beta=1.0, **common)
+    forward, reverse = float(at_zero["distill"]), float(at_one["distill"])
+    assert forward != pytest.approx(reverse, rel=0.05), "degenerate batch"
+
+    beta = 1e-3
+    _, interior = gold_objective(student_logits, labels, mask, beta=beta, **common)
+    scaled = float(interior["distill"]) / beta
+    assert scaled == pytest.approx(forward, rel=0.05)
+    assert abs(scaled - forward) < abs(scaled - reverse)
+
+
 def test_a_uniform_shift_of_student_logits_changes_nothing():
     """Softmax invariance - a cheap guard against accidentally training on
     unnormalized logits."""
