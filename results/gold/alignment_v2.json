@@ -1,0 +1,36 @@
+{
+  "student": "tokenizers/yx49k",
+  "teacher": "Qwen/Qwen3.5-0.8B",
+  "corpora": [
+    {
+      "label": "Yxanul/Mephisto-IF_172k rendered chat",
+      "texts": 300,
+      "student_tokens": 94433,
+      "fertility": 1.0299721873807057,
+      "direct_map": {
+        "roundtrip_exact_rate": 1.0,
+        "canonical_boundary_rate": 0.9526754418476592,
+        "supervised_position_rate": 1.0
+      },
+      "byte_walk": {
+        "supervised_position_rate": 0.9487149619306811,
+        "grouped_positions": 4843
+      }
+    },
+    {
+      "label": "climbmix pretrain",
+      "texts": 141,
+      "student_tokens": 87919,
+      "fertility": 1.0100988051470587,
+      "direct_map": {
+        "roundtrip_exact_rate": 1.0,
+        "canonical_boundary_rate": 0.9808232577713577,
+        "supervised_position_rate": 1.0
+      },
+      "byte_walk": {
+        "supervised_position_rate": 0.9814829559025922,
+        "grouped_positions": 1628
+      }
+    }
+  ]
+}
