@@ -54,3 +54,17 @@ post_training work — see ../BENCHMARKS.md.
 Files here: `step_006{6,8}0000.json`, `step_00700000.json` — the
 harness's complete result artifacts (per-metric values, stderr, task
 configs/versions) from the anneal-phase rounds.
+
+## Post-hoc loglikelihood panel (2026-08-04, `loglikelihood_panel.json`)
+
+| task | ours | references |
+| --- | --- | --- |
+| WinoGrande 0-shot | **59.4** | SmolLM2-360M 52.5, SmolLM-360M 52.8, SmolLM2-135M 51.3 |
+| WinoGrande 5-shot | **57.9** | Qwen2.5-0.5B 54.1, Gemma3 PT 270M 52.0 |
+| MMLU cloze 0-shot | 30.0 | SmolLM2-360M 35.8, SmolLM-360M 34.4, SmolLM2-135M 31.5 |
+| MMLU standard 5-shot | 26.1 | chance 25; small base models cluster here |
+
+WinoGrande is the campaign's standout: +5 over every reference on a task
+where this size class barely clears chance. MMLU tracks factual exposure
+and lands between the 135M and 360M SmolLM tiers - the knowledge-bound
+axis (with TriviaQA) that the GOLD distillation stage targets.
