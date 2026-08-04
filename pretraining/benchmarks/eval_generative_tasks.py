@@ -52,7 +52,7 @@ from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 # Gemma 3 270M's published generative rows, for the same-row comparison.
 GEMMA = {"ifeval": ("IT", 51.2), "triviaqa": ("PT", 15.4), "bbh": ("IT", 26.7)}
-FEWSHOT = {"ifeval": 0, "triviaqa": 5, "bbh": 3}
+FEWSHOT = {"ifeval": 0, "triviaqa": 5, "bbh": 3, "gsm8k": 5}
 
 
 class _NoIterator:
@@ -63,6 +63,8 @@ class _NoIterator:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", default="ifeval")
+    parser.add_argument("--model", default="kda_hybrid_128k")
+    parser.add_argument("--data", default="climbmix_superbpe")
     parser.add_argument("--sft-checkpoint", default=None)
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run",
@@ -80,7 +82,7 @@ def main() -> int:
 
     tasks = [task.strip() for task in arguments.tasks.split(",") if task.strip()]
     config = load_config(
-        model="kda_hybrid_128k", optimizer="muonclip", data="climbmix_superbpe",
+        model=arguments.model, optimizer="muonclip", data=arguments.data,
         hardware="v4-64", experiment="superbpe_50b",
         overrides=[
             "experiment.token_budget=null",

@@ -68,3 +68,17 @@ WinoGrande is the campaign's standout: +5 over every reference on a task
 where this size class barely clears chance. MMLU tracks factual exposure
 and lands between the 135M and 360M SmolLM tiers - the knowledge-bound
 axis (with TriviaQA) that the GOLD distillation stage targets.
+
+## Generation panel (2026-08-04, greedy, no chat template, `generation_panel.json`)
+
+| task | ours | references |
+| --- | --- | --- |
+| TriviaQA 5-shot | **15.3** | Gemma3 PT 270M 15.4, SmolLM2-360M 16.9, SmolLM-360M 9.1 |
+| GSM8K 5-shot | 1.1 | SmolLM2-360M 3.2, SmolLM-360M 1.6, SmolLM2-135M 1.4 |
+
+TriviaQA at parity with Gemma and +6.2 over SmolLM-360M revises the
+knowledge-bound story upward: recall expressed as open completion is far
+stronger than the MMLU cloze reading suggested. GSM8K sits in the
+base-model band, as expected pre-SFT. Throughput note: 19,263 generative
+evaluations in ~12.5 minutes on 4 chips via the cached decoder with
+one-compile-per-task static shapes.
