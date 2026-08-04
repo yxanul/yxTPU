@@ -268,13 +268,30 @@ def main() -> int:
                   handle, indent=2)
     print(f"\nwritten {arguments.output}", flush=True)
 
-    by_label = {r["label"]: r["perplexity"] for r in reports}
-    ordered = (by_label.get("mephisto completions", 1e9)
-               < by_label.get("climbmix prose", 1e9)
-               < by_label.get("random ids (control)", 0))
-    print("ordering mephisto < climbmix << random: "
-          f"{'OK' if ordered else 'VIOLATED - inspect the layout'}")
-    return 0
+    # Ordering alone is not a test: three values all sitting at chance still
+    # satisfy a < b < c. That false pass hid a flat softmax once already
+    # (logits divided by sqrt(emb_dim)), where top-1 was 87% but perplexity
+    # was 151k. So require an absolute margin below chance, and report the
+    # two signals separately - ranking and calibration fail independently.
+    nll = {r["label"]: r["nll"] for r in reports}
+    top1 = {r["label"]: r["top1_agreement"] for r in reports}
+    chance = float(np.log(248_320))
+    own = nll.get("mephisto completions", chance)
+    margin = chance - own
+    print(f"\nchance nll {chance:.3f} (uniform over the vocabulary)")
+    print(f"teacher on its own output: nll {own:.3f}, "
+          f"{margin:.2f} nats below chance, top-1 "
+          f"{top1.get('mephisto completions', 0):.2%}")
+    ranking_ok = top1.get("mephisto completions", 0) > 0.5
+    calibration_ok = margin > 5.0
+    print(f"  ranking     {'OK' if ranking_ok else 'FAILED'} "
+          "(argmax recovers the sampled token)")
+    print(f"  calibration {'OK' if calibration_ok else 'FAILED'} "
+          "(probabilities, not just order, are informative)")
+    if ranking_ok and not calibration_ok:
+        print("  -> weights look right but the head is mis-scaled; check "
+              "normalize_embedding_logits and final_logits_soft_cap")
+    return 0 if (ranking_ok and calibration_ok) else 1
 
 
 if __name__ == "__main__":

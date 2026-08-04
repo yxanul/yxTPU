@@ -44,6 +44,14 @@ mlp_activations: ["silu", "linear"]
 vocab_size: 248320          # padded head; the tokenizer defines 248,077
 normalization_layer_epsilon: 1.0e-6
 logits_via_embedding: true  # tie_word_embeddings: true
+# Qwen3.5 has a plain tied head. base.yml defaults this to true, which
+# divides logits by sqrt(emb_dim) = 50.6 (nnx_decoders.py:1368) - the
+# argmax is unaffected, so the model still ranks tokens correctly, but the
+# softmax flattens to near-uniform. Measured: 87% top-1 on the teacher's
+# own generations at a perplexity of 151k, i.e. right answers with
+# worthless probabilities. For distillation that is fatal and silent,
+# since GOLD trains on the distribution, not the argmax.
+normalize_embedding_logits: false
 
 decoder_block: "qwen3_5"
 inhomogeneous_layer_cycle_interval: 4   # full_attention_interval

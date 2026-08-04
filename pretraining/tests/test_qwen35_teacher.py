@@ -154,6 +154,11 @@ def test_the_shipped_4b_config_is_dense_and_matches_the_released_shapes():
     # scan needs ~32.5G against a v4 chip's 30.75G, so the teacher does not
     # load. The released weights are bfloat16 anyway.
     assert config["weight_dtype"] == "bfloat16"
+    # Also not cosmetic, and worse because it is silent: base.yml defaults
+    # this true, which divides logits by sqrt(emb_dim) for tied heads. The
+    # argmax survives, so the model looks fine on any accuracy metric while
+    # its softmax is near-uniform - and GOLD distills the distribution.
+    assert config["normalize_embedding_logits"] is False
 
 
 def test_every_hf_tensor_lands_in_a_real_maxtext_slot():
