@@ -1,0 +1,259 @@
+{
+  "summary": {
+    "steps": 20,
+    "seconds": 265.9,
+    "mean_ce": 1.5880120635032653,
+    "student_ppl": 4.894010269985527,
+    "mean_distill": 1.1310898572206498,
+    "mean_residual": 0.03339967897627503,
+    "teacher_top1_is_label": 0.7877820551395416,
+    "stream": {
+      "rows_consumed": 512.0,
+      "rows_dropped_oversize": 11.0,
+      "pad_tokens": 2944.0,
+      "epochs_started": 1.0,
+      "pool_rows": 233.0
+    }
+  },
+  "history": [
+    {
+      "ce": 1.5649698972702026,
+      "tokens": 2266.0,
+      "student_top1_is_label": 0.633274495601654,
+      "distill_tokens": 2266.0,
+      "teacher_residual_mass": 0.00922014657407999,
+      "distill": 0.9996049404144287,
+      "loss": 0.9996049404144287,
+      "teacher_top1_is_label": 0.8102383017539978,
+      "step": 0
+    },
+    {
+      "ce": 1.648902177810669,
+      "tokens": 2617.0,
+      "student_top1_is_label": 0.6014520525932312,
+      "distill_tokens": 2617.0,
+      "teacher_residual_mass": 0.03558511659502983,
+      "distill": 1.2112269401550293,
+      "loss": 1.2112269401550293,
+      "teacher_top1_is_label": 0.806266725063324,
+      "step": 1
+    },
+    {
+      "ce": 1.4787719249725342,
+      "tokens": 2020.0,
+      "student_top1_is_label": 0.6396039724349976,
+      "distill_tokens": 2020.0,
+      "teacher_residual_mass": 0.05499822273850441,
+      "distill": 1.1065704822540283,
+      "loss": 1.1065704822540283,
+      "teacher_top1_is_label": 0.7579208016395569,
+      "step": 2
+    },
+    {
+      "ce": 1.6383458375930786,
+      "tokens": 2255.0,
+      "student_top1_is_label": 0.6075388193130493,
+      "distill_tokens": 2255.0,
+      "teacher_residual_mass": 0.055576618760824203,
+      "distill": 1.2160511016845703,
+      "loss": 1.2160511016845703,
+      "teacher_top1_is_label": 0.7623060345649719,
+      "step": 3
+    },
+    {
+      "ce": 1.4336470365524292,
+      "tokens": 2031.0,
+      "student_top1_is_label": 0.658788800239563,
+      "distill_tokens": 2031.0,
+      "teacher_residual_mass": 0.052033741027116776,
+      "distill": 1.1069461107254028,
+      "loss": 1.1069461107254028,
+      "teacher_top1_is_label": 0.8143771886825562,
+      "step": 4
+    },
+    {
+      "ce": 1.7293837070465088,
+      "tokens": 2256.0,
+      "student_top1_is_label": 0.5926418304443359,
+      "distill_tokens": 2256.0,
+      "teacher_residual_mass": 0.02958892099559307,
+      "distill": 1.24629545211792,
+      "loss": 1.24629545211792,
+      "teacher_top1_is_label": 0.7805851101875305,
+      "step": 5
+    },
+    {
+      "ce": 1.753266453742981,
+      "tokens": 2609.0,
+      "student_top1_is_label": 0.579149067401886,
+      "distill_tokens": 2609.0,
+      "teacher_residual_mass": 0.016611546277999878,
+      "distill": 1.1780437231063843,
+      "loss": 1.1780437231063843,
+      "teacher_top1_is_label": 0.7968569993972778,
+      "step": 6
+    },
+    {
+      "ce": 1.612711787223816,
+      "tokens": 2218.0,
+      "student_top1_is_label": 0.6248872876167297,
+      "distill_tokens": 2218.0,
+      "teacher_residual_mass": 0.07496222108602524,
+      "distill": 1.3393378257751465,
+      "loss": 1.3393378257751465,
+      "teacher_top1_is_label": 0.7673580050468445,
+      "step": 7
+    },
+    {
+      "ce": 1.678019404411316,
+      "tokens": 2760.0,
+      "student_top1_is_label": 0.6181159615516663,
+      "distill_tokens": 2760.0,
+      "teacher_residual_mass": 0.023261312395334244,
+      "distill": 1.2175192832946777,
+      "loss": 1.2175192832946777,
+      "teacher_top1_is_label": 0.8304347991943359,
+      "step": 8
+    },
+    {
+      "ce": 1.4219400882720947,
+      "tokens": 1939.0,
+      "student_top1_is_label": 0.6534296274185181,
+      "distill_tokens": 1939.0,
+      "teacher_residual_mass": 0.011140077374875546,
+      "distill": 0.8816846013069153,
+      "loss": 0.8816846013069153,
+      "teacher_top1_is_label": 0.7983496785163879,
+      "step": 9
+    },
+    {
+      "ce": 1.5595533847808838,
+      "tokens": 2126.0,
+      "student_top1_is_label": 0.629821240901947,
+      "distill_tokens": 2126.0,
+      "teacher_residual_mass": 0.016470709815621376,
+      "distill": 1.0163075923919678,
+      "loss": 1.0163075923919678,
+      "teacher_top1_is_label": 0.7977422475814819,
+      "step": 10
+    },
+    {
+      "ce": 1.6823557615280151,
+      "tokens": 2262.0,
+      "student_top1_is_label": 0.5941644310951233,
+      "distill_tokens": 2262.0,
+      "teacher_residual_mass": 0.029705919325351715,
+      "distill": 1.2041194438934326,
+      "loss": 1.2041194438934326,
+      "teacher_top1_is_label": 0.7696728110313416,
+      "step": 11
+    },
+    {
+      "ce": 1.6044480800628662,
+      "tokens": 2071.0,
+      "student_top1_is_label": 0.6069532036781311,
+      "distill_tokens": 2071.0,
+      "teacher_residual_mass": 0.049939028918743134,
+      "distill": 1.2001088857650757,
+      "loss": 1.2001088857650757,
+      "teacher_top1_is_label": 0.7440850138664246,
+      "step": 12
+    },
+    {
+      "ce": 1.663419485092163,
+      "tokens": 2347.0,
+      "student_top1_is_label": 0.5986365675926208,
+      "distill_tokens": 2347.0,
+      "teacher_residual_mass": 0.023636767640709877,
+      "distill": 1.178385615348816,
+      "loss": 1.178385615348816,
+      "teacher_top1_is_label": 0.8052833080291748,
+      "step": 13
+    },
+    {
+      "ce": 1.7320489883422852,
+      "tokens": 2486.0,
+      "student_top1_is_label": 0.6065968871116638,
+      "distill_tokens": 2486.0,
+      "teacher_residual_mass": 0.08096189051866531,
+      "distill": 1.4292738437652588,
+      "loss": 1.4292738437652588,
+      "teacher_top1_is_label": 0.7534191012382507,
+      "step": 14
+    },
+    {
+      "ce": 1.6199613809585571,
+      "tokens": 2271.0,
+      "student_top1_is_label": 0.6054601669311523,
+      "distill_tokens": 2271.0,
+      "teacher_residual_mass": 0.005562597420066595,
+      "distill": 1.0488625764846802,
+      "loss": 1.0488625764846802,
+      "teacher_top1_is_label": 0.7807133793830872,
+      "step": 15
+    },
+    {
+      "ce": 1.393460750579834,
+      "tokens": 2254.0,
+      "student_top1_is_label": 0.6428571343421936,
+      "distill_tokens": 2254.0,
+      "teacher_residual_mass": 0.008482015691697598,
+      "distill": 0.8914930820465088,
+      "loss": 0.8914930820465088,
+      "teacher_top1_is_label": 0.8300798535346985,
+      "step": 16
+    },
+    {
+      "ce": 1.6225122213363647,
+      "tokens": 2358.0,
+      "student_top1_is_label": 0.6047497987747192,
+      "distill_tokens": 2358.0,
+      "teacher_residual_mass": 0.019490113481879234,
+      "distill": 1.0766485929489136,
+      "loss": 1.0766485929489136,
+      "teacher_top1_is_label": 0.8040712475776672,
+      "step": 17
+    },
+    {
+      "ce": 1.3508518934249878,
+      "tokens": 2168.0,
+      "student_top1_is_label": 0.642988920211792,
+      "distill_tokens": 2168.0,
+      "teacher_residual_mass": 0.03689992055296898,
+      "distill": 1.0014142990112305,
+      "loss": 1.0014142990112305,
+      "teacher_top1_is_label": 0.7730627059936523,
+      "step": 18
+    },
+    {
+      "ce": 1.5716710090637207,
+      "tokens": 2509.0,
+      "student_top1_is_label": 0.6062175631523132,
+      "distill_tokens": 2509.0,
+      "teacher_residual_mass": 0.03386669233441353,
+      "distill": 1.0719027519226074,
+      "loss": 1.0719027519226074,
+      "teacher_top1_is_label": 0.7728177905082703,
+      "step": 19
+    }
+  ],
+  "settings": {
+    "teacher_checkpoint": "/home/a1111/yxtpu_ckpts/qwen35-4b-teacher",
+    "student_checkpoint": "ckpt/sft-mephisto-v2/1200/state.pkl",
+    "model": "kda_hybrid_yx49k_l20",
+    "data": "climbmix_yx49k",
+    "tokenizer": "tokenizers/yx49k",
+    "datasets": "Yxanul/Mephisto-IF_172k",
+    "mapping": "tokenizers/yx49k/student_to_teacher.npy",
+    "covered": "tokenizers/yx49k/teacher_covered.npy",
+    "sequence": 1024,
+    "batch": 4,
+    "steps": 20,
+    "beta": 0.0,
+    "distill_weight": 1.0,
+    "ce_weight": 0.0,
+    "tensor_parallelism": 4,
+    "dry_run": false,
+    "output": "/tmp/gold_offpolicy.json"
+  }
+}
