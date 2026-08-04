@@ -90,6 +90,7 @@ class Qwen35Teacher:
         batch=1,
         tensor_parallelism=4,
         valid_vocab=None,
+        attention="dot_product",
     ):
         import orbax.checkpoint as ocp
         from jax.sharding import Mesh
@@ -111,6 +112,12 @@ class Qwen35Teacher:
             "skip_jax_distributed_system=true", "enable_checkpointing=false",
             "scan_layers=true",
             f"ici_tensor_parallelism={tensor_parallelism}",
+            # Splash attention rejects this sharding ("the sharding must
+            # divide the mask blocks evenly between devices"). Only 8 of 32
+            # layers use full attention and this is forward-only scoring, so
+            # dot_product is the cheap way out: at seq 1024 with 16 heads
+            # the materialized matrix is ~32MB, transient.
+            f"attention={attention}",
         ])
         self.config = config
         mesh = Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
