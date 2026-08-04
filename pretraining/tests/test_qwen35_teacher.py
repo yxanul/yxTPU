@@ -152,6 +152,80 @@ def test_the_shipped_4b_config_is_dense_and_matches_the_released_shapes():
     assert config["use_mrope"] is False
 
 
+def test_every_hf_tensor_lands_in_a_real_maxtext_slot():
+    """Runs the whole fill path against synthetic tensors of exactly the
+    released shapes, into a tree read from the model by eval_shape.
+
+    This is the check that every transpose and reshape is right, and that
+    no slot is missed or double-written: ``_put`` raises on any shape
+    disagreement, and the target tree is the model's own, not a transcript
+    of it. Reduced width so the zeros fit in memory - the 4B tree alone is
+    8.4 GB.
+    """
+    converter = _converter()
+    geometry_source = {
+        "hidden_size": 128, "num_hidden_layers": 8, "vocab_size": 512,
+        "intermediate_size": 256, "full_attention_interval": 4,
+        "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 32,
+        "linear_num_key_heads": 4, "linear_num_value_heads": 8,
+        "linear_key_head_dim": 16, "linear_value_head_dim": 16,
+        "linear_conv_kernel_dim": 4,
+    }
+    g = converter.geometry(geometry_source)
+    _, tree = converter.abstract_tree(
+        model_name=None,
+        base="../maxtext/src/maxtext/configs/base.yml",
+        overrides=[
+            "decoder_block=qwen3_5", "num_experts=1",
+            f"base_emb_dim={g['emb']}",
+            f"base_num_decoder_layers={g['layers']}",
+            f"base_num_query_heads={g['q_heads']}",
+            f"base_num_kv_heads={g['kv_heads']}",
+            f"head_dim={g['head_dim']}", f"base_mlp_dim={g['mlp']}",
+            "mlp_activations=['silu','linear']",
+            f"vocab_size={g['vocab']}", "logits_via_embedding=true",
+            f"inhomogeneous_layer_cycle_interval={g['interval']}",
+            f"gdn_num_key_heads={g['key_heads']}",
+            f"gdn_num_value_heads={g['value_heads']}",
+            f"gdn_key_head_dim={g['head_k']}",
+            f"gdn_value_head_dim={g['head_v']}",
+            f"gdn_conv_kernel_dim={g['conv_kernel']}",
+            "gdn_chunk_size=64", "partial_rotary_factor=0.25",
+            "rope_max_timescale=10000000", "use_mrope=false",
+            "normalization_layer_epsilon=1.0e-6", "enable_dropout=false",
+        ],
+    )
+    shapes = converter.expected_hf_shapes(g)
+    # Distinct values per tensor, so a mis-slotted write is detectable.
+    hf = {name: np.full(shape, float(index + 1), dtype=np.float32)
+          for index, (name, shape) in enumerate(sorted(shapes.items()))}
+
+    converter.fill(tree, hf, g)   # raises on any shape disagreement
+
+    # Nothing may be left at its initialized zero: every slot got written.
+    unwritten = [name for name, value in _flat(tree) if not np.any(value)]
+    assert not unwritten, f"never filled: {unwritten}"
+
+
+def _flat(node, prefix=""):
+    for key, value in node.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            yield from _flat(value, path)
+        else:
+            yield path, value
+
+
+def _converter():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "convert_qwen35_teacher", "benchmarks/convert_qwen35_teacher.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_gdn_interleave_inverts_maxtexts_own_split():
     """Qwen3.5 ships q/k/v/z as separate contiguous tensors; MaxText wants
     them fused and grouped per key head. Converting is an interleave, and
