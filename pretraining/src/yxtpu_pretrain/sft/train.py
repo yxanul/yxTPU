@@ -82,8 +82,18 @@ def main() -> int:
     parser.add_argument("--init-run", default="kda_hybrid_128k-muonclip-superbpe_50b")
     parser.add_argument("--out-destination", default="/home/a1111/yxtpu_sft_ckpts")
     parser.add_argument("--steps-cap", type=int, default=2000)
+    parser.add_argument(
+        "--gold-targets", default=None,
+        help="directory of precomputed teacher targets "
+             "(benchmarks/precompute_gold_targets.py); switches the loss to "
+             "the GOLD objective. Mephisto path only.")
+    parser.add_argument("--gold-beta", type=float, default=0.0)
+    parser.add_argument("--gold-distill-weight", type=float, default=1.0)
+    parser.add_argument("--gold-ce-weight", type=float, default=0.0)
     parser.add_argument("--set", action="append", dest="overrides", default=[])
     args = parser.parse_args()
+    if args.gold_targets and not args.mephisto:
+        parser.error("--gold-targets requires --mephisto")
 
     base_overrides = [
         f"experiment.steps={args.steps_cap}",
@@ -146,6 +156,14 @@ def main() -> int:
     if args.mephisto:
         from yxtpu_pretrain.sft.mephisto import MephistoIterator
 
+        gold_store = None
+        if args.gold_targets:
+            from yxtpu_pretrain.distillation.store import GoldTargetStore
+
+            gold_store = GoldTargetStore(args.gold_targets)
+            if is_primary:
+                print(f"gold targets: {len(gold_store)} examples, "
+                      f"k={gold_store.k} from {args.gold_targets}", flush=True)
         iterator = MephistoIterator(
             tokenizer,
             datasets=[s.strip() for s in args.mephisto.split(",") if s.strip()],
@@ -157,6 +175,7 @@ def main() -> int:
             system=args.system,
             shuffle_buffer=args.shuffle_buffer,
             seed=config.experiment.seed,
+            targets=gold_store,
         )
         if is_primary:
             print(f"mephisto SFT: {args.mephisto} x{args.epochs} epochs", flush=True)
@@ -206,11 +225,21 @@ def main() -> int:
         if is_primary:
             print(f"packed rows: {len(inputs)}, tokens/epoch ~{len(inputs)*inputs.shape[1]:,}", flush=True)
 
-    train_step = _make_train_step(config)
+    gold_loss_fn = None
+    if args.gold_targets:
+        from yxtpu_pretrain.distillation.objective import make_gold_model_loss
+
+        gold_loss_fn = make_gold_model_loss(
+            beta=args.gold_beta,
+            distill_weight=args.gold_distill_weight,
+            ce_weight=args.gold_ce_weight,
+        )
+    train_step = _make_train_step(config, loss_fn=gold_loss_fn)
     run_name = (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         + f"-sft-{config.model.name}-"
-        + ("mephisto" if args.mephisto else args.subset.lower())
+        + ("gold" if args.gold_targets
+           else "mephisto" if args.mephisto else args.subset.lower())
     )
     run_dir = Path(config.experiment.run_dir).expanduser().resolve() / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -252,13 +281,21 @@ def main() -> int:
                 "grad_norm": float(host["grad_norm"]),
                 "learning_rate": _learning_rate(config, step),
             }
+            for gold_key in ("ce", "distill", "teacher_rest_mass",
+                             "teacher_top1_is_label", "student_top1_is_label"):
+                if gold_key in host:
+                    record[gold_key] = float(host[gold_key])
             if step % 25 == 0 or step == 1:
                 record["data"] = dict(getattr(iterator, "stats", {}))
             metrics_writer.write(record)
             if is_primary:
                 print(json.dumps(record, sort_keys=True), flush=True)
             payload = {
-                "train": {"loss": loss},
+                "train": {"loss": loss} | {
+                    key: record[key]
+                    for key in ("ce", "distill", "teacher_rest_mass")
+                    if key in record
+                },
                 "optimizer": {
                     "grad_norm": record["grad_norm"],
                     "learning_rate": record["learning_rate"]},

@@ -182,3 +182,98 @@ def gold_position_loss(
         ) / token_count,
     }
     return loss, metrics
+
+
+def topk_teacher_targets(
+    matched_logprobs: jax.Array,
+    residual_mass: jax.Array,
+    k: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compresses a projected teacher distribution to its top-K + one tail.
+
+    Returns ``(ids [*, k], logprobs [*, k], rest_mass [*])`` where ``rest``
+    is everything the K entries do not carry: the matched tail beyond K
+    plus the unmatched residual. Computed on device so only K columns ever
+    cross to the host - the point of precomputing targets is to not store
+    49,152 floats per position.
+
+    At ``k = student_vocab`` the compression is exact: ``rest`` equals the
+    residual and ``gold_topk_position_loss`` reproduces
+    ``gold_position_loss(beta=0)`` bit-for-bit, which the tests pin.
+    """
+    del residual_mass  # implied by what the top-K entries do not carry
+    top_logprobs, top_ids = jax.lax.top_k(matched_logprobs, k)
+    kept = jnp.exp(jax.scipy.special.logsumexp(top_logprobs, axis=-1))
+    rest = jnp.clip(1.0 - kept, 0.0, 1.0)
+    return top_ids, top_logprobs, rest
+
+
+def gold_topk_position_loss(
+    student_logits: jax.Array,
+    teacher_topk_ids: jax.Array,
+    teacher_topk_logprobs: jax.Array,
+    teacher_rest_mass: jax.Array,
+    position_mask: jax.Array,
+    *,
+    beta: float = 0.0,
+) -> tuple[jax.Array, dict]:
+    """The GOLD divergence against a top-K-compressed teacher.
+
+    The teacher's K entries are renormalized to a proper distribution over
+    the K set (mirroring ``renormalize_teacher`` in the full loss, with the
+    tail playing the residual's role). The student side differs by beta:
+
+    * ``beta=0`` (forward KL) uses the student's RAW log-probabilities at
+      the K ids - not renormalized over K. The sum then equals
+      ``KL(teacher_K || student_K) - log(student mass on K)``: the exact
+      truncated forward KL plus a coverage term that pushes the student's
+      mass INTO the teacher's top-K set. Non-negative, zero exactly when
+      the student matches the renormalized teacher on K and carries no
+      mass outside it.
+    * ``beta>0`` needs a student distribution on the same support, so the
+      student is renormalized over the K set and the generalized JSD is
+      computed there (paper orientation, as in ``gold_position_loss``).
+      The coverage pressure is then absent - mode-seeking betas do not
+      want it.
+    """
+    student_logprobs = jax.nn.log_softmax(
+        student_logits.astype(jnp.float32), axis=-1
+    )
+    picked = jnp.take_along_axis(
+        student_logprobs, teacher_topk_ids, axis=-1
+    )
+    log_kept = jnp.log1p(-jnp.clip(teacher_rest_mass, 0.0, 0.999))
+    teacher_logprobs = teacher_topk_logprobs - log_kept[..., None]
+    teacher_probs = jnp.exp(teacher_logprobs)
+
+    if beta == 0.0:
+        divergence = jnp.sum(
+            teacher_probs * (teacher_logprobs - picked), axis=-1
+        )
+    else:
+        student_restricted = jax.nn.log_softmax(picked, axis=-1)
+        student_probs = jnp.exp(student_restricted)
+        if beta == 1.0:
+            divergence = jnp.sum(
+                student_probs * (student_restricted - teacher_logprobs),
+                axis=-1,
+            )
+        else:
+            mixture = beta * teacher_probs + (1.0 - beta) * student_probs
+            log_mixture = jnp.log(jnp.clip(mixture, 1e-30, None))
+            divergence = beta * jnp.sum(
+                teacher_probs * (teacher_logprobs - log_mixture), axis=-1
+            ) + (1.0 - beta) * jnp.sum(
+                student_probs * (student_restricted - log_mixture), axis=-1
+            )
+
+    weights = position_mask.astype(jnp.float32)
+    token_count = jnp.maximum(jnp.sum(weights), 1.0)
+    loss = jnp.sum(divergence * weights) / token_count
+    metrics = {
+        "distill_tokens": token_count,
+        "teacher_rest_mass": jnp.sum(
+            teacher_rest_mass * weights
+        ) / token_count,
+    }
+    return loss, metrics
