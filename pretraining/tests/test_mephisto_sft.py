@@ -220,3 +220,37 @@ def test_row_limits_are_parsed_and_applied(tokenizer):
         sequence_length=64, process_batch=1, process_index=0, process_count=1,
     )
     assert it._specs == [("repo/a", None), ("repo/b", 1234)]
+
+
+def test_packed_examples_get_their_own_segment_and_positions(tokenizer, monkeypatch):
+    """Cross-example attention was silently on: every real token shared
+    segment 1 and positions ran straight through the row, so example k+1
+    read example k as context. For GOLD that means the teacher's targets at
+    the start of a packed example were conditioned on an unrelated
+    conversation - not the conditioning it generated under."""
+    import datasets
+
+    rows = [_record(f"Q{i}?", f"A{i}") for i in range(8)]
+    monkeypatch.setattr(datasets, "load_dataset",
+                        lambda spec, split, streaming: _FakeStream(rows),
+                        raising=False)
+    it = MephistoIterator(
+        tokenizer, datasets=["repo/only"], sequence_length=256,
+        process_batch=1, process_index=0, process_count=1, epochs=1,
+        system=SYSTEM,
+    )
+    batch = next(iter(it))
+    segments = batch["segment_ids"][0]
+    positions = batch["positions"][0]
+    real = segments > 0
+    assert real.any()
+    # More than one example packed, each with a distinct id.
+    distinct = sorted(set(segments[real].tolist()))
+    assert len(distinct) >= 2, f"expected packing, got segments {distinct}"
+    assert distinct == list(range(1, len(distinct) + 1))
+    # Positions restart at 0 for every example rather than running through.
+    for segment in distinct:
+        span = positions[segments == segment]
+        np.testing.assert_array_equal(span, np.arange(len(span)))
+    # Pad is segment 0 and excluded from attention.
+    assert (segments[~real] == 0).all()

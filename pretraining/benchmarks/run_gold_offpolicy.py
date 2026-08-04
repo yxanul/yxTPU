@@ -12,7 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GOLD at lambda = 0: the teacher scores fixed data, not student rollouts.
+"""Measures the GOLD objective at lambda = 0. Does NOT train.
+
+This is a probe, not a training loop: it runs the forward passes, computes
+the objective and reports metrics. There is no optimizer step, so nothing
+here can improve the student. Wiring the update into sft/train.py is the
+next piece of work, and until then no number produced by this script
+should be read as "GOLD beat the baseline".
+
+What it does establish is whether the machinery is sound on real data -
+teacher residual mass, teacher/student agreement, and the magnitude of
+each loss term at the current checkpoint.
 
 The rung below on-policy, and the one that isolates the parts worth
 isolating. Sequences come from the Mephisto sets rather than from the
@@ -26,8 +36,9 @@ examples. The teacher then reads ``student_to_teacher[input_ids]`` - the
 student's own segmentation, mapped - so supervision is 1:1 at every
 position with no alignment pass.
 
-``--dry-run`` skips the teacher and reports the student's CE alone, which
-is the number GOLD has to beat.
+``--dry-run`` skips the teacher and reports the student's CE alone - the
+reference point a future training run would have to move, not something
+this script competes with.
 
   TPU_PROCESS_BOUNDS=1,1,1 TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1 \
   TPU_VISIBLE_DEVICES=0,1,2,3 .venv/bin/python \
@@ -107,7 +118,7 @@ def main() -> int:
     parser.add_argument("--ce-weight", type=float, default=0.0)
     parser.add_argument("--tensor-parallelism", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true",
-                        help="student CE only; the baseline GOLD must beat")
+                        help="student CE only, as a reference point; nothing here trains")
     parser.add_argument("--output", default="/tmp/gold_offpolicy.json")
     arguments = parser.parse_args()
 
@@ -193,6 +204,11 @@ def main() -> int:
             np.mean([r["teacher_residual_mass"] for r in history]))
         summary["teacher_top1_is_label"] = float(
             np.mean([r["teacher_top1_is_label"] for r in history]))
+    # Oversize rows are dropped silently at this sequence length, and the
+    # sets were generated with max_tokens 16384: without this the probe
+    # could be reporting a short-example-biased slice and every residual
+    # and agreement number would look rosier than the training mixture.
+    summary["stream"] = {k: float(v) for k, v in stream.stats.items()}
     print(f"\n{json.dumps(summary, indent=2)}", flush=True)
     with open(arguments.output, "w", encoding="utf-8") as handle:
         json.dump({"summary": summary, "history": history,
