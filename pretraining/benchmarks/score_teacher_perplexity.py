@@ -58,6 +58,23 @@ SYSTEM = ("You are a helpful assistant. Answer the user's question "
           "accurately, clearly, and concisely.")
 
 
+def _find_weights(node, depth=0):
+    """Finds the parameter root: the dict holding decoder and token_embedder."""
+    if not isinstance(node, dict):
+        raise ValueError("no parameter root found in the restored checkpoint")
+    if "decoder" in node and "token_embedder" in node:
+        return node
+    if depth > 4:
+        raise ValueError(f"no parameter root within 4 levels; keys {list(node)}")
+    for value in node.values():
+        if isinstance(value, dict):
+            try:
+                return _find_weights(value, depth + 1)
+            except ValueError:
+                continue
+    raise ValueError(f"no parameter root under keys {list(node)}")
+
+
 def load_model(checkpoint, base, model_name, sequence):
     from jax.sharding import Mesh
     import orbax.checkpoint as ocp
@@ -83,8 +100,13 @@ def load_model(checkpoint, base, model_name, sequence):
     manager = ocp.CheckpointManager(checkpoint, options=ocp.CheckpointManagerOptions())
     step = manager.latest_step()
     print(f"restoring step {step} from {checkpoint}", flush=True)
-    restored = manager.restore(step)
-    weights = restored["params"]["params"]
+    # MaxText saves a TrainState under a Composite item named "items", so a
+    # bare restore() returns the wrapper rather than the tree. Ask for a
+    # PyTree explicitly, then locate the weights by their own shape instead
+    # of hard-coding how many wrappers deep they sit.
+    restored = manager.restore(
+        step, args=ocp.args.Composite(items=ocp.args.PyTreeRestore()))
+    weights = _find_weights(restored["items"])
 
     nnx.replace_by_pure_dict(params, weights)
     model = nnx.merge(graphdef, params, rest)
