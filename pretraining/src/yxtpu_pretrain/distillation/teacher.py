@@ -18,7 +18,6 @@ from the config rather than hand-rolled, and each array is placed through
 
 from __future__ import annotations
 
-import functools
 
 import jax
 import jax.numpy as jnp
@@ -150,13 +149,17 @@ class Qwen35Teacher:
         i directly, with no further shift.
         """
         if self._scorer is None:
-            self._scorer = jax.jit(functools.partial(
-                _score, model=self.model, mapping=self.mapping,
-                valid_vocab=self.valid_vocab))
-        return self._scorer(student_input_ids, positions, segment_ids)
+            # nnx.jit, not jax.jit: MaxText's decoder reassigns self.layers
+            # inside the layer scan (nnx_decoders.py:1771), and mutating a
+            # module built outside the trace raises TraceContextError.
+            # nnx.jit splits and remerges the module across the boundary so
+            # the write lands at the right trace level.
+            self._scorer = nnx.jit(_score, static_argnums=(5,))
+        return self._scorer(self.model, student_input_ids, positions,
+                            segment_ids, self.mapping, self.valid_vocab)
 
 
-def _score(student_input_ids, positions, segment_ids, *, model, mapping,
+def _score(model, student_input_ids, positions, segment_ids, mapping,
            valid_vocab):
     from maxtext.common.common_types import MODEL_MODE_TRAIN
 
