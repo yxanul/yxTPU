@@ -35,13 +35,20 @@ class _NoIterator:
         raise AssertionError("stream state must not restore during SFT init")
 
 
-def _reinit_new_token_rows(model):
-    """New chat-token rows start at the mean of the trained vocabulary."""
+def _reinit_new_token_rows(model, new_ids=None, trained_upto=128001):
+    """New chat-token rows start at the mean of the trained vocabulary.
+
+    Defaults describe the 128k K2.5 scheme. The yx49k tokenizer carries its
+    chat specials natively at 49120-49151, which pretraining never emitted,
+    so those rows need the same treatment against a 49119 boundary.
+    """
     embedding = model.token_embedding.embedding
     table = embedding.get_value()
-    trained = table[:128001].astype(jnp.float32)
+    trained = table[:trained_upto].astype(jnp.float32)
     mean_row = jnp.mean(trained, axis=0, dtype=jnp.float32)
-    new_ids = jnp.asarray([token_id for _, token_id in SPECIAL_TOKENS])
+    if new_ids is None:
+        new_ids = [token_id for _, token_id in SPECIAL_TOKENS]
+    new_ids = jnp.asarray(new_ids)
     table = table.at[new_ids].set(mean_row.astype(table.dtype))
     embedding.set_value(table)
     return [int(i) for i in new_ids]
@@ -55,6 +62,13 @@ def main() -> int:
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--sources", default=None)
     parser.add_argument("--shuffle-seed", type=int, default=None)
+    parser.add_argument(
+        "--mephisto", default=None,
+        help="comma list of Mephisto repos; selects the yx49k native Qwen "
+             "chat path instead of the K2.5 scheme")
+    parser.add_argument("--system", default=None)
+    parser.add_argument("--model", default="kda_hybrid_128k")
+    parser.add_argument("--data", default="climbmix_superbpe")
     parser.add_argument(
         "--mixture", default=None,
         help="interleave configs of --dataset by record probability, "
@@ -83,7 +97,7 @@ def main() -> int:
         "experiment.wandb.tags=[v4-64, sft, kimi-k25-distill]",
     ]
     config = load_config(
-        model="kda_hybrid_128k", optimizer="muonclip", data="climbmix_superbpe",
+        model=args.model, optimizer="muonclip", data=args.data,
         hardware="v4-64", experiment="superbpe_50b",
         overrides=base_overrides + list(args.overrides or []),
     )
@@ -104,14 +118,47 @@ def main() -> int:
         raise RuntimeError("no pretraining checkpoint found to initialize from")
     with logical_mesh_context(mesh, rules):
         state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
-        new_rows = _reinit_new_token_rows(model)
+        if args.mephisto:
+            from yxtpu_pretrain.sft.mephisto import UNTRAINED_SPECIAL_RANGE
+
+            low, high = UNTRAINED_SPECIAL_RANGE
+            new_rows = _reinit_new_token_rows(
+                model, new_ids=list(range(low, high)), trained_upto=low
+            )
+        else:
+            new_rows = _reinit_new_token_rows(model)
     is_primary = jax.process_index() == 0
     if is_primary:
         print(f"initialized from step {start}; re-initialized rows {new_rows}", flush=True)
 
-    tokenizer = load_sft_tokenizer(config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
+    if args.mephisto:
+        # yx49k ships the Qwen3.5 chat template verbatim - no special ids to
+        # append, so the plain tokenizer is already the chat tokenizer.
+        from yxtpu_pretrain.runtime.data import load_fast_tokenizer
+
+        tokenizer = load_fast_tokenizer(
+            config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
+    else:
+        tokenizer = load_sft_tokenizer(
+            config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
     process_batch = config.data.per_device_batch_size * jax.local_device_count()
-    if args.stream:
+    if args.mephisto:
+        from yxtpu_pretrain.sft.mephisto import MephistoIterator
+
+        iterator = MephistoIterator(
+            tokenizer,
+            datasets=[s.strip() for s in args.mephisto.split(",") if s.strip()],
+            sequence_length=config.data.sequence_length,
+            process_batch=process_batch,
+            process_index=jax.process_index(),
+            process_count=jax.process_count(),
+            epochs=args.epochs,
+            system=args.system,
+        )
+        if is_primary:
+            print(f"mephisto SFT: {args.mephisto} x{args.epochs} epochs", flush=True)
+        run_packed = False
+    elif args.stream:
         mixture = None
         if args.mixture:
             mixture = []
@@ -159,7 +206,8 @@ def main() -> int:
     train_step = _make_train_step(config)
     run_name = (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        + f"-sft-{config.model.name}-{args.subset.lower()}"
+        + f"-sft-{config.model.name}-"
+        + ("mephisto" if args.mephisto else args.subset.lower())
     )
     run_dir = Path(config.experiment.run_dir).expanduser().resolve() / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
