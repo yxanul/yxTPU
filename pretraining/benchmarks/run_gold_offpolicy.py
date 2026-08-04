@@ -161,8 +161,8 @@ def main() -> int:
 
         with logical_mesh_context(mesh, rules):
             student_logits = state.model(
-                input_ids, positions=positions, segment_ids=segments,
-                deterministic=True)
+                input_ids, decoder_positions=positions,
+                decoder_segment_ids=segments)
         if isinstance(student_logits, tuple):
             student_logits = student_logits[0]
 
