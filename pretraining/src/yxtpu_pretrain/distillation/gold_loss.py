@@ -156,13 +156,20 @@ def gold_position_loss(
             student_probs * (student_logprobs - teacher_logprobs), axis=-1
         )
     else:
+        # GKD paper Eq. (1) orientation, as TRL implements it: beta weights
+        # the TEACHER in both the mixture and the KL sum, so beta -> 0
+        # approaches beta * KL(teacher || student) - scaled forward KL,
+        # continuous in direction with the beta=0 special case above. The
+        # first version of this branch had the roles mirrored, which made
+        # beta=0.1 behave like the paper's beta=0.9;
+        # test_small_beta_approaches_the_forward_kl now pins the direction.
         student_probs = jnp.exp(student_logprobs)
-        mixture = beta * student_probs + (1.0 - beta) * teacher_probs
+        mixture = beta * teacher_probs + (1.0 - beta) * student_probs
         log_mixture = jnp.log(jnp.clip(mixture, 1e-30, None))
         divergence = beta * jnp.sum(
-            student_probs * (student_logprobs - log_mixture), axis=-1
-        ) + (1.0 - beta) * jnp.sum(
             teacher_probs * (teacher_logprobs - log_mixture), axis=-1
+        ) + (1.0 - beta) * jnp.sum(
+            student_probs * (student_logprobs - log_mixture), axis=-1
         )
 
     weights = position_mask.astype(jnp.float32)
