@@ -30,7 +30,14 @@ from yxtpu_pretrain.distillation.alignment import (
     verify_direct_map,
 )
 
+from yxtpu_pretrain.distillation.objective import (
+    cross_entropy,
+    gold_objective,
+)
+
 __all__ = [
+    "cross_entropy",
+    "gold_objective",
     "DirectMapReport",
     "QWEN35_LOGIT_WIDTH",
     "QWEN35_VALID_VOCAB",
