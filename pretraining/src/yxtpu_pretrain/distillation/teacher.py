@@ -97,7 +97,7 @@ class Qwen35Teacher:
         from maxtext import pyconfig
         from maxtext.common.common_types import MODEL_MODE_TRAIN
         from maxtext.models.models import Transformer
-        from maxtext.utils import max_utils
+        from maxtext.utils import maxtext_utils
 
         mapping = np.asarray(student_to_teacher)
         validate_student_to_teacher(mapping, teacher_vocab=valid_vocab)
@@ -113,7 +113,7 @@ class Qwen35Teacher:
             f"ici_tensor_parallelism={tensor_parallelism}",
         ])
         self.config = config
-        mesh = Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
+        mesh = Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
         self.mesh = mesh
 
         model = Transformer(config=config, mesh=mesh, quant=None,
