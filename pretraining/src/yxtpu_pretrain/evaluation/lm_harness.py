@@ -115,18 +115,32 @@ class JaxHarnessLM(TemplateLM):
         )
         self._score = _score_step()
         self._data_matrix = NamedSharding(mesh, PartitionSpec("data", None))
-        self.generation = generation
         if generation is not None:
-            # Generative tasks need the chat tokenizer's specials (the SFT
-            # <|im_end|> is the stop token, and chat-templated prompts encode
-            # role markers), so the scoring tokenizer is replaced wholesale
-            # rather than extended per call.
-            from yxtpu_pretrain.sft.tokens import load_sft_tokenizer
+            if generation.apply_chat_template:
+                # Chat-templated generation needs the 128k-scheme SFT
+                # specials appended at their reserved ids; the scoring
+                # tokenizer is replaced wholesale. (The yx49k tokenizer
+                # carries its chat specials natively — a chat path for it
+                # goes through the plain tokenizer once SFT gen2 lands.)
+                from yxtpu_pretrain.sft.tokens import load_sft_tokenizer
 
-            self.tokenizer = load_sft_tokenizer(
-                config.data.tokenizer,
-                padded_vocab_size=config.model.vocab_size,
-            )
+                self.tokenizer = load_sft_tokenizer(
+                    config.data.tokenizer,
+                    padded_vocab_size=config.model.vocab_size,
+                )
+            else:
+                # Base-model generation: keep the scoring tokenizer and stop
+                # on its own eos rather than the chat scheme's hardcoded ids.
+                generation = dataclasses.replace(
+                    generation,
+                    end_token=int(self.tokenizer.eos_token_id),
+                    pad_token=int(
+                        self.tokenizer.pad_token_id
+                        if self.tokenizer.pad_token_id is not None
+                        else self.tokenizer.eos_token_id
+                    ),
+                )
+        self.generation = generation
 
     @property
     def eot_token_id(self) -> int:
@@ -279,27 +293,37 @@ class JaxHarnessLM(TemplateLM):
             budget = int(arguments.get("max_gen_toks", settings.max_gen_toks))
             prepared.append((context, until, budget))
 
+        # The decode loop's max_new_tokens and max_length are static jit
+        # arguments; deriving them per chunk from each chunk's longest prompt
+        # recompiles the whole 20-layer loop for nearly every batch. All
+        # prompts are rendered up front and every chunk shares one global
+        # (width, budget) shape, so a full task compiles exactly once.
+        budget = max((item[2] for item in prepared), default=settings.max_gen_toks)
+        keep = self.max_length - budget - 8
+        all_rendered = []
+        for context, _, _ in prepared:
+            row = self._render_generation_prompt(context)
+            all_rendered.append(row[-keep:] if len(row) > keep else row)
+        global_longest = max((len(row) for row in all_rendered), default=1)
+
         outputs: list[str] = []
         width = self.batch_size
+        total_chunks = (len(prepared) + width - 1) // width
         for start in range(0, len(prepared), width):
             chunk = prepared[start : start + width]
-            budget = max(item[2] for item in chunk)
-            rendered = [
-                self._render_generation_prompt(context) for context, _, _ in chunk
-            ]
+            rendered = all_rendered[start : start + width]
             # Pad the final chunk by repeating its last prompt: the decoder
             # takes a fixed batch, and the extra rows are discarded below.
             while len(rendered) < width:
                 rendered.append(rendered[-1])
-            longest = max(len(row) for row in rendered)
-            keep = self.max_length - budget - 8
-            if longest > keep:
-                rendered = [row[-keep:] if len(row) > keep else row for row in rendered]
-                longest = max(len(row) for row in rendered)
+            longest = global_longest
             lengths = np.asarray([len(row) for row in rendered], np.int32)
             padded = np.full((width, longest), settings.pad_token, np.int32)
             for index, row in enumerate(rendered):
                 padded[index, : len(row)] = row
+            if start % (width * 25) == 0:
+                print(f"generate_until: chunk {start // width + 1}/{total_chunks}",
+                      flush=True)
             with logical_mesh_context(self.mesh, self.logical_axis_rules):
                 samples, _ = generate(
                     self.model,

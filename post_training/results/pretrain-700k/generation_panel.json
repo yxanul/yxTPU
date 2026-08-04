@@ -1,0 +1,28 @@
+{
+  "checkpoint": "step 700000",
+  "generation": {
+    "temperature": 0.0,
+    "top_p": 0.9,
+    "repetition_penalty": 1.0,
+    "max_gen_toks": 256,
+    "chat_template": false
+  },
+  "tasks": {
+    "gsm8k": {
+      "seconds": 181,
+      "scores": {
+        "gsm8k/exact_match": 1.1,
+        "gsm8k/sample_len": 131900.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    },
+    "triviaqa": {
+      "seconds": 553,
+      "scores": {
+        "triviaqa/exact_match": 15.3,
+        "triviaqa/sample_len": 1794400.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}
