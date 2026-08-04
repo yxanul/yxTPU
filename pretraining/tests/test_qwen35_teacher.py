@@ -150,3 +150,53 @@ def test_the_shipped_4b_config_is_dense_and_matches_the_released_shapes():
     # Text-only scoring: every mrope position row is identical, so plain
     # RoPE is exact rather than an approximation.
     assert config["use_mrope"] is False
+
+
+def test_gdn_interleave_inverts_maxtexts_own_split():
+    """Qwen3.5 ships q/k/v/z as separate contiguous tensors; MaxText wants
+    them fused and grouped per key head. Converting is an interleave, and
+    getting the grouping wrong scrambles heads without changing any shape -
+    so replay MaxText's reshape and split indices and check the tags."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "convert_qwen35_teacher", "benchmarks/convert_qwen35_teacher.py")
+    converter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(converter)
+
+    # Asymmetric heads, as the 4B has: two value heads per key head.
+    g = {"emb": 4, "key_heads": 2, "value_heads": 4, "head_k": 3,
+         "head_v": 5, "key_dim": 6, "value_dim": 20, "v_per_k": 2}
+    qkv = np.concatenate([
+        np.full((g["key_dim"], g["emb"]), 1.0),
+        np.full((g["key_dim"], g["emb"]), 2.0),
+        np.full((g["value_dim"], g["emb"]), 3.0),
+    ])
+    for head in range(g["key_heads"]):
+        qkv[head * g["head_k"]:(head + 1) * g["head_k"]] += 0.1 * head
+    z = np.full((g["value_dim"], g["emb"]), 4.0)
+
+    fused = converter.fuse_qkvz(qkv, z, g)
+    assert fused.shape == (2 * g["key_dim"] + 2 * g["value_dim"], g["emb"])
+
+    # models/qwen3.py: reshape to (H_k, 2*D_k + 2*D_v*V_per_K), then split.
+    per_head = 2 * g["head_k"] + 2 * g["head_v"] * g["v_per_k"]
+    grouped = fused.reshape(g["key_heads"], per_head, g["emb"])
+    query, key, value, zed = np.split(
+        grouped,
+        [g["head_k"], 2 * g["head_k"],
+         2 * g["head_k"] + g["v_per_k"] * g["head_v"]],
+        axis=1,
+    )
+    assert np.allclose(query[0], 1.0) and np.allclose(query[1], 1.1)
+    assert np.allclose(key, 2.0)
+    assert np.allclose(value, 3.0)
+    assert np.allclose(zed, 4.0)
+
+    b = np.arange(g["value_heads"], dtype=np.float32)[:, None]
+    a = 100 + np.arange(g["value_heads"], dtype=np.float32)[:, None]
+    fused_ba = converter.fuse_ba(b, a, g).reshape(
+        g["key_heads"], 2 * g["v_per_k"])
+    b_out, a_out = np.split(fused_ba, [g["v_per_k"]], axis=1)
+    np.testing.assert_array_equal(b_out.reshape(-1), b.reshape(-1))
+    np.testing.assert_array_equal(a_out.reshape(-1), a.reshape(-1))
