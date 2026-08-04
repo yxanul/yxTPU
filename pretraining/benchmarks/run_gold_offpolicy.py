@@ -58,6 +58,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
+from jax.sharding import NamedSharding, PartitionSpec
 
 SYSTEM = ("You are a helpful assistant. Answer the user's question "
           "accurately, clearly, and concisely.")
@@ -167,6 +168,16 @@ def main() -> int:
         targets = {}
         if teacher is not None:
             matched, residual = teacher.score(input_ids, positions, segments)
+            # The teacher's MaxText mesh orders the same chips differently
+            # than the student's mesh (its create_device_mesh optimizes the
+            # tensor axis: [0,2,1,3] against [0,1,2,3] here), and eager ops
+            # refuse to combine arrays committed to two device orderings.
+            # Land the targets on the student's mesh - batch over data,
+            # matching the student's own logits - before the objective mixes
+            # them.
+            student_batch = NamedSharding(mesh, PartitionSpec("data"))
+            matched = jax.device_put(matched, student_batch)
+            residual = jax.device_put(residual, student_batch)
             targets = {"teacher_matched_logprobs": matched,
                        "teacher_residual_mass": residual}
 
