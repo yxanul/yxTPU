@@ -32,6 +32,13 @@ IM_END = 49121
 # separator (49119) is excluded - it IS trained as the document boundary.
 UNTRAINED_SPECIAL_RANGE = (49120, 49152)
 
+# Published row counts, used as interleaving weights when a source is
+# taken whole.
+_DEFAULT_SIZES = {
+    "Yxanul/Mephisto-IF_172k": 172_000,
+    "Yxanul/Mephisto-Knowledge_538k": 538_861,
+}
+
 
 def render_example(tokenizer, record, *, system: str | None = None):
     """Returns (token ids, loss mask) for one Mephisto row.
@@ -62,10 +69,10 @@ def render_example(tokenizer, record, *, system: str | None = None):
 class MephistoIterator:
     """Streams one or more Mephisto repos, renders, and packs whole rows.
 
-    Each repo is streamed and sharded across processes by node, then
-    interleaved round-robin so both datasets are represented uniformly in
-    every window (they are already shuffled upstream, so no buffer shuffle
-    is applied). Examples are short - the corpus maxes near 2k tokens - so
+    Each repo is streamed, optionally capped to ``limit`` rows, sharded
+    across processes by node, then merged by probability-weighted
+    interleaving so the mixture is stationary for the whole epoch rather
+    than draining one source at a time. Examples are short - so
     rows hold complete examples and pad tails are masked out and excluded
     from attention via segment 0, never splitting an example.
     """
@@ -83,9 +90,26 @@ class MephistoIterator:
         system=None,
         max_render_tokens=None,
         buffer_rows=256,
+        shuffle_buffer=10_000,
+        seed=0,
     ):
         self._tok = tokenizer
-        self._specs = list(datasets)
+        # Each spec is "repo" or "repo:limit"; the limit caps rows taken
+        # from that source and also sets its interleaving weight.
+        self._specs = []
+        for entry in datasets:
+            if isinstance(entry, (tuple, list)):
+                repo, limit = entry
+            elif ":" in entry and not entry.endswith(":"):
+                repo, _, raw = entry.rpartition(":")
+                limit = int(raw) if raw.isdigit() else None
+                if limit is None:
+                    repo, limit = entry, None
+            else:
+                repo, limit = entry, None
+            self._specs.append((repo, limit))
+        self._shuffle_buffer = shuffle_buffer
+        self._seed = seed
         self._epochs = epochs
         self._system = system
         self._pi, self._pc = process_index, process_count
@@ -103,37 +127,59 @@ class MephistoIterator:
         self.rows_dropped_oversize = 0
         self.pad_tokens = 0
         self.epochs_started = 0
-        self.metadata = {"datasets": self._specs, "epochs": epochs,
-                         "streaming": True}
+        self.metadata = {"datasets": [list(s) for s in self._specs],
+                         "epochs": epochs, "streaming": True,
+                         "shuffle_buffer": shuffle_buffer}
 
     def _open_epoch(self):
-        from datasets import load_dataset
+        """Builds one uniformly-mixed stream over all sources.
+
+        Round-robin draining put every source's tail at the end of the
+        epoch: with IF (172k) against Knowledge (538k) the back half of
+        each epoch was Knowledge-only, and the model collapsed onto that
+        format. Probability-weighted interleaving proportional to the
+        (possibly capped) source sizes keeps the mixture stationary from
+        the first step to the last, and a shuffle buffer on top
+        decorrelates neighbouring rows.
+        """
+        from datasets import interleave_datasets, load_dataset
         from datasets.distributed import split_dataset_by_node
 
-        streams = []
-        for spec in self._specs:
+        streams, weights = [], []
+        for spec, limit in self._specs:
             stream = load_dataset(spec, split="train", streaming=True)
+            if limit:
+                stream = stream.take(limit)
             if self._pc > 1:
                 stream = split_dataset_by_node(
                     stream, rank=self._pi, world_size=self._pc
                 )
-            streams.append(iter(stream))
-        self._sources = streams
+            streams.append(stream)
+            weights.append(float(limit or _DEFAULT_SIZES.get(spec, 1)))
+        total = sum(weights)
+        seed = self._seed + self._epoch
+        if len(streams) > 1:
+            merged = interleave_datasets(
+                streams,
+                probabilities=[w / total for w in weights],
+                seed=seed,
+                stopping_strategy="all_exhausted",
+            )
+        else:
+            merged = streams[0]
+        if self._shuffle_buffer:
+            merged = merged.shuffle(seed=seed, buffer_size=self._shuffle_buffer)
+        self._sources = iter(merged)
         self.epochs_started += 1
 
     def _draw(self):
-        """Round-robin across sources; returns None when all are dry."""
+        """Next row from the mixed stream; None when the epoch is dry."""
         if self._sources is None:
             self._open_epoch()
-        while any(source is not None for source in self._sources):
-            for index, source in enumerate(self._sources):
-                if source is None:
-                    continue
-                try:
-                    return next(source)
-                except StopIteration:
-                    self._sources[index] = None
-        return None
+        try:
+            return next(self._sources)
+        except StopIteration:
+            return None
 
     def _refill(self) -> bool:
         rendered = []

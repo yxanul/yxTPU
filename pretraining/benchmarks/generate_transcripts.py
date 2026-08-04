@@ -172,6 +172,10 @@ PROMPTS = [
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--model", default="kda_hybrid_128k")
+    parser.add_argument("--data", default="climbmix_superbpe")
+    parser.add_argument("--chat-scheme", choices=("k25", "qwen"), default="k25")
+    parser.add_argument("--system", default=None)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--top-k", type=int, default=64)
@@ -184,7 +188,7 @@ def main() -> int:
 
     window = 8192
     config = load_config(
-        model="kda_hybrid_128k", optimizer="muonclip", data="climbmix_superbpe",
+        model=arguments.model, optimizer="muonclip", data=arguments.data,
         hardware="v4-64", experiment="superbpe_50b",
         overrides=[
             f"data.sequence_length={window}",
@@ -206,21 +210,40 @@ def main() -> int:
     with open(arguments.checkpoint, "rb") as handle:
         nnx.replace_by_pure_dict(target, pickle.load(handle))
     nnx.update(state, target)
-    tokenizer = load_sft_tokenizer(
-        config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
+    if arguments.chat_scheme == "qwen":
+        # yx49k carries the Qwen3.5 chat template and its specials natively.
+        from yxtpu_pretrain.runtime.data import load_fast_tokenizer
+
+        tokenizer = load_fast_tokenizer(
+            config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
+        stop_token, pad_token = 49121, 49119
+    else:
+        tokenizer = load_sft_tokenizer(
+            config.data.tokenizer, padded_vocab_size=config.model.vocab_size)
+        stop_token, pad_token = IM_END, DOCUMENT_SEPARATOR
     print(f"loaded {arguments.checkpoint}", flush=True)
 
-    rendered = [
-        [DOCUMENT_SEPARATOR, ROLE_TOKENS["user"],
-         *tokenizer.encode("user", add_special_tokens=False), IM_MIDDLE,
-         *tokenizer.encode(text, add_special_tokens=False), IM_END,
-         ROLE_TOKENS["assistant"],
-         *tokenizer.encode("assistant", add_special_tokens=False), IM_MIDDLE]
-        for _, text, _ in PROMPTS
-    ]
+    if arguments.chat_scheme == "qwen":
+        def _render(text):
+            messages = []
+            if arguments.system:
+                messages.append({"role": "system", "content": arguments.system})
+            messages.append({"role": "user", "content": text})
+            prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
+            return tokenizer.encode(prompt, add_special_tokens=False)
+    else:
+        def _render(text):
+            return [DOCUMENT_SEPARATOR, ROLE_TOKENS["user"],
+                    *tokenizer.encode("user", add_special_tokens=False), IM_MIDDLE,
+                    *tokenizer.encode(text, add_special_tokens=False), IM_END,
+                    ROLE_TOKENS["assistant"],
+                    *tokenizer.encode("assistant", add_special_tokens=False),
+                    IM_MIDDLE]
+    rendered = [_render(text) for _, text, _ in PROMPTS]
     lengths = np.asarray([len(row) for row in rendered], np.int32)
     width = int(lengths.max())
-    padded = np.full((len(rendered), width), DOCUMENT_SEPARATOR, np.int32)
+    padded = np.full((len(rendered), width), pad_token, np.int32)
     for index, row in enumerate(rendered):
         padded[index, : len(row)] = row
 
@@ -232,7 +255,7 @@ def main() -> int:
         samples, _ = generate(
             model, jnp.asarray(padded), jnp.asarray(lengths),
             jax.random.key(arguments.seed), max_new_tokens=arguments.max_new,
-            sampling=sampling, end_token=IM_END,
+            sampling=sampling, end_token=stop_token,
             max_length=width + arguments.max_new + 8)
         samples = np.asarray(samples)
     elapsed = time.perf_counter() - began
@@ -246,7 +269,7 @@ def main() -> int:
     records = []
     for index, (domain, text, checker) in enumerate(PROMPTS):
         row = list(samples[index, int(lengths[index]) - 1:])
-        stop = [i for i, token in enumerate(row) if token == IM_END]
+        stop = [i for i, token in enumerate(row) if token == stop_token]
         generated = row[: stop[0]] if stop else row
         opens = generated.count(THINK_OPEN)
         closes = generated.count(THINK_CLOSE)
