@@ -92,6 +92,7 @@ class MephistoIterator:
         buffer_rows=256,
         shuffle_buffer=10_000,
         seed=0,
+        targets=None,
     ):
         self._tok = tokenizer
         # Each spec is "repo" or "repo:limit"; the limit caps rows taken
@@ -123,13 +124,21 @@ class MephistoIterator:
         self._positions = np.tile(
             np.arange(sequence_length, dtype=np.int32), (process_batch, 1)
         )
+        # A GoldTargetStore of precomputed teacher targets. When present,
+        # every rendered example is looked up by its token-ids hash and the
+        # top-K triple rides through packing next to the loss mask; rows the
+        # store does not know are dropped and counted - a nonzero count on
+        # a full store means the render drifted from the precompute.
+        self._targets = targets
         self.rows_consumed = 0
         self.rows_dropped_oversize = 0
+        self.rows_missing_targets = 0
         self.pad_tokens = 0
         self.epochs_started = 0
         self.metadata = {"datasets": [list(s) for s in self._specs],
                          "epochs": epochs, "streaming": True,
-                         "shuffle_buffer": shuffle_buffer}
+                         "shuffle_buffer": shuffle_buffer,
+                         "gold_targets": bool(targets)}
 
     def _open_epoch(self):
         """Builds one uniformly-mixed stream over all sources.
@@ -200,8 +209,15 @@ class MephistoIterator:
             if len(ids) > self._max_render:
                 self.rows_dropped_oversize += 1
                 continue
+            targets = None
+            if self._targets is not None:
+                targets = self._targets.lookup(ids)
+                if targets is None:
+                    self.rows_missing_targets += 1
+                    continue
             rendered.append(
-                (np.asarray(ids, np.int32), np.asarray(mask, np.float32))
+                (np.asarray(ids, np.int32), np.asarray(mask, np.float32),
+                 targets)
             )
             self.rows_consumed += 1
         if not rendered:
@@ -211,10 +227,10 @@ class MephistoIterator:
 
     def _assemble_row(self):
         capacity = self._T + 1
-        row_ids, row_mask, filled = [], [], 0
+        row_ids, row_mask, row_targets, filled = [], [], [], 0
         while filled < capacity:
             picked = None
-            for position, (ids, _) in enumerate(self._pool):
+            for position, (ids, *_) in enumerate(self._pool):
                 if len(ids) <= capacity - filled:
                     picked = position
                     break
@@ -224,9 +240,10 @@ class MephistoIterator:
                 if not self._pool:
                     self._exhausted = True
                 break
-            ids, mask = self._pool.pop(picked)
+            ids, mask, targets = self._pool.pop(picked)
             row_ids.append(ids)
             row_mask.append(mask)
+            row_targets.append(targets)
             filled += len(ids)
         if not filled:
             return None
@@ -246,6 +263,27 @@ class MephistoIterator:
             segments[offset:offset + len(ids)] = index + 1
             positions[offset:offset + len(ids)] = np.arange(len(ids))
             offset += len(ids)
+        packed_targets = None
+        if self._targets is not None:
+            # Store position i of an example is the teacher's distribution
+            # over its token i+1, so it lands at the same token index the
+            # example occupies in the row: input position offset+i then
+            # supervises label row[offset+i+1], exactly the pairing the
+            # objective assumes. Pad and the row tail stay zero and are
+            # never trained (their loss_mask is zero).
+            k = self._targets.k
+            topk_ids = np.zeros((capacity, k), np.int32)
+            topk_logprobs = np.zeros((capacity, k), np.float32)
+            rest_mass = np.zeros(capacity, np.float32)
+            offset = 0
+            for ids, targets in zip(row_ids, row_targets):
+                length = len(ids)
+                topk_ids[offset:offset + length] = targets[0]
+                topk_logprobs[offset:offset + length] = targets[1]
+                rest_mass[offset:offset + length] = targets[2]
+                offset += length
+            packed_targets = (topk_ids[:self._T], topk_logprobs[:self._T],
+                              rest_mass[:self._T])
         pad = capacity - filled
         if pad:
             row_ids.append(np.full(pad, ENDOFTEXT, np.int32))
@@ -253,17 +291,20 @@ class MephistoIterator:
             self.pad_tokens += pad
             # Pad keeps segment 0, which excludes it from attention.
         return (np.concatenate(row_ids), np.concatenate(row_mask),
-                segments[:self._T], positions[:self._T])
+                segments[:self._T], positions[:self._T], packed_targets)
 
     @property
     def stats(self) -> dict[str, float]:
-        return {
+        report = {
             "rows_consumed": self.rows_consumed,
             "rows_dropped_oversize": self.rows_dropped_oversize,
             "pad_tokens": self.pad_tokens,
             "epochs_started": self.epochs_started,
             "pool_rows": len(self._pool),
         }
+        if self._targets is not None:
+            report["rows_missing_targets"] = self.rows_missing_targets
+        return report
 
     def get_state(self) -> dict[str, int]:
         return {"rows_consumed": int(self.rows_consumed)}
@@ -285,10 +326,16 @@ class MephistoIterator:
         mask = np.stack([row[1] for row in rows])
         segments = np.stack([row[2] for row in rows])
         positions = np.stack([row[3] for row in rows])
-        return {
+        batch = {
             "input_ids": ids[:, :-1],
             "labels": ids[:, 1:],
             "loss_mask": mask[:, 1:],
             "segment_ids": segments,
             "positions": positions,
         }
+        if self._targets is not None:
+            batch["teacher_topk_ids"] = np.stack([row[4][0] for row in rows])
+            batch["teacher_topk_logprobs"] = np.stack(
+                [row[4][1] for row in rows])
+            batch["teacher_rest_mass"] = np.stack([row[4][2] for row in rows])
+        return batch

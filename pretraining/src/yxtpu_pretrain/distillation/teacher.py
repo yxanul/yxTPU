@@ -147,6 +147,7 @@ class Qwen35Teacher:
               flush=True)
         self.model = nnx.merge(graphdef, params, rest)
         self._scorer = None
+        self._topk_scorer = None
 
     def score(self, student_input_ids, positions, segment_ids):
         """Teacher distribution over the student's vocabulary, per position.
@@ -168,8 +169,21 @@ class Qwen35Teacher:
                             segment_ids, self.mapping, self.valid_vocab)
 
 
-def _score(model, student_input_ids, positions, segment_ids, mapping,
-           valid_vocab):
+    def score_topk(self, student_input_ids, positions, segment_ids, k: int):
+        """``score`` compressed on device to (ids, logprobs, rest) at top-K.
+
+        Only K columns per position ever leave the device, which is what
+        makes precomputing targets for a whole dataset practical.
+        """
+        if self._topk_scorer is None:
+            self._topk_scorer = nnx.jit(_score_topk, static_argnums=(5, 6))
+        return self._topk_scorer(self.model, student_input_ids, positions,
+                                 segment_ids, self.mapping, self.valid_vocab,
+                                 int(k))
+
+
+def _project(model, student_input_ids, positions, segment_ids, mapping,
+             valid_vocab):
     from maxtext.common.common_types import MODEL_MODE_TRAIN
 
     teacher_ids = direct_teacher_ids(student_input_ids, mapping)
@@ -177,8 +191,25 @@ def _score(model, student_input_ids, positions, segment_ids, mapping,
                    enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
     if isinstance(logits, tuple):
         logits = logits[0]
-    matched, residual = project_teacher_logits(
-        logits, mapping, valid_vocab=valid_vocab)
+    return project_teacher_logits(logits, mapping, valid_vocab=valid_vocab)
+
+
+def _score(model, student_input_ids, positions, segment_ids, mapping,
+           valid_vocab):
+    matched, residual = _project(
+        model, student_input_ids, positions, segment_ids, mapping, valid_vocab)
     # Constants downstream: the objective cannot train what it cannot
     # differentiate, and this makes that structural rather than incidental.
     return jax.lax.stop_gradient(matched), jax.lax.stop_gradient(residual)
+
+
+def _score_topk(model, student_input_ids, positions, segment_ids, mapping,
+                valid_vocab, k):
+    from yxtpu_pretrain.distillation.gold_loss import topk_teacher_targets
+
+    matched, residual = _project(
+        model, student_input_ids, positions, segment_ids, mapping, valid_vocab)
+    top_ids, top_logprobs, rest = topk_teacher_targets(matched, residual, k)
+    return (jax.lax.stop_gradient(top_ids),
+            jax.lax.stop_gradient(top_logprobs),
+            jax.lax.stop_gradient(rest))

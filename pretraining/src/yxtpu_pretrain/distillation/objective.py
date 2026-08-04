@@ -78,7 +78,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from yxtpu_pretrain.distillation.gold_loss import gold_position_loss
+from yxtpu_pretrain.distillation.gold_loss import (
+    gold_position_loss,
+    gold_topk_position_loss,
+)
 
 
 def cross_entropy(student_logits, labels, loss_mask):
@@ -141,3 +144,112 @@ def _agreement(logits, labels, loss_mask):
     weights = loss_mask.astype(jnp.float32)
     hit = (jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32)
     return (hit * weights).sum() / jnp.maximum(weights.sum(), 1.0)
+
+
+def gold_topk_objective(
+    student_logits,
+    labels,
+    loss_mask,
+    *,
+    teacher_topk_ids,
+    teacher_topk_logprobs,
+    teacher_rest_mass,
+    beta: float = 0.0,
+    distill_weight: float = 1.0,
+    ce_weight: float = 0.0,
+):
+    """``gold_objective`` against a top-K-compressed teacher.
+
+    Same composition, same shared denominator; the teacher arrives as the
+    precomputed ``(ids, logprobs, rest)`` triple instead of a full
+    projected distribution. ``teacher_top1_is_label`` reads the first
+    top-K column - top_k returns descending, so column 0 is the argmax.
+    """
+    ce, tokens = cross_entropy(student_logits, labels, loss_mask)
+    distill, distill_metrics = gold_topk_position_loss(
+        student_logits,
+        teacher_topk_ids,
+        teacher_topk_logprobs,
+        teacher_rest_mass,
+        loss_mask,
+        beta=beta,
+    )
+    loss = distill_weight * distill + ce_weight * ce
+    weights = loss_mask.astype(jnp.float32)
+    top1_hit = (teacher_topk_ids[..., 0] == labels).astype(jnp.float32)
+    metrics = {
+        "ce": ce,
+        "tokens": tokens,
+        "distill": distill,
+        "loss": loss,
+        "student_top1_is_label": _agreement(student_logits, labels, loss_mask),
+        "teacher_top1_is_label": (top1_hit * weights).sum()
+        / jnp.maximum(weights.sum(), 1.0),
+        **distill_metrics,
+    }
+    return loss, metrics
+
+
+def make_gold_model_loss(
+    *,
+    beta: float = 0.0,
+    distill_weight: float = 1.0,
+    ce_weight: float = 0.0,
+):
+    """Builds the model-level loss the train step differentiates.
+
+    Drop-in for ``train._loss`` via ``_make_train_step(config, loss_fn=...)``:
+    same ``(model, batch, record_max_logits)`` signature, same auxiliary
+    contract (``max_logits`` for muonclip, ``tokens`` for throughput), plus
+    the distillation metrics. The batch must carry the precomputed teacher
+    triple the Mephisto iterator attaches when given a target store.
+
+    The full [B, T, V] student logits are materialized here, as the
+    standard loss head already does at this vocabulary; the top-K gather
+    keeps everything else K-wide.
+    """
+    from yxtpu_pretrain.model import attention_logit_intermediates
+
+    def gold_loss(model, batch, *, record_max_logits):
+        hidden_states = model.hidden_states(
+            batch["input_ids"],
+            decoder_segment_ids=batch["segment_ids"],
+            decoder_positions=batch["positions"],
+            record_max_logits=record_max_logits,
+        )
+        logits = model.project_logits(hidden_states)
+        loss, metrics = gold_topk_objective(
+            logits,
+            batch["labels"],
+            batch["loss_mask"],
+            teacher_topk_ids=batch["teacher_topk_ids"],
+            teacher_topk_logprobs=batch["teacher_topk_logprobs"],
+            teacher_rest_mass=batch["teacher_rest_mass"],
+            beta=beta,
+            distill_weight=distill_weight,
+            ce_weight=ce_weight,
+        )
+        logits_max = (
+            attention_logit_intermediates(model)
+            if record_max_logits
+            else jnp.zeros(
+                (
+                    model.config.model.num_cycles,
+                    1,
+                    model.config.model.attention.num_query_heads,
+                ),
+                dtype=jnp.float32,
+            )
+        )
+        auxiliary = {
+            "max_logits": logits_max,
+            "tokens": metrics["tokens"],
+            "ce": metrics["ce"],
+            "distill": metrics["distill"],
+            "teacher_rest_mass": metrics["teacher_rest_mass"],
+            "teacher_top1_is_label": metrics["teacher_top1_is_label"],
+            "student_top1_is_label": metrics["student_top1_is_label"],
+        }
+        return loss, auxiliary
+
+    return gold_loss
