@@ -156,6 +156,20 @@ class MephistoIterator:
 
         streams, weights = [], []
         for spec, limit in self._specs:
+            if spec.startswith("/"):
+                # A local JSONL, already sharded per host (the /dev/shm
+                # pattern: download once, global-shuffle with shuf, split
+                # round-robin, one file per worker). No node split - the
+                # file IS this node's share - and interleaving weight 1
+                # unless a limit says otherwise.
+                stream = load_dataset(
+                    "json", data_files=spec, split="train", streaming=True
+                )
+                if limit:
+                    stream = stream.take(limit)
+                streams.append(stream)
+                weights.append(float(limit or 1))
+                continue
             stream = load_dataset(spec, split="train", streaming=True)
             if limit:
                 stream = stream.take(limit)
