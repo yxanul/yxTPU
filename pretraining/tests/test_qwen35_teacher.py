@@ -1,0 +1,285 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The dense Qwen3.5 teacher must build, and must not grow a router.
+
+``Qwen3_5DecoderLayer`` instantiated ``Qwen3_5SparseMoEBlock``
+unconditionally, so neither released dense size (0.8B, 4B - both declare no
+expert fields at all) could load. The branch keys off ``num_experts`` rather
+than a separate flag so a dense config cannot disagree with itself and build
+a one-expert router that no checkpoint will ever fill.
+
+Runs on CPU at reduced width: what is under test is the branch and the
+parameter tree, not the arithmetic - GDN and full-attention numerics are
+covered by ``maxtext/tests/unit/qwen3_next_vs_reference_test.py``, whose
+layers Qwen3.5 subclasses without overrides.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from flax import nnx
+from jax.sharding import Mesh
+
+from maxtext import pyconfig
+from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.models.qwen3_5 import Qwen3_5DecoderLayer
+
+BASE_CONFIG = "../maxtext/src/maxtext/configs/base.yml"
+
+
+def _config(num_experts: int):
+    argv = [
+        "test_qwen35_teacher", BASE_CONFIG,
+        "decoder_block=qwen3_5",
+        "base_emb_dim=256", "base_num_decoder_layers=4",
+        "base_num_query_heads=4", "base_num_kv_heads=2", "head_dim=64",
+        "base_mlp_dim=512", "mlp_activations=['silu','linear']",
+        "vocab_size=256", "normalization_layer_epsilon=1.0e-6",
+        "logits_via_embedding=true",
+        "inhomogeneous_layer_cycle_interval=4",
+        f"num_experts={num_experts}",
+        "gdn_conv_kernel_dim=4", "gdn_key_head_dim=32",
+        "gdn_value_head_dim=32", "gdn_num_key_heads=4",
+        "gdn_num_value_heads=8", "gdn_chunk_size=64",
+        "partial_rotary_factor=0.25", "rope_max_timescale=10000000",
+        "use_mrope=false", "enable_dropout=false",
+        "per_device_batch_size=1", "max_target_length=128",
+        "run_name=test_qwen35_teacher", "skip_jax_distributed_system=true",
+        "enable_checkpointing=false",
+        "attention=dot_product",  # no pallas kernel on CPU
+    ]
+    if num_experts > 1:
+        argv += ["base_moe_mlp_dim=512", "num_experts_per_tok=2"]
+    return pyconfig.initialize(argv)
+
+
+@pytest.fixture(scope="module")
+def mesh():
+    return Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("data", "model"))
+
+
+def _param_names(layer):
+    _, params, _ = nnx.split(layer, nnx.Param, ...)
+    return sorted(".".join(str(part) for part in path)
+                  for path, _ in nnx.to_flat_state(params))
+
+
+# layer 3 is the full-attention slot: (idx + 1) % interval == 0.
+@pytest.mark.parametrize("layer_idx,kind", [(0, "gdn"), (3, "full_attention")])
+def test_dense_config_builds_an_mlp_block_not_a_router(mesh, layer_idx, kind):
+    config = _config(num_experts=1)
+    layer = Qwen3_5DecoderLayer(
+        config=config, mesh=mesh, model_mode=MODEL_MODE_TRAIN,
+        layer_idx=layer_idx, rngs=nnx.Rngs(0),
+    )
+    assert layer.is_dense_mlp
+    names = _param_names(layer)
+    # SwiGLU: gate and up projections in, one projection out.
+    assert {"mlp.wi_0.kernel", "mlp.wi_1.kernel", "mlp.wo.kernel"} <= set(names)
+    assert not [n for n in names if "router" in n or "expert" in n]
+
+
+@pytest.mark.parametrize("layer_idx", [0, 3])
+def test_dense_layer_runs_forward(mesh, layer_idx):
+    config = _config(num_experts=1)
+    layer = Qwen3_5DecoderLayer(
+        config=config, mesh=mesh, model_mode=MODEL_MODE_TRAIN,
+        layer_idx=layer_idx, rngs=nnx.Rngs(0),
+    )
+    batch, seq = 1, 128
+    hidden = jax.random.normal(
+        jax.random.key(0), (batch, seq, config.emb_dim), jnp.float32
+    ).astype(config.dtype)
+    output, _ = layer(
+        hidden, jnp.ones((batch, seq), jnp.int32),
+        jnp.arange(seq, dtype=jnp.int32)[None, :], True, MODEL_MODE_TRAIN,
+    )
+    assert output.shape == (batch, seq, config.emb_dim)
+    assert bool(jnp.isfinite(output).all())
+
+
+def test_moe_config_still_selects_the_sparse_block(mesh):
+    layer = Qwen3_5DecoderLayer(
+        config=_config(num_experts=4), mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN, layer_idx=0, rngs=nnx.Rngs(0),
+    )
+    assert not layer.is_dense_mlp
+
+
+def test_the_shipped_4b_config_is_dense_and_matches_the_released_shapes():
+    """Guards the YAML against drift from Qwen/Qwen3.5-4B's config.json."""
+    import yaml
+
+    with open("../maxtext/src/maxtext/configs/models/qwen3.5-4b.yml") as handle:
+        config = yaml.safe_load(handle)
+    assert config["num_experts"] == 1, "4B is dense"
+    assert config == {**config, **{
+        "base_emb_dim": 2560,            # hidden_size
+        "base_num_decoder_layers": 32,   # num_hidden_layers
+        "base_num_query_heads": 16,      # num_attention_heads
+        "base_num_kv_heads": 4,          # num_key_value_heads
+        "head_dim": 256,
+        "base_mlp_dim": 9216,            # intermediate_size
+        "vocab_size": 248320,            # padded; tokenizer has 248,077
+        "logits_via_embedding": True,    # tie_word_embeddings
+        "inhomogeneous_layer_cycle_interval": 4,  # full_attention_interval
+        "gdn_num_key_heads": 16,         # linear_num_key_heads
+        "gdn_num_value_heads": 32,       # linear_num_value_heads (asymmetric)
+        "gdn_key_head_dim": 128,
+        "gdn_value_head_dim": 128,
+        "gdn_conv_kernel_dim": 4,
+        "partial_rotary_factor": 0.25,
+        "rope_max_timescale": 10000000,
+        "decoder_block": "qwen3_5",
+    }}
+    # Text-only scoring: every mrope position row is identical, so plain
+    # RoPE is exact rather than an approximation.
+    assert config["use_mrope"] is False
+    # Not cosmetic: base.yml defaults to float32, and at fp32 the layer
+    # scan needs ~32.5G against a v4 chip's 30.75G, so the teacher does not
+    # load. The released weights are bfloat16 anyway.
+    assert config["weight_dtype"] == "bfloat16"
+    # Also not cosmetic, and worse because it is silent: base.yml defaults
+    # this true, which divides logits by sqrt(emb_dim) for tied heads. The
+    # argmax survives, so the model looks fine on any accuracy metric while
+    # its softmax is near-uniform - and GOLD distills the distribution.
+    assert config["normalize_embedding_logits"] is False
+
+
+def test_every_hf_tensor_lands_in_a_real_maxtext_slot():
+    """Runs the whole fill path against synthetic tensors of exactly the
+    released shapes, into a tree read from the model by eval_shape.
+
+    This is the check that every transpose and reshape is right, and that
+    no slot is missed or double-written: ``_put`` raises on any shape
+    disagreement, and the target tree is the model's own, not a transcript
+    of it. Reduced width so the zeros fit in memory - the 4B tree alone is
+    8.4 GB.
+    """
+    converter = _converter()
+    geometry_source = {
+        "hidden_size": 128, "num_hidden_layers": 8, "vocab_size": 512,
+        "intermediate_size": 256, "full_attention_interval": 4,
+        "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 32,
+        "linear_num_key_heads": 4, "linear_num_value_heads": 8,
+        "linear_key_head_dim": 16, "linear_value_head_dim": 16,
+        "linear_conv_kernel_dim": 4,
+    }
+    g = converter.geometry(geometry_source)
+    _, tree = converter.abstract_tree(
+        model_name=None,
+        base="../maxtext/src/maxtext/configs/base.yml",
+        overrides=[
+            "decoder_block=qwen3_5", "num_experts=1",
+            f"base_emb_dim={g['emb']}",
+            f"base_num_decoder_layers={g['layers']}",
+            f"base_num_query_heads={g['q_heads']}",
+            f"base_num_kv_heads={g['kv_heads']}",
+            f"head_dim={g['head_dim']}", f"base_mlp_dim={g['mlp']}",
+            "mlp_activations=['silu','linear']",
+            f"vocab_size={g['vocab']}", "logits_via_embedding=true",
+            f"inhomogeneous_layer_cycle_interval={g['interval']}",
+            f"gdn_num_key_heads={g['key_heads']}",
+            f"gdn_num_value_heads={g['value_heads']}",
+            f"gdn_key_head_dim={g['head_k']}",
+            f"gdn_value_head_dim={g['head_v']}",
+            f"gdn_conv_kernel_dim={g['conv_kernel']}",
+            "gdn_chunk_size=64", "partial_rotary_factor=0.25",
+            "rope_max_timescale=10000000", "use_mrope=false",
+            "normalization_layer_epsilon=1.0e-6", "enable_dropout=false",
+        ],
+    )
+    shapes = converter.expected_hf_shapes(g)
+    # Distinct values per tensor, so a mis-slotted write is detectable.
+    hf = {name: np.full(shape, float(index + 1), dtype=np.float32)
+          for index, (name, shape) in enumerate(sorted(shapes.items()))}
+
+    converter.fill(tree, hf, g)   # raises on any shape disagreement
+
+    # Nothing may be left at its initialized zero: every slot got written.
+    unwritten = [name for name, value in _flat(tree) if not np.any(value)]
+    assert not unwritten, f"never filled: {unwritten}"
+
+
+def _flat(node, prefix=""):
+    for key, value in node.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            yield from _flat(value, path)
+        else:
+            yield path, value
+
+
+def _converter():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "convert_qwen35_teacher", "benchmarks/convert_qwen35_teacher.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_gdn_interleave_inverts_maxtexts_own_split():
+    """Qwen3.5 ships q/k/v/z as separate contiguous tensors; MaxText wants
+    them fused and grouped per key head. Converting is an interleave, and
+    getting the grouping wrong scrambles heads without changing any shape -
+    so replay MaxText's reshape and split indices and check the tags."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "convert_qwen35_teacher", "benchmarks/convert_qwen35_teacher.py")
+    converter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(converter)
+
+    # Asymmetric heads, as the 4B has: two value heads per key head.
+    g = {"emb": 4, "key_heads": 2, "value_heads": 4, "head_k": 3,
+         "head_v": 5, "key_dim": 6, "value_dim": 20, "v_per_k": 2}
+    qkv = np.concatenate([
+        np.full((g["key_dim"], g["emb"]), 1.0),
+        np.full((g["key_dim"], g["emb"]), 2.0),
+        np.full((g["value_dim"], g["emb"]), 3.0),
+    ])
+    for head in range(g["key_heads"]):
+        qkv[head * g["head_k"]:(head + 1) * g["head_k"]] += 0.1 * head
+    z = np.full((g["value_dim"], g["emb"]), 4.0)
+
+    fused = converter.fuse_qkvz(qkv, z, g)
+    assert fused.shape == (2 * g["key_dim"] + 2 * g["value_dim"], g["emb"])
+
+    # models/qwen3.py: reshape to (H_k, 2*D_k + 2*D_v*V_per_K), then split.
+    per_head = 2 * g["head_k"] + 2 * g["head_v"] * g["v_per_k"]
+    grouped = fused.reshape(g["key_heads"], per_head, g["emb"])
+    query, key, value, zed = np.split(
+        grouped,
+        [g["head_k"], 2 * g["head_k"],
+         2 * g["head_k"] + g["v_per_k"] * g["head_v"]],
+        axis=1,
+    )
+    assert np.allclose(query[0], 1.0) and np.allclose(query[1], 1.1)
+    assert np.allclose(key, 2.0)
+    assert np.allclose(value, 3.0)
+    assert np.allclose(zed, 4.0)
+
+    b = np.arange(g["value_heads"], dtype=np.float32)[:, None]
+    a = 100 + np.arange(g["value_heads"], dtype=np.float32)[:, None]
+    fused_ba = converter.fuse_ba(b, a, g).reshape(
+        g["key_heads"], 2 * g["v_per_k"])
+    b_out, a_out = np.split(fused_ba, [g["v_per_k"]], axis=1)
+    np.testing.assert_array_equal(b_out.reshape(-1), b.reshape(-1))
+    np.testing.assert_array_equal(a_out.reshape(-1), a.reshape(-1))

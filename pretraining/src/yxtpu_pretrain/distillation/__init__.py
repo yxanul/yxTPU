@@ -20,7 +20,9 @@ from yxtpu_pretrain.distillation.gold_loss import (
     QWEN35_VALID_VOCAB,
     blockwise_logsumexp,
     gold_position_loss,
+    gold_topk_position_loss,
     project_teacher_logits,
+    topk_teacher_targets,
 )
 from yxtpu_pretrain.distillation.alignment import (
     DirectMapReport,
@@ -30,7 +32,18 @@ from yxtpu_pretrain.distillation.alignment import (
     verify_direct_map,
 )
 
+from yxtpu_pretrain.distillation.objective import (
+    cross_entropy,
+    gold_objective,
+    gold_topk_objective,
+    make_gold_model_loss,
+)
+
 __all__ = [
+    "cross_entropy",
+    "gold_objective",
+    "gold_topk_objective",
+    "make_gold_model_loss",
     "DirectMapReport",
     "QWEN35_LOGIT_WIDTH",
     "QWEN35_VALID_VOCAB",
@@ -38,7 +51,9 @@ __all__ = [
     "blockwise_logsumexp",
     "direct_teacher_ids",
     "gold_position_loss",
+    "gold_topk_position_loss",
     "project_teacher_logits",
+    "topk_teacher_targets",
     "validate_student_to_teacher",
     "verify_direct_map",
 ]

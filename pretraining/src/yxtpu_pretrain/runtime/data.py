@@ -582,6 +582,20 @@ class PrefetchIterator(Iterator[Batch]):
         return self._queue.qsize()
 
     @property
+    def stats(self) -> dict:
+        """The source's counters; the wrap must not hide them."""
+        return dict(getattr(self.source, "stats", {}))
+
+    def get_state(self):
+        """Delegates to the source so checkpoint saving survives the wrap.
+
+        The persisted position runs up to ``depth`` batches ahead of what
+        training consumed - the same caveat the pretraining prefetch
+        documents - which is why streaming resumes are weights-only.
+        """
+        return self.source.get_state()
+
+    @property
     def stats(self) -> dict[str, int]:
         return dict(getattr(self.source, "stats", {}))
 

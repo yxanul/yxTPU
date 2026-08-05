@@ -80,10 +80,30 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run", default="kda_hybrid_128k-muonclip-superbpe_50b")
+    parser.add_argument(
+        "--init-pickle", default=None,
+        help="init weights from an SFT stage state.pkl instead of a "
+             "pretraining orbax checkpoint. Skips the new-token-row "
+             "re-init - an SFT checkpoint already trained those rows. The "
+             "optimizer starts fresh either way.")
+    parser.add_argument(
+        "--allow-device-mismatch", action="store_true",
+        help="run on fewer devices than the hardware profile declares "
+             "(single-host smokes); the mesh degrades to pure data parallel")
     parser.add_argument("--out-destination", default="/home/a1111/yxtpu_sft_ckpts")
     parser.add_argument("--steps-cap", type=int, default=2000)
+    parser.add_argument(
+        "--gold-targets", default=None,
+        help="directory of precomputed teacher targets "
+             "(benchmarks/precompute_gold_targets.py); switches the loss to "
+             "the GOLD objective. Mephisto path only.")
+    parser.add_argument("--gold-beta", type=float, default=0.0)
+    parser.add_argument("--gold-distill-weight", type=float, default=1.0)
+    parser.add_argument("--gold-ce-weight", type=float, default=0.0)
     parser.add_argument("--set", action="append", dest="overrides", default=[])
     args = parser.parse_args()
+    if args.gold_targets and not args.mephisto:
+        parser.error("--gold-targets requires --mephisto")
 
     base_overrides = [
         f"experiment.steps={args.steps_cap}",
@@ -102,35 +122,50 @@ def main() -> int:
         hardware="v4-64", experiment="superbpe_50b",
         overrides=base_overrides + list(args.overrides or []),
     )
-    mesh = create_mesh(config.hardware)
+    mesh = create_mesh(config.hardware,
+                       allow_device_mismatch=args.allow_device_mismatch)
     rules = make_leaf_config(config).logical_axis_rules
     with logical_mesh_context(mesh, rules):
         model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(config.experiment.seed))
         transform, _ = build_optimizer(model, config.optimizer)
         state = TrainStateNNX(model, nnx.Optimizer(model, transform, wrt=nnx.Param))
 
-    init_config = config.model_copy(deep=True)
-    init_config.experiment.checkpoint.destination = args.init_destination
-    init_config.experiment.checkpoint.enabled = True
-    loader = CheckpointIO(init_config, run_name=args.init_run)
-    start = loader.restore(state, _NoIterator())
-    loader.close()
-    if start == 0:
-        raise RuntimeError("no pretraining checkpoint found to initialize from")
-    with logical_mesh_context(mesh, rules):
-        state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
-        if args.mephisto:
-            from yxtpu_pretrain.sft.mephisto import UNTRAINED_SPECIAL_RANGE
-
-            low, high = UNTRAINED_SPECIAL_RANGE
-            new_rows = _reinit_new_token_rows(
-                model, new_ids=list(range(low, high)), trained_upto=low
-            )
-        else:
-            new_rows = _reinit_new_token_rows(model)
     is_primary = jax.process_index() == 0
+    if args.init_pickle:
+        import pickle
+
+        from yxtpu_pretrain.runtime.checkpoints import _persistent_state
+
+        target = _persistent_state(state)
+        with open(args.init_pickle, "rb") as handle:
+            nnx.replace_by_pure_dict(target, pickle.load(handle))
+        nnx.update(state, target)
+        start = args.init_pickle
+        new_rows = []
+        with logical_mesh_context(mesh, rules):
+            state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+    else:
+        init_config = config.model_copy(deep=True)
+        init_config.experiment.checkpoint.destination = args.init_destination
+        init_config.experiment.checkpoint.enabled = True
+        loader = CheckpointIO(init_config, run_name=args.init_run)
+        start = loader.restore(state, _NoIterator())
+        loader.close()
+        if start == 0:
+            raise RuntimeError("no pretraining checkpoint found to initialize from")
+        with logical_mesh_context(mesh, rules):
+            state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+            if args.mephisto:
+                from yxtpu_pretrain.sft.mephisto import UNTRAINED_SPECIAL_RANGE
+
+                low, high = UNTRAINED_SPECIAL_RANGE
+                new_rows = _reinit_new_token_rows(
+                    model, new_ids=list(range(low, high)), trained_upto=low
+                )
+            else:
+                new_rows = _reinit_new_token_rows(model)
     if is_primary:
-        print(f"initialized from step {start}; re-initialized rows {new_rows}", flush=True)
+        print(f"initialized from {start}; re-initialized rows {new_rows}", flush=True)
 
     if args.mephisto:
         # yx49k ships the Qwen3.5 chat template verbatim - no special ids to
@@ -146,6 +181,14 @@ def main() -> int:
     if args.mephisto:
         from yxtpu_pretrain.sft.mephisto import MephistoIterator
 
+        gold_store = None
+        if args.gold_targets:
+            from yxtpu_pretrain.distillation.store import GoldTargetStore
+
+            gold_store = GoldTargetStore(args.gold_targets)
+            if is_primary:
+                print(f"gold targets: {len(gold_store)} examples, "
+                      f"k={gold_store.k} from {args.gold_targets}", flush=True)
         iterator = MephistoIterator(
             tokenizer,
             datasets=[s.strip() for s in args.mephisto.split(",") if s.strip()],
@@ -157,7 +200,14 @@ def main() -> int:
             system=args.system,
             shuffle_buffer=args.shuffle_buffer,
             seed=config.experiment.seed,
+            targets=gold_store,
         )
+        # Same rationale as the stream path below: rendering, store lookup
+        # and packing consumed synchronously stall the whole slice at every
+        # pool drain, and on a multi-host run the other hosts inherit the
+        # stall through the first collective. The smoke measured
+        # 230-540 ms/step of serially exposed data wait without this.
+        iterator = PrefetchIterator(iterator, depth=4)
         if is_primary:
             print(f"mephisto SFT: {args.mephisto} x{args.epochs} epochs", flush=True)
         run_packed = False
@@ -206,11 +256,21 @@ def main() -> int:
         if is_primary:
             print(f"packed rows: {len(inputs)}, tokens/epoch ~{len(inputs)*inputs.shape[1]:,}", flush=True)
 
-    train_step = _make_train_step(config)
+    gold_loss_fn = None
+    if args.gold_targets:
+        from yxtpu_pretrain.distillation.objective import make_gold_model_loss
+
+        gold_loss_fn = make_gold_model_loss(
+            beta=args.gold_beta,
+            distill_weight=args.gold_distill_weight,
+            ce_weight=args.gold_ce_weight,
+        )
+    train_step = _make_train_step(config, loss_fn=gold_loss_fn)
     run_name = (
         datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         + f"-sft-{config.model.name}-"
-        + ("mephisto" if args.mephisto else args.subset.lower())
+        + ("gold" if args.gold_targets
+           else "mephisto" if args.mephisto else args.subset.lower())
     )
     run_dir = Path(config.experiment.run_dir).expanduser().resolve() / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -252,13 +312,21 @@ def main() -> int:
                 "grad_norm": float(host["grad_norm"]),
                 "learning_rate": _learning_rate(config, step),
             }
+            for gold_key in ("ce", "distill", "teacher_rest_mass",
+                             "teacher_top1_is_label", "student_top1_is_label"):
+                if gold_key in host:
+                    record[gold_key] = float(host[gold_key])
             if step % 25 == 0 or step == 1:
                 record["data"] = dict(getattr(iterator, "stats", {}))
             metrics_writer.write(record)
             if is_primary:
                 print(json.dumps(record, sort_keys=True), flush=True)
             payload = {
-                "train": {"loss": loss},
+                "train": {"loss": loss} | {
+                    key: record[key]
+                    for key in ("ce", "distill", "teacher_rest_mass")
+                    if key in record
+                },
                 "optimizer": {
                     "grad_norm": record["grad_norm"],
                     "learning_rate": record["learning_rate"]},
