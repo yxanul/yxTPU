@@ -1,0 +1,15 @@
+== greedy
+Scored 12/42 correct; 0/42 well-formed think blocks; 15/42 stopped on `<|im_end|>`. Generated in 16.3s.
+## code (0/8) ## if (4/10) ## instruction (1/8) ## knowledge (7/8) ## math (0/8) 
+== greedy_pen115
+Scored 14/42 correct; 0/42 well-formed think blocks; 24/42 stopped on `<|im_end|>`. Generated in 16.3s.
+## code (0/8) ## if (5/10) ## instruction (3/8) ## knowledge (6/8) ## math (0/8) 
+== t03_pen100
+Scored 17/42 correct; 0/42 well-formed think blocks; 17/42 stopped on `<|im_end|>`. Generated in 17.1s.
+## code (0/8) ## if (5/10) ## instruction (3/8) ## knowledge (8/8) ## math (1/8) 
+== t03_pen130
+Scored 12/42 correct; 0/42 well-formed think blocks; 15/42 stopped on `<|im_end|>`. Generated in 17.2s.
+## code (0/8) ## Example Usage Scenario ## if (4/10) ## instruction (1/8) ## knowledge (7/8) ## math (0/8) 
+== card_t07k20pen15
+Scored 11/42 correct; 0/42 well-formed think blocks; 6/42 stopped on `<|im_end|>`. Generated in 16.6s.
+## code (0/8) ## Step-by-step Execution Steps  ## if (2/10) ## instruction (1/8) ## knowledge (8/8) ## math (0/8) 
