@@ -227,7 +227,26 @@ def _score_topk(model, student_input_ids, positions, segment_ids, mapping,
     # survivors - none of the full-width fp32 buffers the two-step
     # projection materializes (they OOMed batch 32 on a v4 chip).
     top_ids, top_logprobs, rest = topk_teacher_targets_from_logits(
-        logits, mapping, k, valid_vocab=valid_vocab)
+        _batch_local(logits, model.mesh), mapping, k, valid_vocab=valid_vocab)
     return (jax.lax.stop_gradient(top_ids),
             jax.lax.stop_gradient(top_logprobs),
             jax.lax.stop_gradient(rest))
+
+
+def _batch_local(logits, mesh):
+    """Reshards logits batch-over-tensor so the projection runs chip-local.
+
+    The forward leaves logits vocab-sharded, and every projection op then
+    crosses shards - the single-device projection measures ~60 ms while
+    the sharded lowering ran seconds. One explicit all-to-all here (batch
+    onto the tensor axis, vocab whole) buys a fully local projection.
+    Skipped when the batch does not divide the axis (final partial
+    flushes); those pay the slow path rarely.
+    """
+    from jax.sharding import NamedSharding, PartitionSpec
+
+    parallelism = mesh.shape.get("tensor", 1)
+    if parallelism == 1 or logits.shape[0] % parallelism:
+        return logits
+    return jax.lax.with_sharding_constraint(
+        logits, NamedSharding(mesh, PartitionSpec("tensor")))
