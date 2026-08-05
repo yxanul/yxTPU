@@ -1,0 +1,23 @@
+{
+  "checkpoint": "ckpt/sft-mephisto-v2/1200/state.pkl",
+  "generation": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "max_gen_toks": 512,
+    "chat_template": true
+  },
+  "tasks": {
+    "ifeval": {
+      "seconds": 153,
+      "scores": {
+        "ifeval/inst_level_loose_acc": 50.2,
+        "ifeval/inst_level_strict_acc": 45.4,
+        "ifeval/prompt_level_loose_acc": 35.1,
+        "ifeval/prompt_level_strict_acc": 30.9,
+        "ifeval/sample_len": 54100.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}
