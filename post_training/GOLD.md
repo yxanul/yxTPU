@@ -163,9 +163,11 @@ rows, and those are precisely the longest derivations.
 Distillation scales cleanly through 300k examples with zero stability
 incidents across every run. The recommended next rung: full-set GOLD
 (172k IF + 538k Knowledge + a MathCode slice sized to taste) — the
-fan-out prices the full 2.7M-example store at ~7 h on this slice and
-~25c of nothing but preemptible TPU time the grant already covers; a
-4096 window for the MathCode share; then on-policy as the stage after.
+fan-out prices the full 2.7M-example store at ~7 h on this slice
+(hardware the TRC grant covers; ~180 GB of store means disk planning
+first — checkpoint save_interval sized against free space, the ENOSPC
+lesson from this run's first attempt); a 4096 window for the MathCode
+share; then on-policy as the stage after.
 
 ## Ledger
 
