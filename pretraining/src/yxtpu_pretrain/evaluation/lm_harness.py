@@ -34,6 +34,7 @@ class GenerationSettings:
     seed: int = 0
     apply_chat_template: bool = True
     strip_reasoning: bool = True
+    system: str | None = None
 
 
 _PRIMARY_METRICS = {
@@ -116,7 +117,21 @@ class JaxHarnessLM(TemplateLM):
         self._score = _score_step()
         self._data_matrix = NamedSharding(mesh, PartitionSpec("data", None))
         if generation is not None:
-            if generation.apply_chat_template:
+            native_template = getattr(self.tokenizer, "chat_template", None)
+            if generation.apply_chat_template and native_template:
+                # yx49k already carries the Qwen3.5 chat template and its
+                # specials; rendering goes through the tokenizer itself and
+                # the stop token is its own <|im_end|>.
+                generation = dataclasses.replace(
+                    generation,
+                    end_token=int(self.tokenizer.convert_tokens_to_ids("<|im_end|>")),
+                    pad_token=int(
+                        self.tokenizer.pad_token_id
+                        if self.tokenizer.pad_token_id is not None
+                        else self.tokenizer.eos_token_id
+                    ),
+                )
+            elif generation.apply_chat_template:
                 # Chat-templated generation needs the 128k-scheme SFT
                 # specials appended at their reserved ids; the scoring
                 # tokenizer is replaced wholesale. (The yx49k tokenizer
@@ -365,6 +380,14 @@ class JaxHarnessLM(TemplateLM):
         encode = lambda text: self.tokenizer.encode(text, add_special_tokens=False)
         if not self.generation.apply_chat_template:
             return [DOCUMENT_SEPARATOR, *encode(context)]
+        if getattr(self.tokenizer, "chat_template", None):
+            messages = []
+            if self.generation.system:
+                messages.append({"role": "system",
+                                 "content": self.generation.system})
+            messages.append({"role": "user", "content": context})
+            return encode(self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True))
         return [
             DOCUMENT_SEPARATOR,
             ROLE_TOKENS["user"], *encode("user"), IM_MIDDLE,
