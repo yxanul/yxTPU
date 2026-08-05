@@ -121,15 +121,51 @@ at will). Operational: rows without a `system` column make the
 dropping 100% of rows rather than training wrong — its job), and 14% of
 MathCode rows exceed the 2048-token window.
 
-## In flight
+### GOLD-mix300k: 100k IF + 100k Knowledge + 100k MathCode
 
-The 300k mixed run: 100k IF + 100k Knowledge + 100k MathCode,
-precomputed via the 8-way host fan-out (each worker converts its own
-teacher copy and builds 1/8 of the store), trained as one stationary
-probability-weighted interleave (the gen-1 collapse lesson), then
-IFEval + GSM8K + panel against gen-2 and GOLD-50k. If it scales the way
-50k did, the full sets (172k IF + 538k Knowledge + 2M MathCode) are the
-next campaign.
+Precomputed via the first 8-way host fan-out (each worker converted its
+own teacher from HF and built 1/8 of the store: 281,329 examples /
+~146M positions / 25 GB in ~45 min at ~54k pos/s aggregate), trained as
+one stationary probability-weighted interleave: 4,449 steps / 182.9M
+supervised tokens / 2 epochs / ~40 min. Internals: distill 0.98→0.62,
+CE 1.21→0.92 untrained, teacher@1 90.0% (the mix is easier for the
+teacher than pure IF), rest mass 1.8%, 26 missing rows in 562,826
+draws.
+
+| IFEval | gen-2 | +50k IF | **+mix300k** |
+| --- | --- | --- | --- |
+| prompt strict | 30.9 | 40.1 | **42.9** |
+| prompt loose | 35.1 | 43.4 | **45.5** |
+| instruction strict | 45.4 | 53.4 | **56.4** |
+| instruction loose | 50.2 | 56.7 | **59.1** |
+| mean | 40.4 | 48.4 | **51.0** |
+
+The compositionality result matters most: mix300k beats the pure-IF 50k
+run on IFEval even though two-thirds of its training was non-IF data —
+the mixed diet helped the IF metric more than more IF did. Mean 51.0
+now sits at Gemma 3 IT 270M's reported 51.2.
+
+42-prompt panel (gen-2 → 50k → mix300k): total 10 → 12 → **16**/42;
+code 0 → 0 → **2**/8 (the first code passes in the lineage); math 0 →
+0 → 1/8; if 3 → 3 → 5/10; knowledge 7/8 held; clean `<|im_end|>` stops
+2 → 16 → **33**/42.
+
+GSM8K (500-question slice, 5-shot): gen-2 2.0, mix300k 1.8 — both at
+the noise floor; the mix did NOT move formal chain arithmetic. Honest
+read: ~86k math/code examples × 2 epochs teaches surface competence
+(panel movement, code passes) but not GSM8K at 308M — SmolLM2-360M
+reports 3.2 after 4T tokens. The levers are scale (the full 2M MathCode
+set) and sequence length: the 2048-token window drops 14% of MathCode
+rows, and those are precisely the longest derivations.
+
+## Verdict and next campaign
+
+Distillation scales cleanly through 300k examples with zero stability
+incidents across every run. The recommended next rung: full-set GOLD
+(172k IF + 538k Knowledge + a MathCode slice sized to taste) — the
+fan-out prices the full 2.7M-example store at ~7 h on this slice and
+~25c of nothing but preemptible TPU time the grant already covers; a
+4096 window for the MathCode share; then on-policy as the stage after.
 
 ## Ledger
 

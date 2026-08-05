@@ -1,0 +1,20 @@
+{
+  "checkpoint": "/home/a1111/yxtpu_sft_ckpts/20260805T141608Z-sft-kda_hybrid_yx49k_l20-gold/4449/state.pkl",
+  "generation": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "max_gen_toks": 512,
+    "chat_template": true
+  },
+  "tasks": {
+    "gsm8k": {
+      "seconds": 164,
+      "scores": {
+        "gsm8k/exact_match": 1.8,
+        "gsm8k/sample_len": 50000.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}

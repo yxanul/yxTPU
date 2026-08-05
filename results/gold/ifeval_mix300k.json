@@ -1,0 +1,23 @@
+{
+  "checkpoint": "/home/a1111/yxtpu_sft_ckpts/20260805T141608Z-sft-kda_hybrid_yx49k_l20-gold/4449/state.pkl",
+  "generation": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "max_gen_toks": 512,
+    "chat_template": true
+  },
+  "tasks": {
+    "ifeval": {
+      "seconds": 120,
+      "scores": {
+        "ifeval/inst_level_loose_acc": 59.1,
+        "ifeval/inst_level_strict_acc": 56.4,
+        "ifeval/prompt_level_loose_acc": 45.5,
+        "ifeval/prompt_level_strict_acc": 42.9,
+        "ifeval/sample_len": 54100.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}
