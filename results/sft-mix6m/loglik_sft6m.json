@@ -1,0 +1,60 @@
+{
+  "checkpoint_step": "/home/a1111/gold-teacher/pretraining/ckpt/sft-mix6m-4000.pkl",
+  "model": "kda_hybrid_yx49k_l20",
+  "results": {
+    "arc_challenge@0": {
+      "score": 37.97,
+      "acc": 0.3532423208191126,
+      "acc_norm": 0.3796928327645051,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "arc_easy@0": {
+      "score": 65.36,
+      "acc": 0.6986531986531986,
+      "acc_norm": 0.6536195286195287,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "boolq@0": {
+      "score": 60.28,
+      "acc": 0.6027522935779817,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "copa@0": {
+      "score": 70.0,
+      "acc": 0.7,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "hellaswag@0": {
+      "score": 54.48,
+      "acc": 0.4166500697072296,
+      "acc_norm": 0.5448117904799841,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "lambada_openai@0": {
+      "score": 42.36,
+      "acc": 0.42363671647583934,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "openbookqa@0": {
+      "score": 38.6,
+      "acc": 0.274,
+      "acc_norm": 0.386,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "piqa@0": {
+      "score": 73.67,
+      "acc": 0.733949945593036,
+      "acc_norm": 0.7366702937976061,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "sciq@0": {
+      "score": 91.8,
+      "acc": 0.918,
+      "acc_norm": 0.879,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    }
+  }
+}

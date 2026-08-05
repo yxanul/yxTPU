@@ -1,0 +1,23 @@
+{
+  "checkpoint": "/home/a1111/gold-teacher/pretraining/ckpt/sft-mix6m-4000.pkl",
+  "generation": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "max_gen_toks": 512,
+    "chat_template": true
+  },
+  "tasks": {
+    "ifeval": {
+      "seconds": 120,
+      "scores": {
+        "ifeval/inst_level_loose_acc": 45.9,
+        "ifeval/inst_level_strict_acc": 39.6,
+        "ifeval/prompt_level_loose_acc": 30.7,
+        "ifeval/prompt_level_strict_acc": 24.8,
+        "ifeval/sample_len": 54100.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}
