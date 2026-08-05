@@ -222,11 +222,22 @@ def _score(model, student_input_ids, positions, segment_ids, mapping,
 
 def _score_topk(model, student_input_ids, positions, segment_ids, mapping,
                 valid_vocab, k):
-    from yxtpu_pretrain.distillation.gold_loss import topk_teacher_targets
+    from maxtext.common.common_types import MODEL_MODE_TRAIN
 
-    matched, residual = _project(
-        model, student_input_ids, positions, segment_ids, mapping, valid_vocab)
-    top_ids, top_logprobs, rest = topk_teacher_targets(matched, residual, k)
+    from yxtpu_pretrain.distillation.gold_loss import (
+        topk_teacher_targets_from_logits,
+    )
+
+    teacher_ids = direct_teacher_ids(student_input_ids, mapping)
+    logits = model(teacher_ids, positions, segment_ids,
+                   enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
+    if isinstance(logits, tuple):
+        logits = logits[0]
+    # The fused form: top-K on the raw gathered logits, normalize only the
+    # survivors - none of the full-width fp32 buffers the two-step
+    # projection materializes (they OOMed batch 32 on a v4 chip).
+    top_ids, top_logprobs, rest = topk_teacher_targets_from_logits(
+        logits, mapping, k, valid_vocab=valid_vocab)
     return (jax.lax.stop_gradient(top_ids),
             jax.lax.stop_gradient(top_logprobs),
             jax.lax.stop_gradient(rest))

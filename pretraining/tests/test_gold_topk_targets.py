@@ -31,6 +31,7 @@ from yxtpu_pretrain.distillation.gold_loss import (
     gold_topk_position_loss,
     project_teacher_logits,
     topk_teacher_targets,
+    topk_teacher_targets_from_logits,
 )
 
 BATCH, TIME, STUDENT_VOCAB, TEACHER_VOCAB = 2, 6, 16, 40
@@ -110,6 +111,29 @@ def test_topk_interior_betas_are_zero_at_a_match_and_positive_off_it(beta):
     off_match, _ = gold_topk_position_loss(
         jnp.asarray(perturbed), ids, logprobs, rest, _mask(), beta=beta)
     assert float(off_match) > 1e-4
+
+
+def test_fused_topk_from_logits_matches_the_two_step_path():
+    """The memory-saving reorder must be a pure reorder: top-K on raw
+    gathered logits then normalize-the-survivors has to produce the same
+    ids, log-probabilities and tail as project-then-compress. Selection is
+    normalizer-shift-invariant, so at equal dtypes the results agree to
+    fp32 arithmetic noise."""
+    k = 8
+    teacher_logits = jax.random.normal(
+        jax.random.key(23), (BATCH, TIME, TEACHER_VOCAB)) * 2.0
+    mapping = jnp.arange(STUDENT_VOCAB, dtype=jnp.int32) * 2
+
+    matched, residual = project_teacher_logits(teacher_logits, mapping, block=8)
+    ids_two, logprobs_two, rest_two = topk_teacher_targets(matched, residual, k)
+    ids_fused, logprobs_fused, rest_fused = topk_teacher_targets_from_logits(
+        teacher_logits, mapping, k, block=8)
+
+    np.testing.assert_array_equal(np.asarray(ids_fused), np.asarray(ids_two))
+    np.testing.assert_allclose(np.asarray(logprobs_fused),
+                               np.asarray(logprobs_two), atol=1e-5)
+    np.testing.assert_allclose(np.asarray(rest_fused), np.asarray(rest_two),
+                               atol=1e-5)
 
 
 def test_topk_masked_positions_receive_no_gradient():

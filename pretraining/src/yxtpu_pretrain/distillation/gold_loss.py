@@ -221,6 +221,55 @@ def topk_teacher_targets(
     return top_ids, top_logprobs, rest
 
 
+def topk_teacher_targets_from_logits(
+    teacher_logits: jax.Array,
+    student_to_teacher: jax.Array,
+    k: int,
+    *,
+    block: int = 32_768,
+    valid_vocab: int | None = None,
+    recall_target: float = 0.95,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Fused projection + top-K, for dense teacher logits.
+
+    ``project_teacher_logits`` followed by ``topk_teacher_targets``
+    materializes two full-width fp32 buffers - the cast of the 248,320-wide
+    logits and the 49,152-wide matched row - which is what OOMed the
+    batch-32 precompute (23G asked of a 20.9G chip). But the top-K
+    selection is invariant to the normalizer, a constant along the vocab
+    axis, so the selection can run on the raw gathered logits in their
+    NATIVE dtype and only the K survivors get cast and normalized. With
+    bf16 teacher logits this is value-identical to projecting first - the
+    fp32 cast adds no information a bf16 logit does not carry - and the
+    fp32 equivalence is pinned by test against the two-step path.
+
+    The tail is exact regardless: ``rest = 1 - sum(exp(top_logprobs))``
+    needs only the survivors and the true normalizer.
+    """
+    if valid_vocab is not None:
+        teacher_logits = jax.lax.slice_in_dim(
+            teacher_logits, 0, valid_vocab, axis=-1
+        )
+    normalizer = blockwise_logsumexp(
+        teacher_logits.astype(jnp.float32), block=block
+    )
+    gathered = jnp.take_along_axis(
+        teacher_logits,
+        jnp.broadcast_to(
+            student_to_teacher,
+            (*teacher_logits.shape[:-1], student_to_teacher.shape[-1]),
+        ),
+        axis=-1,
+    )
+    top_values, top_ids = jax.lax.approx_max_k(
+        gathered, k, recall_target=recall_target
+    )
+    top_logprobs = top_values.astype(jnp.float32) - normalizer[..., None]
+    kept = jnp.exp(jax.scipy.special.logsumexp(top_logprobs, axis=-1))
+    rest = jnp.clip(1.0 - kept, 0.0, 1.0)
+    return top_ids, top_logprobs, rest
+
+
 def gold_topk_position_loss(
     student_logits: jax.Array,
     teacher_topk_ids: jax.Array,
