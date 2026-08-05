@@ -141,7 +141,14 @@ def main() -> int:
 
     ordinal = 0
     for spec in (s for s in arguments.datasets.split(",") if s):
-        stream = load_dataset(spec, split="train", streaming=True)
+        if spec.startswith("/"):
+            # A local JSONL (the per-host /mnt/ram shard): the file already
+            # IS this host's share, so shard-index/count should be 1/0 -
+            # sharding twice would skip 7/8 of the local rows.
+            stream = load_dataset(
+                "json", data_files=spec, split="train", streaming=True)
+        else:
+            stream = load_dataset(spec, split="train", streaming=True)
         if arguments.limit:
             stream = stream.take(arguments.limit)
         for record in stream:
