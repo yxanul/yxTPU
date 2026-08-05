@@ -105,6 +105,11 @@ def main() -> int:
         })
 
     queues: dict[int, list] = {bucket: [] for bucket in buckets}
+    # Long buckets halve the batch: the [8,4096] scorer program asked
+    # 21.5G alongside the smaller buckets' resident programs and OOMed at
+    # load; [4,4096] fits. Same positions per flush either way.
+    capacity = {bucket: arguments.batch if bucket <= 2048
+                else max(1, arguments.batch // 2) for bucket in buckets}
     dropped_oversize = 0
     render_failures = 0
     batches = 0
@@ -166,7 +171,7 @@ def main() -> int:
                 continue
             bucket = next(b for b in buckets if b >= len(ids))
             queues[bucket].append(ids)
-            if len(queues[bucket]) >= arguments.batch:
+            if len(queues[bucket]) >= capacity[bucket]:
                 flush(bucket)
     for bucket in buckets:
         flush(bucket)
