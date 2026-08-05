@@ -102,13 +102,14 @@ def project_teacher_logits(
             teacher_logits, 0, valid_vocab, axis=-1
         )
     normalizer = blockwise_logsumexp(teacher_logits, block=block)
-    matched = jnp.take_along_axis(
-        teacher_logits,
-        jnp.broadcast_to(
-            student_to_teacher,
-            (*teacher_logits.shape[:-1], student_to_teacher.shape[-1]),
-        ),
-        axis=-1,
+    # jnp.take with the constant index VECTOR, never take_along_axis with
+    # broadcast indices: XLA cannot see that a broadcast [*, 49152] index
+    # tensor repeats the same ids at every position and lowers a general
+    # gather - measured 11.9 SECONDS per [8,1024,248320] operand on a v4
+    # chip against 11.8 ms for the take (a 1000x cliff, the whole
+    # precompute's whale). Values are identical.
+    matched = jnp.take(
+        teacher_logits, student_to_teacher, axis=-1
     ).astype(jnp.float32) - normalizer[..., None]
     residual = -jnp.expm1(
         jax.scipy.special.logsumexp(matched, axis=-1)
@@ -255,14 +256,9 @@ def topk_teacher_targets_from_logits(
             teacher_logits, 0, valid_vocab, axis=-1
         )
     normalizer = blockwise_logsumexp(teacher_logits, block=block)
-    gathered = jnp.take_along_axis(
-        teacher_logits,
-        jnp.broadcast_to(
-            student_to_teacher,
-            (*teacher_logits.shape[:-1], student_to_teacher.shape[-1]),
-        ),
-        axis=-1,
-    )
+    # Constant-vector take, not broadcast take_along_axis - the 1000x
+    # gather cliff documented in project_teacher_logits above.
+    gathered = jnp.take(teacher_logits, student_to_teacher, axis=-1)
     top_values, top_ids = jax.lax.approx_max_k(
         gathered, k, recall_target=recall_target
     )
