@@ -1,0 +1,26 @@
+{
+  "checkpoint": "/home/a1111/yxtpu_ckpts/qwen35-4b-teacher",
+  "corpora": [
+    {
+      "label": "mephisto completions",
+      "tokens": 1970,
+      "nll": 0.5022363009186566,
+      "perplexity": 1.652412433329288,
+      "top1_agreement": 0.8700507572762252
+    },
+    {
+      "label": "climbmix prose",
+      "tokens": 5923,
+      "nll": 2.169020549562278,
+      "perplexity": 8.749709935244573,
+      "top1_agreement": 0.5130845818712002
+    },
+    {
+      "label": "random ids (control)",
+      "tokens": 1022,
+      "nll": 14.52232837677002,
+      "perplexity": 2027529.0173787277,
+      "top1_agreement": 0.0
+    }
+  ]
+}

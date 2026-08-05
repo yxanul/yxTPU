@@ -34,11 +34,16 @@ QWEN35_VALID_VOCAB = 248_077
 
 
 def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
-    """logsumexp over the last axis without materializing exp(logits).
+    """fp32 logsumexp over the last axis without a full-width fp32 copy.
 
     The teacher's 248,320-wide logits are the one tensor that does not fit
     comfortably in fp32; a running (max, sum) pair over vocab blocks keeps
-    peak memory at one block.
+    peak memory at one block. The fp32 cast happens PER BLOCK inside the
+    scan step - handing this function ``x.astype(float32)`` makes XLA
+    materialize the whole cast first (24G of HLO temporaries at the
+    batch-24 precompute shape, the second OOM), while casting disjoint
+    blocks computes the identical values with one block live at a time.
+    Returns fp32 whatever the input dtype.
     """
     vocab = logits.shape[-1]
     if vocab % block:
@@ -48,6 +53,7 @@ def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
     blocks = logits.reshape(*logits.shape[:-1], -1, block)
 
     def step(carry, chunk):
+        chunk = chunk.astype(jnp.float32)
         running_max, running_sum = carry
         chunk_max = jnp.max(chunk, axis=-1)
         new_max = jnp.maximum(running_max, chunk_max)
@@ -61,8 +67,8 @@ def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
         return (new_max, running_sum), None
 
     initial = (
-        jnp.full(logits.shape[:-1], -jnp.inf, logits.dtype),
-        jnp.zeros(logits.shape[:-1], logits.dtype),
+        jnp.full(logits.shape[:-1], -jnp.inf, jnp.float32),
+        jnp.zeros(logits.shape[:-1], jnp.float32),
     )
     (final_max, final_sum), _ = jax.lax.scan(
         step, initial, jnp.moveaxis(blocks, -2, 0)
@@ -95,17 +101,16 @@ def project_teacher_logits(
         teacher_logits = jax.lax.slice_in_dim(
             teacher_logits, 0, valid_vocab, axis=-1
         )
-    normalizer = blockwise_logsumexp(
-        teacher_logits.astype(jnp.float32), block=block
-    )
-    matched = jnp.take_along_axis(
-        teacher_logits.astype(jnp.float32),
-        jnp.broadcast_to(
-            student_to_teacher,
-            (*teacher_logits.shape[:-1], student_to_teacher.shape[-1]),
-        ),
-        axis=-1,
-    ) - normalizer[..., None]
+    normalizer = blockwise_logsumexp(teacher_logits, block=block)
+    # jnp.take with the constant index VECTOR, never take_along_axis with
+    # broadcast indices: XLA cannot see that a broadcast [*, 49152] index
+    # tensor repeats the same ids at every position and lowers a general
+    # gather - measured 11.9 SECONDS per [8,1024,248320] operand on a v4
+    # chip against 11.8 ms for the take (a 1000x cliff, the whole
+    # precompute's whale). Values are identical.
+    matched = jnp.take(
+        teacher_logits, student_to_teacher, axis=-1
+    ).astype(jnp.float32) - normalizer[..., None]
     residual = -jnp.expm1(
         jax.scipy.special.logsumexp(matched, axis=-1)
     )
@@ -156,13 +161,20 @@ def gold_position_loss(
             student_probs * (student_logprobs - teacher_logprobs), axis=-1
         )
     else:
+        # GKD paper Eq. (1) orientation, as TRL implements it: beta weights
+        # the TEACHER in both the mixture and the KL sum, so beta -> 0
+        # approaches beta * KL(teacher || student) - scaled forward KL,
+        # continuous in direction with the beta=0 special case above. The
+        # first version of this branch had the roles mirrored, which made
+        # beta=0.1 behave like the paper's beta=0.9;
+        # test_small_beta_approaches_the_forward_kl now pins the direction.
         student_probs = jnp.exp(student_logprobs)
-        mixture = beta * student_probs + (1.0 - beta) * teacher_probs
+        mixture = beta * teacher_probs + (1.0 - beta) * student_probs
         log_mixture = jnp.log(jnp.clip(mixture, 1e-30, None))
         divergence = beta * jnp.sum(
-            student_probs * (student_logprobs - log_mixture), axis=-1
-        ) + (1.0 - beta) * jnp.sum(
             teacher_probs * (teacher_logprobs - log_mixture), axis=-1
+        ) + (1.0 - beta) * jnp.sum(
+            student_probs * (student_logprobs - log_mixture), axis=-1
         )
 
     weights = position_mask.astype(jnp.float32)
@@ -172,6 +184,156 @@ def gold_position_loss(
         "distill_tokens": token_count,
         "teacher_residual_mass": jnp.sum(
             teacher_residual_mass * weights
+        ) / token_count,
+    }
+    return loss, metrics
+
+
+def topk_teacher_targets(
+    matched_logprobs: jax.Array,
+    residual_mass: jax.Array,
+    k: int,
+    *,
+    recall_target: float = 0.95,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compresses a projected teacher distribution to its top-K + one tail.
+
+    Returns ``(ids [*, k], logprobs [*, k], rest_mass [*])`` where ``rest``
+    is everything the K entries do not carry: the matched tail beyond K
+    plus the unmatched residual. Computed on device so only K columns ever
+    cross to the host - the point of precomputing targets is to not store
+    49,152 floats per position.
+
+    The selection is ``approx_max_k``, not exact ``top_k``: TPU lowers the
+    exact form to a full per-position sort, measured at 514 ms per
+    [8,1024,49152] operand on v4 against 5.9 ms approximate at 98% recall
+    of the exact top-64. The approximation is sound here by construction -
+    a missed entry is a boundary one (smallest of the K), its mass simply
+    stays in the tail bucket the loss renormalizes over, and the target
+    remains a proper distribution either way.
+
+    At ``k = student_vocab`` the compression is exact even so (the
+    aggregation pass sorts every candidate): ``rest`` equals the residual
+    and ``gold_topk_position_loss`` reproduces
+    ``gold_position_loss(beta=0)``, which the tests pin.
+    """
+    del residual_mass  # implied by what the top-K entries do not carry
+    top_logprobs, top_ids = jax.lax.approx_max_k(
+        matched_logprobs, k, recall_target=recall_target
+    )
+    kept = jnp.exp(jax.scipy.special.logsumexp(top_logprobs, axis=-1))
+    rest = jnp.clip(1.0 - kept, 0.0, 1.0)
+    return top_ids, top_logprobs, rest
+
+
+def topk_teacher_targets_from_logits(
+    teacher_logits: jax.Array,
+    student_to_teacher: jax.Array,
+    k: int,
+    *,
+    block: int = 32_768,
+    valid_vocab: int | None = None,
+    recall_target: float = 0.95,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Fused projection + top-K, for dense teacher logits.
+
+    ``project_teacher_logits`` followed by ``topk_teacher_targets``
+    materializes two full-width fp32 buffers - the cast of the 248,320-wide
+    logits and the 49,152-wide matched row - which is what OOMed the
+    batch-32 precompute (23G asked of a 20.9G chip). But the top-K
+    selection is invariant to the normalizer, a constant along the vocab
+    axis, so the selection can run on the raw gathered logits in their
+    NATIVE dtype and only the K survivors get cast and normalized. With
+    bf16 teacher logits this is value-identical to projecting first - the
+    fp32 cast adds no information a bf16 logit does not carry - and the
+    fp32 equivalence is pinned by test against the two-step path.
+
+    The tail is exact regardless: ``rest = 1 - sum(exp(top_logprobs))``
+    needs only the survivors and the true normalizer.
+    """
+    if valid_vocab is not None:
+        teacher_logits = jax.lax.slice_in_dim(
+            teacher_logits, 0, valid_vocab, axis=-1
+        )
+    normalizer = blockwise_logsumexp(teacher_logits, block=block)
+    # Constant-vector take, not broadcast take_along_axis - the 1000x
+    # gather cliff documented in project_teacher_logits above.
+    gathered = jnp.take(teacher_logits, student_to_teacher, axis=-1)
+    top_values, top_ids = jax.lax.approx_max_k(
+        gathered, k, recall_target=recall_target
+    )
+    top_logprobs = top_values.astype(jnp.float32) - normalizer[..., None]
+    kept = jnp.exp(jax.scipy.special.logsumexp(top_logprobs, axis=-1))
+    rest = jnp.clip(1.0 - kept, 0.0, 1.0)
+    return top_ids, top_logprobs, rest
+
+
+def gold_topk_position_loss(
+    student_logits: jax.Array,
+    teacher_topk_ids: jax.Array,
+    teacher_topk_logprobs: jax.Array,
+    teacher_rest_mass: jax.Array,
+    position_mask: jax.Array,
+    *,
+    beta: float = 0.0,
+) -> tuple[jax.Array, dict]:
+    """The GOLD divergence against a top-K-compressed teacher.
+
+    The teacher's K entries are renormalized to a proper distribution over
+    the K set (mirroring ``renormalize_teacher`` in the full loss, with the
+    tail playing the residual's role). The student side differs by beta:
+
+    * ``beta=0`` (forward KL) uses the student's RAW log-probabilities at
+      the K ids - not renormalized over K. The sum then equals
+      ``KL(teacher_K || student_K) - log(student mass on K)``: the exact
+      truncated forward KL plus a coverage term that pushes the student's
+      mass INTO the teacher's top-K set. Non-negative, zero exactly when
+      the student matches the renormalized teacher on K and carries no
+      mass outside it.
+    * ``beta>0`` needs a student distribution on the same support, so the
+      student is renormalized over the K set and the generalized JSD is
+      computed there (paper orientation, as in ``gold_position_loss``).
+      The coverage pressure is then absent - mode-seeking betas do not
+      want it.
+    """
+    student_logprobs = jax.nn.log_softmax(
+        student_logits.astype(jnp.float32), axis=-1
+    )
+    picked = jnp.take_along_axis(
+        student_logprobs, teacher_topk_ids, axis=-1
+    )
+    log_kept = jnp.log1p(-jnp.clip(teacher_rest_mass, 0.0, 0.999))
+    teacher_logprobs = teacher_topk_logprobs - log_kept[..., None]
+    teacher_probs = jnp.exp(teacher_logprobs)
+
+    if beta == 0.0:
+        divergence = jnp.sum(
+            teacher_probs * (teacher_logprobs - picked), axis=-1
+        )
+    else:
+        student_restricted = jax.nn.log_softmax(picked, axis=-1)
+        student_probs = jnp.exp(student_restricted)
+        if beta == 1.0:
+            divergence = jnp.sum(
+                student_probs * (student_restricted - teacher_logprobs),
+                axis=-1,
+            )
+        else:
+            mixture = beta * teacher_probs + (1.0 - beta) * student_probs
+            log_mixture = jnp.log(jnp.clip(mixture, 1e-30, None))
+            divergence = beta * jnp.sum(
+                teacher_probs * (teacher_logprobs - log_mixture), axis=-1
+            ) + (1.0 - beta) * jnp.sum(
+                student_probs * (student_restricted - log_mixture), axis=-1
+            )
+
+    weights = position_mask.astype(jnp.float32)
+    token_count = jnp.maximum(jnp.sum(weights), 1.0)
+    loss = jnp.sum(divergence * weights) / token_count
+    metrics = {
+        "distill_tokens": token_count,
+        "teacher_rest_mass": jnp.sum(
+            teacher_rest_mass * weights
         ) / token_count,
     }
     return loss, metrics

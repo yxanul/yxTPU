@@ -88,12 +88,18 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
     return loss, {"max_logits": logits_max, "tokens": token_count}
 
 
-def _make_train_step(config: ResolvedConfig):
+def _make_train_step(config: ResolvedConfig, loss_fn=None):
+    """``loss_fn`` swaps the differentiated loss (same signature and
+    auxiliary contract as ``_loss``: ``max_logits`` + ``tokens``, any other
+    scalar auxiliary is averaged into the returned metrics). The SFT stage
+    passes the GOLD objective this way; pretraining callers pass nothing
+    and are unchanged."""
     accumulate = config.experiment.gradient_accumulation_steps
     use_clip = config.optimizer.name == "muonclip"
+    model_loss = loss_fn if loss_fn is not None else _loss
 
     def differentiated_loss(model, batch):
-        return _loss(model, batch, record_max_logits=use_clip)
+        return model_loss(model, batch, record_max_logits=use_clip)
 
     # The train state is replaced by the updated NNX graph state on every call,
     # so its input buffers may be donated just as in MaxText's functional step.
@@ -110,6 +116,7 @@ def _make_train_step(config: ResolvedConfig):
         accumulated_grads = None
         loss_sum = jnp.asarray(0.0, dtype=jnp.float32)
         token_sum = jnp.asarray(0.0, dtype=jnp.float32)
+        extra_sums = {}
         # Per-head attention logit maxima are reduced over the batch inside the
         # mixer, so the accumulator carries a single [cycles, 1, heads] row and
         # takes the max across accumulation microbatches.
@@ -140,6 +147,10 @@ def _make_train_step(config: ResolvedConfig):
             loss_sum += micro_loss
             token_sum += auxiliary["tokens"]
             max_logits = jnp.maximum(max_logits, auxiliary["max_logits"])
+            for key, value in auxiliary.items():
+                if key in ("tokens", "max_logits"):
+                    continue
+                extra_sums[key] = extra_sums.get(key, 0.0) + value
         gradients = jax.tree.map(lambda value: value / accumulate, accumulated_grads)
         state.apply_gradients(gradients)
         clip_metrics = None
@@ -155,6 +166,9 @@ def _make_train_step(config: ResolvedConfig):
             "tokens": token_sum,
             "grad_norm": max_utils.l2norm_pytree(gradients),
         }
+        metrics.update(
+            {key: value / accumulate for key, value in extra_sums.items()}
+        )
         if clip_metrics is not None:
             metrics.update(
                 {
