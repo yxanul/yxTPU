@@ -285,7 +285,24 @@ def main() -> int:
             wait_began = time.perf_counter()
             try:
                 batch_host = next(iterator)
+                has_data = 1
             except StopIteration:
+                batch_host, has_data = None, 0
+            if jax.process_count() > 1:
+                # Termination must be COLLECTIVE. Per-host shards exhaust at
+                # different step counts (equal rows, unequal tokens), and a
+                # host that breaks alone leaves the rest hanging forever in
+                # their next train_step collective - the mix6m run deadlocked
+                # exactly there, at step 4734, costing its final save. Every
+                # host reports whether it still has data and all of them stop
+                # together the moment any one is dry; at most one drawn batch
+                # per surviving host is discarded.
+                from jax.experimental import multihost_utils
+
+                flags = multihost_utils.process_allgather(
+                    np.asarray([has_data], dtype=np.int32))
+                has_data = int(flags.min())
+            if not has_data:
                 break
             data_wait_ms = (time.perf_counter() - wait_began) * 1000
             step += 1
