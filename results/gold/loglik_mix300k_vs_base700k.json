@@ -1,0 +1,16 @@
+{
+  "task_set": "0-shot loglikelihood, lm-eval 0.4.12, 75925 requests, 719s on 4 v4 chips",
+  "reference": "base kda_hybrid_yx49k_l20 @ pretrain step 700,000 (in-training round, W&B climbmix-yx49k-367b / post_training/results/pretrain-700k)",
+  "candidate": "GOLD-mix300k (gen-2 SFT + 300k mixed distillation), ckpt 20260805T141608Z/4449",
+  "scores": {
+    "hellaswag":      {"base": 56.9, "mix300k": 56.45},
+    "lambada_openai": {"base": 47.4, "mix300k": 40.09},
+    "arc_easy":       {"base": 67.5, "mix300k": 64.73},
+    "arc_challenge":  {"base": 40.1, "mix300k": 39.16},
+    "sciq":           {"base": 92.0, "mix300k": 91.9},
+    "piqa":           {"base": 75.2, "mix300k": 73.72},
+    "boolq":          {"base": 58.0, "mix300k": 59.14},
+    "openbookqa":     {"base": 38.8, "mix300k": 38.8},
+    "copa":           {"base": 72.0, "mix300k": 73.0}
+  }
+}

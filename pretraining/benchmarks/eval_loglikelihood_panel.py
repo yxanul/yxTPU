@@ -97,6 +97,7 @@ def main() -> int:
         with open(arguments.sft_checkpoint, "rb") as handle:
             nnx.replace_by_pure_dict(target, pickle.load(handle))
         nnx.update(state, target)
+        step = arguments.sft_checkpoint
         print(f"restored {arguments.sft_checkpoint}", flush=True)
     else:
         loader = CheckpointIO(config, run_name=run_name)
