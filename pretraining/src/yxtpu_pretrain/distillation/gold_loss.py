@@ -34,11 +34,16 @@ QWEN35_VALID_VOCAB = 248_077
 
 
 def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
-    """logsumexp over the last axis without materializing exp(logits).
+    """fp32 logsumexp over the last axis without a full-width fp32 copy.
 
     The teacher's 248,320-wide logits are the one tensor that does not fit
     comfortably in fp32; a running (max, sum) pair over vocab blocks keeps
-    peak memory at one block.
+    peak memory at one block. The fp32 cast happens PER BLOCK inside the
+    scan step - handing this function ``x.astype(float32)`` makes XLA
+    materialize the whole cast first (24G of HLO temporaries at the
+    batch-24 precompute shape, the second OOM), while casting disjoint
+    blocks computes the identical values with one block live at a time.
+    Returns fp32 whatever the input dtype.
     """
     vocab = logits.shape[-1]
     if vocab % block:
@@ -48,6 +53,7 @@ def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
     blocks = logits.reshape(*logits.shape[:-1], -1, block)
 
     def step(carry, chunk):
+        chunk = chunk.astype(jnp.float32)
         running_max, running_sum = carry
         chunk_max = jnp.max(chunk, axis=-1)
         new_max = jnp.maximum(running_max, chunk_max)
@@ -61,8 +67,8 @@ def blockwise_logsumexp(logits: jax.Array, *, block: int = 32_768) -> jax.Array:
         return (new_max, running_sum), None
 
     initial = (
-        jnp.full(logits.shape[:-1], -jnp.inf, logits.dtype),
-        jnp.zeros(logits.shape[:-1], logits.dtype),
+        jnp.full(logits.shape[:-1], -jnp.inf, jnp.float32),
+        jnp.zeros(logits.shape[:-1], jnp.float32),
     )
     (final_max, final_sum), _ = jax.lax.scan(
         step, initial, jnp.moveaxis(blocks, -2, 0)
@@ -95,17 +101,15 @@ def project_teacher_logits(
         teacher_logits = jax.lax.slice_in_dim(
             teacher_logits, 0, valid_vocab, axis=-1
         )
-    normalizer = blockwise_logsumexp(
-        teacher_logits.astype(jnp.float32), block=block
-    )
+    normalizer = blockwise_logsumexp(teacher_logits, block=block)
     matched = jnp.take_along_axis(
-        teacher_logits.astype(jnp.float32),
+        teacher_logits,
         jnp.broadcast_to(
             student_to_teacher,
             (*teacher_logits.shape[:-1], student_to_teacher.shape[-1]),
         ),
         axis=-1,
-    ) - normalizer[..., None]
+    ).astype(jnp.float32) - normalizer[..., None]
     residual = -jnp.expm1(
         jax.scipy.special.logsumexp(matched, axis=-1)
     )
@@ -250,9 +254,7 @@ def topk_teacher_targets_from_logits(
         teacher_logits = jax.lax.slice_in_dim(
             teacher_logits, 0, valid_vocab, axis=-1
         )
-    normalizer = blockwise_logsumexp(
-        teacher_logits.astype(jnp.float32), block=block
-    )
+    normalizer = blockwise_logsumexp(teacher_logits, block=block)
     gathered = jnp.take_along_axis(
         teacher_logits,
         jnp.broadcast_to(
