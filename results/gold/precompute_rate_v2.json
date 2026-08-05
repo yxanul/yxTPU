@@ -1,0 +1,37 @@
+{
+  "task": "precompute GOLD targets, Yxanul/Mephisto-IF_172k first 2048 rows, k=64, batch 8, buckets 256/512/1024, one v4 host (4 chips), Qwen3.5-4B teacher TP=4",
+  "baseline_2026-08-05": {
+    "code": "12c4e8c: exact jax.lax.top_k, broadcast take_along_axis, two-step projection, per-call nnx.jit",
+    "seconds": 2379.4,
+    "positions": 609880,
+    "positions_per_second_mean": 256,
+    "score_topk_steady_ms_b8x1024": 20346
+  },
+  "final_2026-08-05": {
+    "code": "5a46ca7: jnp.take constant-vector gather, approx_max_k, fused projection, per-block logsumexp cast, batch-over-tensor reshard",
+    "seconds": 132.9,
+    "positions": 609880,
+    "positions_per_second_mean": 4589,
+    "positions_per_second_tail": 5733,
+    "score_topk_steady_ms_b8x1024": 478,
+    "bare_forward_steady_ms_b8x1024": 425
+  },
+  "speedup_end_to_end": 17.9,
+  "speedup_scorer": 42.6,
+  "attribution": {
+    "take_along_axis_broadcast_ms_single_device": 11941,
+    "jnp_take_constant_vector_ms_single_device": 11.8,
+    "exact_top_k_ms": 514.1,
+    "approx_max_k_ms": 5.9,
+    "approx_recall_of_exact_top64": 0.9806,
+    "nnx_split_walk_ms": 4.4,
+    "note": "the broadcast-index gather was the whale; every other fix was minor beside it. Two-jit split of forward and projection measured 5x WORSE than one jit - XLA's global sharding choices win."
+  },
+  "store": {"examples": 2004, "positions": 609880, "collisions": 0,
+            "dropped_oversize_gt1024": 44, "render_failures": 0,
+            "size_mb": 107},
+  "full_scale_projection": {
+    "IF_172k_one_host_hours": 3.2,
+    "IF_172k_eight_host_fanout_minutes": 24
+  }
+}

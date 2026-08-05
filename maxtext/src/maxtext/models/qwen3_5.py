@@ -27,6 +27,7 @@ from flax import nnx
 from maxtext.common.common_types import Config, Array
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
+from maxtext.layers.linears import MlpBlock
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
@@ -171,8 +172,28 @@ class Qwen3_5DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    # Instantiate our `Qwen3_5SparseMoEBlock`.
-    self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    # The released Qwen3.5 line is dense below the MoE sizes: 0.8B and 4B
+    # declare no expert fields at all. Branch on num_experts rather than a
+    # separate flag (qwen3.py uses `hybrid_attention_use_dense_mlp`) so a
+    # dense config cannot silently disagree with itself and build a
+    # one-expert router whose weights no checkpoint will ever fill.
+    self.is_dense_mlp = cfg.num_experts <= 1
+    if self.is_dense_mlp:
+      self.mlp = MlpBlock(
+          config=cfg,
+          mesh=self.mesh,
+          in_features=cfg.emb_dim,
+          intermediate_dim=cfg.mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          quant=self.quant,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
+    else:
+      self.mlp = Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
   def __call__(
       self,
@@ -226,13 +247,16 @@ class Qwen3_5DecoderLayer(nnx.Module):
     hidden_states = self.post_attention_layernorm(hidden_states)
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
-    # Instantiate and call our `Qwen3_5SparseMoEBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
-
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    # A dense MlpBlock returns the activation alone; the MoE block also
+    # returns a load-balance loss to sow.
+    if self.is_dense_mlp:
+      mlp_output = self.mlp(hidden_states, deterministic=deterministic)
+    else:
+      mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+      # We sow the load balancing loss so it can be collected and added to the total loss
+      # during training.
+      if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output
