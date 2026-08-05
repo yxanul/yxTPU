@@ -202,6 +202,12 @@ def main() -> int:
             seed=config.experiment.seed,
             targets=gold_store,
         )
+        # Same rationale as the stream path below: rendering, store lookup
+        # and packing consumed synchronously stall the whole slice at every
+        # pool drain, and on a multi-host run the other hosts inherit the
+        # stall through the first collective. The smoke measured
+        # 230-540 ms/step of serially exposed data wait without this.
+        iterator = PrefetchIterator(iterator, depth=4)
         if is_primary:
             print(f"mephisto SFT: {args.mephisto} x{args.epochs} epochs", flush=True)
         run_packed = False

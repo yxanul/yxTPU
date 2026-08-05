@@ -146,8 +146,34 @@ class Qwen35Teacher:
         print(f"teacher: {count[0]} arrays sharded, {count[1]} replicated",
               flush=True)
         self.model = nnx.merge(graphdef, params, rest)
-        self._scorer = None
-        self._topk_scorer = None
+        # Split ONCE for scoring. nnx.jit re-walks the whole module graph
+        # in Python on every invocation, which for a 4B-parameter scanned
+        # module dominated the precompute's flush time; jitting over the
+        # already-split (graphdef, state) pays that walk only at trace
+        # time. The merge happens INSIDE the traced function, which is
+        # also what lets MaxText's in-scan self.layers reassignment
+        # (nnx_decoders.py:1771) land at the right trace level - the same
+        # property nnx.jit provided, kept without its per-call cost.
+        self._graphdef, self._split_state = nnx.split(self.model)
+        self._scorers = {}
+
+    def _scorer(self, kind, k=None):
+        key = (kind, k)
+        if key not in self._scorers:
+            graphdef, valid_vocab = self._graphdef, self.valid_vocab
+
+            if kind == "full":
+                def run(state, ids, positions, segments, mapping):
+                    model = nnx.merge(graphdef, state)
+                    return _score(model, ids, positions, segments, mapping,
+                                  valid_vocab)
+            else:
+                def run(state, ids, positions, segments, mapping, k=k):
+                    model = nnx.merge(graphdef, state)
+                    return _score_topk(model, ids, positions, segments,
+                                       mapping, valid_vocab, k)
+            self._scorers[key] = jax.jit(run)
+        return self._scorers[key]
 
     def score(self, student_input_ids, positions, segment_ids):
         """Teacher distribution over the student's vocabulary, per position.
@@ -158,16 +184,9 @@ class Qwen35Teacher:
         reads, in the same segmentation - so it pairs with student position
         i directly, with no further shift.
         """
-        if self._scorer is None:
-            # nnx.jit, not jax.jit: MaxText's decoder reassigns self.layers
-            # inside the layer scan (nnx_decoders.py:1771), and mutating a
-            # module built outside the trace raises TraceContextError.
-            # nnx.jit splits and remerges the module across the boundary so
-            # the write lands at the right trace level.
-            self._scorer = nnx.jit(_score, static_argnums=(5,))
-        return self._scorer(self.model, student_input_ids, positions,
-                            segment_ids, self.mapping, self.valid_vocab)
-
+        return self._scorer("full")(
+            self._split_state, student_input_ids, positions, segment_ids,
+            self.mapping)
 
     def score_topk(self, student_input_ids, positions, segment_ids, k: int):
         """``score`` compressed on device to (ids, logprobs, rest) at top-K.
@@ -175,11 +194,9 @@ class Qwen35Teacher:
         Only K columns per position ever leave the device, which is what
         makes precomputing targets for a whole dataset practical.
         """
-        if self._topk_scorer is None:
-            self._topk_scorer = nnx.jit(_score_topk, static_argnums=(5, 6))
-        return self._topk_scorer(self.model, student_input_ids, positions,
-                                 segment_ids, self.mapping, self.valid_vocab,
-                                 int(k))
+        return self._scorer("topk", int(k))(
+            self._split_state, student_input_ids, positions, segment_ids,
+            self.mapping)
 
 
 def _project(model, student_input_ids, positions, segment_ids, mapping,
