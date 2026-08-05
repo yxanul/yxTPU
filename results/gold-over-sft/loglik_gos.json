@@ -1,0 +1,60 @@
+{
+  "checkpoint_step": "/home/a1111/gold-teacher/pretraining/ckpt/gold-over-sft-1575.pkl",
+  "model": "kda_hybrid_yx49k_l20",
+  "results": {
+    "arc_challenge@0": {
+      "score": 37.54,
+      "acc": 0.34726962457337884,
+      "acc_norm": 0.37542662116040953,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "arc_easy@0": {
+      "score": 64.23,
+      "acc": 0.6927609427609428,
+      "acc_norm": 0.6422558922558923,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "boolq@0": {
+      "score": 58.87,
+      "acc": 0.5886850152905199,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "copa@0": {
+      "score": 72.0,
+      "acc": 0.72,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "hellaswag@0": {
+      "score": 53.52,
+      "acc": 0.41266679944234214,
+      "acc_norm": 0.5351523600876319,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "lambada_openai@0": {
+      "score": 38.73,
+      "acc": 0.38734717640209587,
+      "acc_norm": null,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "openbookqa@0": {
+      "score": 38.8,
+      "acc": 0.258,
+      "acc_norm": 0.388,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "piqa@0": {
+      "score": 73.45,
+      "acc": 0.7295973884657236,
+      "acc_norm": 0.73449401523395,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    },
+    "sciq@0": {
+      "score": 91.6,
+      "acc": 0.916,
+      "acc_norm": 0.874,
+      "artifact": "/tmp/loglik_panel/lm_eval/step_00000000.json"
+    }
+  }
+}
