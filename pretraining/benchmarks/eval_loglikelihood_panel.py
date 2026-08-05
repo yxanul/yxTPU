@@ -58,6 +58,8 @@ def main() -> int:
     parser.add_argument("--init-destination", default="/home/a1111/yxtpu_ckpts")
     parser.add_argument("--init-run", default=None,
                         help="defaults to <model>-muonclip-superbpe_50b")
+    parser.add_argument("--sft-checkpoint", default=None,
+                        help="load an SFT-stage state.pkl instead of orbax")
     parser.add_argument("--limit", type=float, default=None)
     parser.add_argument("--batch-per-device", type=int, default=1)
     parser.add_argument("--output", default="/tmp/loglik_panel.json")
@@ -86,12 +88,23 @@ def main() -> int:
         model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(0))
         transform, _ = build_optimizer(model, config.optimizer)
         state = TrainStateNNX(model, nnx.Optimizer(model, transform, wrt=nnx.Param))
-    loader = CheckpointIO(config, run_name=run_name)
-    step = loader.restore(state, _NoIterator())
-    loader.close()
-    if step == 0:
-        raise RuntimeError("no checkpoint restored")
-    print(f"restored {run_name} step {step}", flush=True)
+    if arguments.sft_checkpoint:
+        import pickle
+
+        from yxtpu_pretrain.runtime.checkpoints import _persistent_state
+
+        target = _persistent_state(state)
+        with open(arguments.sft_checkpoint, "rb") as handle:
+            nnx.replace_by_pure_dict(target, pickle.load(handle))
+        nnx.update(state, target)
+        print(f"restored {arguments.sft_checkpoint}", flush=True)
+    else:
+        loader = CheckpointIO(config, run_name=run_name)
+        step = loader.restore(state, _NoIterator())
+        loader.close()
+        if step == 0:
+            raise RuntimeError("no checkpoint restored")
+        print(f"restored {run_name} step {step}", flush=True)
 
     run_dir = Path("/tmp/loglik_panel")
     run_dir.mkdir(parents=True, exist_ok=True)
