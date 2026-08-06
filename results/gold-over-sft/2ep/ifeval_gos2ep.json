@@ -1,0 +1,23 @@
+{
+  "checkpoint": "/home/a1111/gold-teacher/pretraining/ckpt/gos-2ep-3150.pkl",
+  "generation": {
+    "temperature": 0.3,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
+    "max_gen_toks": 512,
+    "chat_template": true
+  },
+  "tasks": {
+    "ifeval": {
+      "seconds": 120,
+      "scores": {
+        "ifeval/inst_level_loose_acc": 49.3,
+        "ifeval/inst_level_strict_acc": 44.4,
+        "ifeval/prompt_level_loose_acc": 36.0,
+        "ifeval/prompt_level_strict_acc": 31.4,
+        "ifeval/sample_len": 54100.0
+      },
+      "artifact": "/tmp/generative_eval/lm_eval/step_00000000.json"
+    }
+  }
+}
