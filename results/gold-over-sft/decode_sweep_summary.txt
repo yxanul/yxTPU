@@ -1,0 +1,11 @@
+== pen105: Scored 8/12 correct; 0/12 well-formed think blocks; 9/12 stopped on `<|im_end|>`. Generated in 14.1s.
+== pen110: Scored 8/12 correct; 0/12 well-formed think blocks; 10/12 stopped on `<|im_end|>`. Generated in 14.4s.
+== pen115: Scored 9/12 correct; 0/12 well-formed think blocks; 11/12 stopped on `<|im_end|>`. Generated in 14.1s.
+== greedy_pen115: Scored 7/12 correct; 0/12 well-formed think blocks; 10/12 stopped on `<|im_end|>`. Generated in 13.6s.
+== greedy: Scored 8/12 correct; 0/12 well-formed think blocks; 8/12 stopped on `<|im_end|>`. Generated in 13.3s.
+== t02_p09: Scored 8/12 correct; 0/12 well-formed think blocks; 8/12 stopped on `<|im_end|>`. Generated in 13.9s.
+== t05_p09: Scored 7/12 correct; 0/12 well-formed think blocks; 10/12 stopped on `<|im_end|>`. Generated in 13.9s.
+== t03_p08_k20: Scored 8/12 correct; 0/12 well-formed think blocks; 9/12 stopped on `<|im_end|>`. Generated in 13.8s.
+== t07_p08_k20: Scored 8/12 correct; 0/12 well-formed think blocks; 10/12 stopped on `<|im_end|>`. Generated in 14.3s.
+baseline T0.3/p0.9/pen1.0: 9/12, 11/12 stops, haiku loops
+IFEval: pen1.0=41.3(prior) pen1.15: ps31.6 pl34.9 is44.7 il48.3 mean39.9
