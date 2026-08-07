@@ -1,10 +1,24 @@
 # GOLD distillation: experiments and results
 
-State as of 2026-08-05. GOLD (General On-policy Logit Distillation,
+State as of 2026-08-07. GOLD (General On-policy Logit Distillation,
 HuggingFaceH4/on-policy-distillation) adapted to this project's setting:
 a 308M `kda_hybrid_yx49k_l20` student distilling from a frozen
-Qwen3.5-4B teacher. Everything below ran on four v4 chips of the
-`yxtpu-v4-64-train` slice (single-host env carve-out) unless noted.
+Qwen3.5-4B teacher. Early experiments ran on four v4 chips of the
+`yxtpu-v4-64-train` slice (single-host env carve-out); from SFT-6M
+onward, training runs use the full 8-host slice.
+
+The lineage at a glance (every checkpoint in the private HF repo
+`Yxanul/yx49k-l20-checkpoints`, 19.9 GiB verified):
+
+| model | recipe | IFEval mean | panel /42 |
+| --- | --- | --- | --- |
+| gen-2 | base@700k + SFT 690k IF+Knowledge rows @2048 | 40.4 | 10 |
+| GOLD-10k | gen-2 + distill 10k IF | 42.1 | — |
+| GOLD-50k | gen-2 + distill 50k IF | 48.4 | 12 |
+| GOLD-mix300k | gen-2 + distill 100k×{IF,Knowledge,MathCode} | **51.0** | 16 |
+| SFT-6M | base@700k + SFT 6.27M rows @4096 | 35.3 | 15 |
+| GOLD-over-SFT | SFT-6M + distill 1/3 of the same mix, K=32 | 41.3 | **22** |
+| (2-epoch control) | same, 2 epochs | 40.3 | 22 |
 
 ## The design, and why it is simpler than TRL's
 
@@ -158,21 +172,115 @@ reports 3.2 after 4T tokens. The levers are scale (the full 2M MathCode
 set) and sequence length: the 2048-token window drops 14% of MathCode
 rows, and those are precisely the longest derivations.
 
+### Base-capability check (the LR question)
+
+0-shot loglikelihood panel vs the base model at pretrain step 700k:
+mix300k drifts −1.2 mean with seven of nine tasks within ±1.5 (boolq
+and copa UP); SFT-6M likewise −1.5. A hot LR degrades broadly — nothing
+here does — so LR 3e-5 is confirmed safe from the 30M-token GOLD dose
+through the 2.55B-token SFT dose. The one systematic cost is
+**lambada** (47.4 base → 40.1 mix300k / 42.4 SFT-6M / 38.7 GOLD-over-
+SFT): the classic chat-tuning tax on raw-prose continuation,
+distribution shift rather than optimization damage, compounding with
+each chat-format stage.
+
+### SFT-6M: 6.27M rows, one epoch, full slice
+
+The plain-SFT baseline the GOLD numbers needed: AMD-SFT-Mix_3.5M +
+Mephisto IF/Knowledge/MathCode (6,268,050 rows) exported to tmpfs,
+globally shuffled with `shuf`, split round-robin into 8 per-host
+shards, trained @4096 on all 8 hosts from the 700k base — 4,734 steps /
+1.62B supervised tokens / ~41 min, loss 1.76→0.79.
+
+Verdict: IFEval 35.3 (the 88%-code/math diet diluted IF to ~3% of
+rows), but the lineage's best raw code/math surface skill (panel code
+4/8, math 2/8) and clean stops 35/42. **300k distilled rows beat 6.27M
+one-hot rows by +15.7 IFEval mean** — a 21× data disadvantage overcome
+by the denser signal (pipeline comparison, not a controlled ablation:
+inits differ).
+
+### GOLD-over-SFT: the synthesis
+
+K=32 targets for the first third of the same shuffled mix (per-host
+sharded stores, ~9.1 GB each, built in ~3.5 h wall by all 8 hosts;
+`rows_missing_targets` = 1 in 243,504 training draws — the
+store/render identity holds at full scale), distilled onto the SFT-6M
+checkpoint: 1,575 steps / 539M tokens / ~15 min.
+
+**Best model of the lineage: panel 22/42** — math 4/8 and code 4/8
+kept from SFT, first perfect knowledge 8/8, IFEval +6.0 over its base.
+The telling internal: CE stayed flat at the SFT optimum while distill
+fell 31% — the teacher's distributions carried signal beyond what
+another one-hot epoch could give, which is the GOLD thesis in one
+number. Its IFEval (41.3) trails mix300k's 51.0 for a data-mix reason
+(3% IF share here vs 33% there), not a method reason.
+
+Qualitatively (12-prompt chat panel, both models 9/12): the mechanics
+arrived — `is_even` textbook, planets correct with no Vulcan, 15% of
+240 computed correctly as 36 (then spoiled by adding it back: the
+arithmetic engine works, the task model misfires — a different failure
+class than mix300k's "15% of 24000 is 3200"). Still missing:
+multi-step word problems, translation (absent from every diet), and
+open-ended generation stability.
+
+### Epoch scaling: a clean null
+
+Controlled comparison — identical init, store, and single-anneal
+recipe; 1 epoch vs 2: distill floor 0.504→0.480, panel 22/42→22/42,
+IFEval 41.3→40.3. The second epoch memorized the store without moving
+anything downstream. **Standing rule: one epoch per store; spend the
+next unit of compute on fresh rows.**
+
+### Decode settings are checkpoint-dependent
+
+Every generation got its own 10-config sweep on the 42/12-prompt
+panels. GOLD-50k wanted pen1.0 (penalties looped it worse); GOLD-over-
+SFT wants pen1.15 for chat (kills the repetition attractor, ties the
+best score, cleanest stops) while low temperature — not high — is its
+loop-maker (T0.2: worst). Both models: penalties tax IFEval by ~1
+point. The profile that generalizes: **interactive chat at
+T0.3/p0.9/pen1.1–1.15; benchmarks and long-form at pen1.0–1.1; re-sweep
+after every training generation** (~10 min).
+
 ## Verdict and next campaign
 
-Distillation scales cleanly through 300k examples with zero stability
-incidents across every run. The recommended next rung: full-set GOLD
-(172k IF + 538k Knowledge + a MathCode slice sized to taste) — the
-fan-out prices the full 2.7M-example store at ~7 h on this slice
-(hardware the TRC grant covers; ~180 GB of store means disk planning
-first — checkpoint save_interval sized against free space, the ENOSPC
-lesson from this run's first attempt); a 4096 window for the MathCode
-share; then on-policy as the stage after.
+Distillation scales cleanly through 300k examples and stacks on top of
+large-scale SFT, with zero numerics incidents across every run. The
+epoch null plus the compositionality result fix the campaign shape:
+one epoch, mixed domains, fresh rows over repeats. Recommended next
+rungs, in expected-value order: (1) an IF-weighted distillation pass on
+the GOLD-over-SFT checkpoint (its one trailing metric is a mix
+artifact); (2) the untouched two thirds of the K=32 mix store's data;
+(3) the full campaign — 172k IF + 538k Knowledge + MathCode sized to
+taste at K=32 with 4096 buckets (~15–20 h fan-out precompute, ~250–450
+GB across `/mnt/ram`, per-host sharded stores, no gather); then
+on-policy as the stage after.
 
-## Ledger
+## Operations ledger
 
-- Store cost: ~172 B/position at K=64 (fp16 logprobs, uint16 ids,
-  compressed npz). 300k examples ≈ ~150M positions ≈ ~25 GB.
-- Precompute: ~8,100 pos/s per 4-chip host; scales linearly with hosts.
-- Training: ~520 ms/step at 65,536 tokens/step on 4 chips.
-- Full eval loop (IFEval): ~2.5 min.
+- Store cost: ~172 B/position at K=64, ~90 B at K=32 (fp16 logprobs,
+  uint16 ids, compressed npz). K=32 validated end-to-end; rest mass
+  1.5% on the mixed diet.
+- Precompute: ~8,100 pos/s per 4-chip host, linear across hosts (54k
+  pos/s on the slice). Buckets past 2048 need the halved flush batch
+  (the [8,4096] scorer program does not fit alongside the smaller
+  buckets' resident programs).
+- Training: ~520 ms/step at 65,536 tokens/step (4 chips, @2048); ~520
+  ms/step at ~340k tokens/step (8 hosts, @4096). Host RAM never
+  exceeded 53 GB of 400 (W&B system metrics), so tmpfs is the data
+  plane: **use `/mnt/ram` (plain tmpfs), not `/dev/shm`** — systemd
+  logind's RemoveIPC purges /dev/shm when the owning session ends,
+  which silently deleted a distributed dataset once.
+- Multi-host data-limited runs need COLLECTIVE termination (allgather a
+  has-data flag; c3a1d6d): per-host shards exhaust at different step
+  counts, and one host breaking alone deadlocks the rest in the next
+  collective — cost SFT-6M its final save before the fix.
+- Per-host sharded stores align with per-host data shards by
+  construction; `rows_missing_targets` is the guard and measured ≤2
+  per run at every scale.
+- Eval battery per checkpoint: IFEval ~2.5 min, 42-prompt panel ~30 s,
+  9-task loglikelihood panel ~12 min, decode sweep ~10 min.
+- Checkpoint custody: every lineage checkpoint + metadata in
+  `Yxanul/yx49k-l20-checkpoints` (HF, private) — pickles are
+  irreplaceable and belong on durable storage; stores are recomputable
+  and belong in RAM.
