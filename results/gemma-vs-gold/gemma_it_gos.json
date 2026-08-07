@@ -1,0 +1,61 @@
+{
+  "panel": "it",
+  "reference": "Gemma 3 IT 270M",
+  "checkpoint": "/home/a1111/gold-teacher/pretraining/ckpt/gold-over-sft-1575.pkl",
+  "rows": [
+    {
+      "task": "arc_challenge",
+      "shots": 0,
+      "ours": 37.5,
+      "gemma": 28.2,
+      "delta": 9.3
+    },
+    {
+      "task": "hellaswag",
+      "shots": 0,
+      "ours": 53.5,
+      "gemma": 37.7,
+      "delta": 15.8
+    },
+    {
+      "task": "piqa",
+      "shots": 0,
+      "ours": 73.4,
+      "gemma": 66.2,
+      "delta": 7.2
+    },
+    {
+      "task": "winogrande",
+      "shots": 0,
+      "ours": 58.0,
+      "gemma": 52.3,
+      "delta": 5.7
+    }
+  ],
+  "raw": {
+    "arc_challenge": {
+      "shots": 0,
+      "score": 37.5,
+      "acc": 0.34726962457337884,
+      "acc_norm": 0.37542662116040953
+    },
+    "hellaswag": {
+      "shots": 0,
+      "score": 53.5,
+      "acc": 0.41266679944234214,
+      "acc_norm": 0.5351523600876319
+    },
+    "piqa": {
+      "shots": 0,
+      "score": 73.4,
+      "acc": 0.7295973884657236,
+      "acc_norm": 0.73449401523395
+    },
+    "winogrande": {
+      "shots": 0,
+      "score": 58.0,
+      "acc": 0.580110497237569,
+      "acc_norm": null
+    }
+  }
+}

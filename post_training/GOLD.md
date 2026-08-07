@@ -242,19 +242,52 @@ point. The profile that generalizes: **interactive chat at
 T0.3/p0.9/pen1.1–1.15; benchmarks and long-form at pen1.0–1.1; re-sweep
 after every training generation** (~10 min).
 
+### The Gemma 3 270M IT head-to-head (external calibration)
+
+Same 54 prompts + a 12-prompt freeform set + IFEval + the loglik panel
+through both models, checkers identical, Gemma at its better decode per
+panel (`results/gemma-vs-gold/COMPARISON.md` has the full transcripts).
+Result: **capability ours, behavior Gemma's, strict-format neither's.**
+Measured loglikelihood is a 4/4 sweep for GOLD-over-SFT (hellaswag
++15.8, arc-c +9.3, piqa +7.2, winogrande +5.7) despite Gemma's ~120×
+pretraining-token advantage — the base is not the problem. Transcripts
+invert it: panel 31/42 Gemma vs 22/42 ours, driven entirely by math
+(8/8 vs 4/8, their drilled `Final Answer` ritual vs our
+right-number-then-self-destruct pattern) and code (7/8 vs 4/8); chat
+9/12 ours vs 8/12. On the freeform set Gemma's answers are usable
+as-is (~8/12) because they *terminate*; ours open better (best prose of
+either model) and then loop — only 5/12 emitted `<|im_end|>` in 400
+tokens. Instruction-format is the shared floor: Gemma 2/8, ours 3/8 —
+6T tokens and Google's whole IT pipeline don't buy all-lowercase or
+no-letter-e at ~300M. IFEval under our harness: Gemma measures 31.4
+mean (its published 51.2 does not survive harness transfer) vs our
+41.3 (GOLD-over-SFT) and 51.0 (mix300k) — both checkpoints beat it
+under identical conditions. Attribution: the entire deficit is termination
+discipline and answer ritual — post-training properties — and the
+right-answer-then-drift signature is textbook exposure bias, the
+failure class on-policy distillation exists to fix.
+
 ## Verdict and next campaign
 
 Distillation scales cleanly through 300k examples and stacks on top of
 large-scale SFT, with zero numerics incidents across every run. The
 epoch null plus the compositionality result fix the campaign shape:
-one epoch, mixed domains, fresh rows over repeats. Recommended next
-rungs, in expected-value order: (1) an IF-weighted distillation pass on
-the GOLD-over-SFT checkpoint (its one trailing metric is a mix
+one epoch, mixed domains, fresh rows over repeats. The Gemma
+head-to-head adds the external calibration: the base wins on capability
+at 120× less data, so pretraining, size, and the pretraining diet stay
+fixed; every next unit of compute belongs to post-training. Recommended
+next rungs, in expected-value order: (1) an IF-weighted distillation
+pass on the GOLD-over-SFT checkpoint (its one trailing metric is a mix
 artifact); (2) the untouched two thirds of the K=32 mix store's data;
 (3) the full campaign — 172k IF + 538k Knowledge + MathCode sized to
 taste at K=32 with 4096 buckets (~15–20 h fan-out precompute, ~250–450
-GB across `/mnt/ram`, per-host sharded stores, no gather); then
-on-policy as the stage after.
+GB across `/mnt/ram`, per-host sharded stores, no gather), over-sampling
+short-form completions with hard stops and boxed-answer math rows; then
+on-policy — promoted from "the stage after" to the indicated treatment
+for the observed disease (loops and post-answer drift are exactly what
+student-sampled rollouts + teacher scoring penalize). Re-run the Gemma
+comparison after on-policy; revisit model size only if the spiral
+survives it.
 
 ## Operations ledger
 
