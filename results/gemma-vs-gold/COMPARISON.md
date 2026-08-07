@@ -1,12 +1,15 @@
-# Gemma 3 270M IT vs GOLD-over-SFT: the head-to-head
+# GOLD-over-SFT vs the ~300M instruct field: Gemma 3 270M, SmolLM2-360M, SmolLM-360M
 
 2026-08-07. Question this answers: is the lineage's remaining gap a
 post-training problem (keep going with SFT/GOLD) or a pretraining /
 model-size / data problem (change the base)? Method: the exact same
-prompts through both models — the 42-prompt scored panel, the 12-prompt
+prompts through every model — the 42-prompt scored panel, the 12-prompt
 chat panel, a 12-prompt freeform real-world set, IFEval under our
 harness conventions, and the loglikelihood panel at Gemma's published
-shot counts. Gemma ran from the official `google/gemma-3-270m-it`
+shot counts. The SmolLM pair (results in `smollm/`) doubles as a
+controlled experiment run by someone else: same parameter count, same
+architecture family, one generation of data + post-training iteration
+apart. Gemma ran from the official `google/gemma-3-270m-it`
 weights (transformers, fp32 CPU on worker 0); checker code is copied
 verbatim from our panel scripts, so a PASS means the same thing for
 both models. Gemma was scored at both greedy and its shipped sampling
@@ -128,6 +131,61 @@ instruction section with 6T tokens and Google's entire post-training
 pipeline behind it; we go 3/8. Neither pipeline buys these at ~300M.
 This looks like a genuine size ceiling, and it caps both models equally.
 
+## The SmolLM control group
+
+Same battery, measured, both models at greedy and their documented
+t0.2/p0.9 sampling (better result quoted). SmolLM-360M-Instruct
+(~600B pretraining tokens, HF's 2024 recipe) and SmolLM2-360M-Instruct
+(4T tokens, the mature 2025 recipe) bracket our 308M exactly:
+
+| | SmolLM-360M-IT | SmolLM2-360M-IT | ours | Gemma IT |
+| --- | --- | --- | --- | --- |
+| panel /42 | 19 | **34** | 22 | 31 |
+| — math /8 | 2 | **8** | 4 | 8 |
+| — code /8 | 7 | **8** | 4 | 7 |
+| — instruction /8 | 0 | **5** | 3 | 2 |
+| — knowledge /8 | 7 | 7 | **8** | 6 |
+| chat /12 | 10 | **11** | 9 | 8 |
+| IFEval mean (measured) | 16.1 | 40.1 | 41.3 / **51.0** | 31.4 |
+
+Measured 0-shot loglikelihood (instruct models, same harness):
+
+| task | ours | SmolLM2-IT | SmolLM-IT |
+| --- | --- | --- | --- |
+| hellaswag | 53.5 | **56.8** | 52.7 |
+| arc_challenge | **37.5** | 34.0 | 33.0 |
+| piqa | **73.4** | 71.3 | 70.6 |
+| winogrande | **58.0** | 57.6 | 53.6 |
+
+Readings:
+
+- **SmolLM2 is the strongest same-size external.** Panel 34/42 — the
+  drilled math/code rituals at full strength (8/8, 8/8), and 5/8 on the
+  strict-format instruction section where Gemma manages 2/8 and we 3/8.
+  Its measured IFEval (40.1) matches its published 41.0 — an honest
+  model card — and lands a hair under GOLD-over-SFT (41.3), eleven
+  points under mix300k (51.0). On capability it is the only external
+  that reaches parity: ours 3/4 with narrow margins, and its 4T tokens
+  buy it a real hellaswag win (56.8 vs 53.5) — unlike Gemma, whose
+  capability deficit is wholesale.
+- **The v1→v2 delta is the whole argument in one family.** Same
+  parameter count: panel 19→34, IFEval 16.1→40.1, instruction 0/8→5/8.
+  Everything that separates them is data and post-training recipe —
+  which is exactly the axis this comparison says our lineage should
+  spend on.
+- **SmolLM2's freeform is the best of the three externals** (~10/12
+  usable: the best JWST summary, the best virus-vs-bacterium
+  explanation, a sendable thank-you note) — **and it still loops**: its
+  recipe repeats "1/4 cup grated Parmesan cheese" twenty times, and its
+  birthday one-liner is semantically garbled. Even HF's mature pipeline
+  only suppresses the repetition spiral at ~360M; it does not eliminate
+  it. Ours fails that way in most long answers, SmolLM2 in ~1/12,
+  Gemma in ~0 — that spectrum is post-training depth made visible.
+- SmolLM2's 5/8 instruction section forces one revision to the Gemma
+  conclusion: strict-format following is *harder* at ~300M but not a
+  hard ceiling — a deep enough instruction diet buys real fractions
+  of it.
+
 ## Attribution
 
 - **Capability (knowledge, reasoning priors): ours ahead, large.**
@@ -138,8 +196,10 @@ This looks like a genuine size ceiling, and it caps both models equally.
   large.** These are exactly the properties Google's post-training
   pipeline drills at industrial scale. Nothing in Gemma's transcripts
   suggests a smarter model — it suggests a *finished* one.
-- **Strict-format instruction following: both fail equally.** The one
-  place the evidence says "size", and it binds Gemma too.
+- **Strict-format instruction following: hard at this size, not a
+  ceiling.** Gemma 2/8 and ours 3/8 suggested a size wall; SmolLM2's
+  5/8 shows a deep instruction diet buys real fractions of it. It binds
+  every ~300M model, but it is trainable headroom, not physics.
 
 Our signature failure — right answer, then a self-destructive
 continuation — is textbook exposure bias. Teacher-forced training
@@ -165,11 +225,12 @@ is post-training depth, and it is specific:
    intelligence; ~100k boxed-answer math rows through GOLD should buy
    most of it.
 
-Re-run this exact comparison after the on-policy stage. If the
-transcripts then match Gemma's discipline while keeping our capability
-lead, the 308M lineage beats Gemma 3 270M outright; if the repetition
-spiral survives on-policy training, revisit the size question then —
-and only then.
+Re-run this exact comparison after the on-policy stage. The target to
+beat is now SmolLM2-360M-Instruct, not Gemma: match its 34/42 panel
+discipline while keeping our capability lead and our IFEval edge, and
+the 308M lineage is the best model of the size class outright. If the
+repetition spiral survives on-policy training, note that it also
+survives (attenuated) in SmolLM2 — then, and only then, revisit size.
 
 ## Artifacts
 
@@ -177,6 +238,8 @@ and only then.
   `gemma_freeform.json` — Gemma transcripts and scores (this run).
 - `gemma_it_gos.json` — measured loglikelihood head-to-head.
 - `ifeval_gemma.json` — Gemma IFEval under our harness.
+- `smollm/smollm{1,2}-results/` — SmolLM-360M-Instruct and
+  SmolLM2-360M-Instruct: panels, freeform, IFEval, loglik (measured).
 - Ours: `../gold-over-sft/panel_gos.md`, `../gold-over-sft/chat_panel_gos.md`,
   `freeform_gos.md` (this directory), `../gold-over-sft/ifeval_gos.json`,
   `../gold/ifeval_mix300k.json`.

@@ -1,0 +1,965 @@
+{
+  "model": "HuggingFaceTB/SmolLM2-360M-Instruct",
+  "results": {
+    "panel42/greedy": {
+      "summary": {
+        "total": 42,
+        "correct": 34,
+        "by_domain": {
+          "code": {
+            "correct": 8,
+            "total": 8
+          },
+          "if": {
+            "correct": 6,
+            "total": 10
+          },
+          "instruction": {
+            "correct": 5,
+            "total": 8
+          },
+          "knowledge": {
+            "correct": 7,
+            "total": 8
+          },
+          "math": {
+            "correct": 8,
+            "total": 8
+          }
+        },
+        "seconds": 291.3,
+        "setting": "greedy"
+      },
+      "transcripts": [
+        {
+          "domain": "knowledge",
+          "prompt": "What is the capital of Australia? Answer with just the city name.",
+          "answer": "Sydney",
+          "correct": false,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "Who wrote the play Romeo and Juliet? Answer with just the name.",
+          "answer": "William Shakespeare.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the chemical symbol for gold? Answer with just the symbol.",
+          "answer": "A: Au",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the largest planet in our solar system?",
+          "answer": "The largest planet in our solar system is Jupiter. It is a gas giant with a diameter of approximately 142,984 kilometers.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "In what year did the Second World War end?",
+          "answer": "The Second World War ended on May 8, 1945, after the Allied powers, led by the United States, Great Britain, and the Soviet Union, defeated Germany and Japan.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the boiling point of water in Celsius at sea level?",
+          "answer": "The boiling point of water in Celsius at sea level is 100 degrees Celsius.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "Who painted the Mona Lisa?",
+          "answer": "The Mona Lisa is a painting by Leonardo da Vinci.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the capital of Japan? Answer with just the city name.",
+          "answer": "Tokyo",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "What is 17 + 25?",
+          "answer": "17 + 25 = 42",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "A train travels 60 km in 1.5 hours. What is its average speed in km/h?",
+          "answer": "To find the average speed, we need to divide the total distance traveled by the time taken.\n\nAverage speed = Total distance / Time taken\nAverage speed = 60 km / 1.5 hours\nAverage speed = 40 km/h",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "A shirt costs $40 and is discounted by 25%. What is the final price in dollars?",
+          "answer": "To find the final price, we need to calculate 25% of $40. \n\n25% of $40 is 0.25 * $40 = $10.\n\nSo, the final price is $40 - $10 = $30.",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "If 3x + 7 = 22, what is x?",
+          "answer": "To solve for x, we need to isolate x on one side of the equation. We can do this by subtracting 7 from both sides of the equation. This will get rid of the constant term on the left side.\n\nSo, 3x + 7 - 7 = 22 - 7\n3x = 15\n\nNow, we need to get x by itself. To do this, we divide both sides of the equation by 3.\n\nSo, 3x / 3 = 15 / 3\nx = 5\n\nTherefore, the value of x is 5.",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 1
+        },
+        {
+          "domain": "math",
+          "prompt": "What is 12 multiplied by 12?",
+          "answer": "12 multiplied by 12 equals 144.",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "What is half of 96?",
+          "answer": "Half of 96 is 48.",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "A rectangle is 7 cm by 5 cm. What is its area in square centimetres?",
+          "answer": "To find the area of a rectangle, you need to multiply the length by the width. In this case, the length is 7 cm and the width is 5 cm. \n\nArea = Length * Width\nArea = 7 cm * 5 cm\nArea = 35 square centimeters.",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "What is 100 minus 37?",
+          "answer": "100 minus 37 is 63.",
+          "correct": true,
+          "answer_tokens": 134,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Respond with a single word only: what colour is the sky on a clear day?",
+          "answer": "The sky is blue.",
+          "correct": false,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "List exactly four fruits, one per line, numbered 1 to 4. Write nothing else.",
+          "answer": "1. Apple\n2. Banana\n3. Orange\n4. Grapefruit",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Name one country in Europe. Wrap your entire answer in double quotes.",
+          "answer": "\"Europe\"",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Write exactly two sentences about rain. Write nothing else.",
+          "answer": "Rain is a natural phenomenon that occurs when the atmosphere is filled with water vapor and cools down. It can cause flooding and create beautiful rainbows.",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Answer with only the word yes or the word no: is the Earth round?",
+          "answer": "Yes.",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "List three colours separated by commas. Write nothing else.",
+          "answer": "1. Red\n2. Blue\n3. Green",
+          "correct": false,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Reply in all uppercase letters: say hello to the reader.",
+          "answer": "HELLO TO THE READER!",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Write one short sentence that does not contain the letter e.",
+          "answer": "The sentence is: \"The cat sat on the mat.\"",
+          "correct": false,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named reverse_string(s) that returns the reversed string. Reply with only a Python code block.",
+          "answer": "```python\ndef reverse_string(s):\n    return s[::-1]\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named fib(n) that returns the nth Fibonacci number, where fib(1)=1 and fib(2)=1. Reply with only a Python code block.",
+          "answer": "```python\ndef fib(n):\n    if n <= 1:\n        return n\n    else:\n        return fib(n-1) + fib(n-2)\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named is_palindrome(s) that returns True if s is a palindrome ignoring case and spaces. Reply with only a Python code block.",
+          "answer": "```python\ndef is_palindrome(s):\n    s = ''.join(c for c in s if c.isalnum()).lower()\n    return s == s[::-1]\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named sum_even(numbers) that returns the sum of the even numbers in a list. Reply with only a Python code block.",
+          "answer": "```python\ndef sum_even(numbers):\n    return sum(num for num in numbers if num % 2 == 0)\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named count_vowels(s) that returns how many vowels are in the string. Reply with only a Python code block.",
+          "answer": "```python\ndef count_vowels(s):\n    return sum(1 for char in s.lower() if char in 'aeiou')\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named max_of_list(numbers) that returns the largest number in a list. Reply with only a Python code block.",
+          "answer": "```python\ndef max_of_list(numbers):\n    return max(numbers)\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named celsius_to_fahrenheit(c) that converts Celsius to Fahrenheit. Reply with only a Python code block.",
+          "answer": "```python\ndef celsius_to_fahrenheit(c):\n    return (c * 9/5) + 32\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named is_prime(n) that returns True if n is prime. Reply with only a Python code block.",
+          "answer": "```python\ndef is_prime(n):\n    if n < 2:\n        return False\n    for i in range(2, int(n**0.5) + 1):\n        if n % i == 0:\n            return False\n    return True\n```",
+          "correct": true,
+          "answer_tokens": 58,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "List exactly three benefits of exercise as bullet points, each line starting with a dash.",
+          "answer": "- Improves cardiovascular health\n- Enhances mental well-being\n- Boosts energy levels",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Answer in all lowercase with no capital letters at all: What is the capital of France?",
+          "answer": "The capital of France is Paris.",
+          "correct": false,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Reply with only a valid JSON object with keys name and age describing a fictional person.",
+          "answer": "{\n  \"name\": \"John Doe\",\n  \"age\": 30\n}",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Repeat the word hello exactly five times, separated by single spaces.",
+          "answer": "Hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello,",
+          "correct": false,
+          "answer_tokens": 1536,
+          "repeated_4grams": 763
+        },
+        {
+          "domain": "if",
+          "prompt": "Write two sentences about the moon. Do not use any commas.",
+          "answer": "The moon is a celestial body that orbits around Earth. It is a natural satellite, a large rocky body that orbits the Earth.",
+          "correct": false,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Give a numbered list of exactly 4 steps for making tea.",
+          "answer": "1. Gather your tea ingredients: Tea leaves, water, and a tea infuser.\n2. Fill a kettle with fresh water and bring it to a boil.\n3. While the water is boiling, prepare your tea infuser.\n4. Once the water is boiling, pour it over the tea infuser and let it steep for 3 to 5 minutes.",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 1
+        },
+        {
+          "domain": "if",
+          "prompt": "Answer with yes or no only: Is the sun a star?",
+          "answer": "Yes",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Wrap your entire answer in double quotation marks.",
+          "answer": "\"I'm here to help you with any questions or queries you might have. What is it that you need assistance with today?\"",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "End your response with the exact phrase: THE END",
+          "answer": "I'm ready to assist you. What's your question or problem?",
+          "correct": false,
+          "answer_tokens": 37,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Write a short poem of exactly 4 lines about rain.",
+          "answer": "Rain, a gentle rain,\nSoft on the skin, a soothing sound,\nA gentle rain, a soothing sound,\nA rain that brings a smile to my face.",
+          "correct": true,
+          "answer_tokens": 37,
+          "repeated_4grams": 1
+        }
+      ]
+    },
+    "panel42/sampled": {
+      "summary": {
+        "total": 42,
+        "correct": 34,
+        "by_domain": {
+          "code": {
+            "correct": 8,
+            "total": 8
+          },
+          "if": {
+            "correct": 6,
+            "total": 10
+          },
+          "instruction": {
+            "correct": 5,
+            "total": 8
+          },
+          "knowledge": {
+            "correct": 7,
+            "total": 8
+          },
+          "math": {
+            "correct": 8,
+            "total": 8
+          }
+        },
+        "seconds": 308.3,
+        "setting": "sampled"
+      },
+      "transcripts": [
+        {
+          "domain": "knowledge",
+          "prompt": "What is the capital of Australia? Answer with just the city name.",
+          "answer": "Sydney",
+          "correct": false,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "Who wrote the play Romeo and Juliet? Answer with just the name.",
+          "answer": "William Shakespeare",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the chemical symbol for gold? Answer with just the symbol.",
+          "answer": "`Au`",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the largest planet in our solar system?",
+          "answer": "The largest planet in our solar system is Jupiter.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "In what year did the Second World War end?",
+          "answer": "The Second World War ended on May 8, 1945, after the Allied powers, led by the United States, Great Britain, and the Soviet Union, defeated Germany and Japan.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the boiling point of water in Celsius at sea level?",
+          "answer": "The boiling point of water in Celsius at sea level is 100 degrees Celsius.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "Who painted the Mona Lisa?",
+          "answer": "The Mona Lisa is a painting by Leonardo da Vinci.",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "knowledge",
+          "prompt": "What is the capital of Japan? Answer with just the city name.",
+          "answer": "Tokyo",
+          "correct": true,
+          "answer_tokens": 41,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "What is 17 + 25?",
+          "answer": "17 + 25 = 42",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "A train travels 60 km in 1.5 hours. What is its average speed in km/h?",
+          "answer": "To find the average speed, we need to calculate the total distance traveled and the total time taken.\n\nTotal distance traveled = 60 km\nTotal time taken = 1.5 hours\n\nAverage speed = Total distance / Total time\nAverage speed = 60 km / 1.5 hours\nAverage speed = 40 km/h",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 2
+        },
+        {
+          "domain": "math",
+          "prompt": "A shirt costs $40 and is discounted by 25%. What is the final price in dollars?",
+          "answer": "To find the final price, we first need to calculate the discount amount. 25% of $40 is 0.25 * $40 = $10. So, the discount amount is $10. Now, we subtract the discount amount from the original price to find the final price: $40 - $10 = $30. Therefore, the final price of the shirt is $30.",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "If 3x + 7 = 22, what is x?",
+          "answer": "To solve for x, we need to isolate x on one side of the equation. We can do this by subtracting 7 from both sides of the equation. This will get rid of the constant term on the left side.\n\nSo, 3x + 7 - 7 = 22 - 7\n3x = 15\n\nNow, we need to divide both sides of the equation by 3 to find the value of x.\n\n(3x) / 3 = 15 / 3\nx = 5\n\nTherefore, the value of x is 5.",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 1
+        },
+        {
+          "domain": "math",
+          "prompt": "What is 12 multiplied by 12?",
+          "answer": "12 multiplied by 12 is 144.",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "What is half of 96?",
+          "answer": "Half of 96 is 48.",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "A rectangle is 7 cm by 5 cm. What is its area in square centimetres?",
+          "answer": "To find the area of a rectangle, you need to multiply the length by the width. So, the area is 7 cm * 5 cm = 35 square centimetres.",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "math",
+          "prompt": "What is 100 minus 37?",
+          "answer": "100 minus 37 is 63.",
+          "correct": true,
+          "answer_tokens": 129,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Respond with a single word only: what colour is the sky on a clear day?",
+          "answer": "The sky is blue.",
+          "correct": false,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "List exactly four fruits, one per line, numbered 1 to 4. Write nothing else.",
+          "answer": "1. Apple\n2. Banana\n3. Orange\n4. Grapefruit",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Name one country in Europe. Wrap your entire answer in double quotes.",
+          "answer": "\"Europe\"",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Write exactly two sentences about rain. Write nothing else.",
+          "answer": "Rain is a natural phenomenon that brings relief to the dry and barren landscapes. It can bring relief to people who are suffering from drought or heat.",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Answer with only the word yes or the word no: is the Earth round?",
+          "answer": "Yes.",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "List three colours separated by commas. Write nothing else.",
+          "answer": "1. Red\n2. Blue\n3. Green",
+          "correct": false,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Reply in all uppercase letters: say hello to the reader.",
+          "answer": "HELLO TO THE READER!",
+          "correct": true,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "instruction",
+          "prompt": "Write one short sentence that does not contain the letter e.",
+          "answer": "The sentence is: \"The cat sat on the mat.\"",
+          "correct": false,
+          "answer_tokens": 30,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named reverse_string(s) that returns the reversed string. Reply with only a Python code block.",
+          "answer": "```python\ndef reverse_string(s):\n    return s[::-1]\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named fib(n) that returns the nth Fibonacci number, where fib(1)=1 and fib(2)=1. Reply with only a Python code block.",
+          "answer": "```python\ndef fib(n):\n    if n <= 1:\n        return n\n    else:\n        return fib(n-1) + fib(n-2)\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named is_palindrome(s) that returns True if s is a palindrome ignoring case and spaces. Reply with only a Python code block.",
+          "answer": "```python\ndef is_palindrome(s):\n    s = ''.join(c for c in s if c.isalnum()).lower()\n    return s == s[::-1]\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named sum_even(numbers) that returns the sum of the even numbers in a list. Reply with only a Python code block.",
+          "answer": "```python\ndef sum_even(numbers):\n    return sum(num for num in numbers if num % 2 == 0)\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named count_vowels(s) that returns how many vowels are in the string. Reply with only a Python code block.",
+          "answer": "```python\ndef count_vowels(s):\n    return sum(1 for char in s.lower() if char in 'aeiou')\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named max_of_list(numbers) that returns the largest number in a list. Reply with only a Python code block.",
+          "answer": "```python\ndef max_of_list(numbers):\n    return max(numbers)\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named celsius_to_fahrenheit(c) that converts Celsius to Fahrenheit. Reply with only a Python code block.",
+          "answer": "```python\ndef celsius_to_fahrenheit(c):\n    return (c * 9/5) + 32\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "code",
+          "prompt": "Write a Python function named is_prime(n) that returns True if n is prime. Reply with only a Python code block.",
+          "answer": "```python\ndef is_prime(n):\n    \"\"\"Check if a number is prime.\"\"\"\n    if n < 2:\n        return False\n    for i in range(2, int(n**0.5) + 1):\n        if n % i == 0:\n            return False\n    return True\n```",
+          "correct": true,
+          "answer_tokens": 67,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "List exactly three benefits of exercise as bullet points, each line starting with a dash.",
+          "answer": "- Improves cardiovascular health\n- Enhances muscle strength and flexibility\n- Boosts mental health and reduces stress",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Answer in all lowercase with no capital letters at all: What is the capital of France?",
+          "answer": "The capital of France is Paris.",
+          "correct": false,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Reply with only a valid JSON object with keys name and age describing a fictional person.",
+          "answer": "{\n  \"name\": \"John Doe\",\n  \"age\": 30\n}",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Repeat the word hello exactly five times, separated by single spaces.",
+          "answer": "Hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello, hello,",
+          "correct": false,
+          "answer_tokens": 1536,
+          "repeated_4grams": 763
+        },
+        {
+          "domain": "if",
+          "prompt": "Write two sentences about the moon. Do not use any commas.",
+          "answer": "The moon is a celestial body that orbits around Earth. It is a natural satellite and is the fifth-largest moon in the solar system.",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Give a numbered list of exactly 4 steps for making tea.",
+          "answer": "1. Gather your tea ingredients: Tea leaves, water, and a teapot or a kettle.\n2. Fill your teapot or kettle with fresh water.\n3. Place the tea leaves in the teapot or kettle.\n4. Pour the water over the tea leaves.\n\nRemember, these steps are for a basic tea preparation. You can adjust the steps according to your personal preference and the type of tea you are making.",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Answer with yes or no only: Is the sun a star?",
+          "answer": "Yes",
+          "correct": true,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Wrap your entire answer in double quotation marks.",
+          "answer": "\"I'm here to help you with any questions or queries you may have. Please feel free to ask me anything, from grammar and style to sentence structure and clarity. I'm here to assist you in refining your writing and making it more engaging. What's on your mind?",
+          "correct": false,
+          "answer_tokens": 1536,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "End your response with the exact phrase: THE END",
+          "answer": "I'm ready to assist you. What's your question or problem?",
+          "correct": false,
+          "answer_tokens": 35,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "if",
+          "prompt": "Write a short poem of exactly 4 lines about rain.",
+          "answer": "Rain, a gentle rain,\nSoft on the skin, a soothing sound,\nA gentle rain, that brings joy,\nA soothing rain, that brings peace.",
+          "correct": true,
+          "answer_tokens": 35,
+          "repeated_4grams": 0
+        }
+      ]
+    },
+    "chat/greedy": {
+      "summary": {
+        "total": 12,
+        "correct": 11,
+        "by_domain": {
+          "chat": {
+            "correct": 11,
+            "total": 12
+          }
+        },
+        "seconds": 23.3,
+        "setting": "greedy"
+      },
+      "transcripts": [
+        {
+          "domain": "chat",
+          "prompt": "What is 15 percent of 240?",
+          "answer": "To find 15% of 240, you can multiply 240 by 0.15. \n\n240 * 0.15 = 36\n\nSo, 15% of 240 is 36.",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "If I have 3 apples and buy 2 more, then give away 1, how many apples do I have?",
+          "answer": "If you have 3 apples and buy 2 more, then give away 1, you will have 3 - 2 = 1 apple left.",
+          "correct": false,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Write a Python function named is_even(n) that returns True if n is even.",
+          "answer": "Here's a Python function that checks if a number is even:\n\n```python\ndef is_even(n):\n    return n % 2 == 0\n```\n\nThis function uses the modulus operator (`%`) to find the remainder of `n` divided by 2. If the remainder is 0, then `n` is even.\n\nYou can use this function like this:\n\n```python\nprint(is_even(10))  # Output: True\nprint(is_even(11))  # Output: False\n```",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "What is the difference between a list and a tuple in Python? Answer briefly.",
+          "answer": "A list is an ordered collection of items that can be of any data type, including strings, integers, floats, and other lists. Tuples are ordered, immutable collections of items that cannot be changed once created.",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "List the planets of the solar system in order from the sun.",
+          "answer": "1. Mercury\n2. Venus\n3. Earth\n4. Mars\n5. Jupiter\n6. Saturn\n7. Uranus\n8. Neptune",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Translate to French: Good morning, my friend.",
+          "answer": "Bonjour, mademoiselle.",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Who was Albert Einstein? Answer in one sentence.",
+          "answer": "Albert Einstein was a German-born theoretical physicist who made significant contributions to the field of physics, particularly in the areas of relativity and quantum mechanics.",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "What does HTTP stand for?",
+          "answer": "HTTP stands for Hypertext Transfer Protocol. It's the standard set of rules and protocols used for transferring data over the internet.",
+          "correct": true,
+          "answer_tokens": 121,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Write a haiku about mountains.",
+          "answer": "Mountain's peak, a mountain's peak,\nA mountain's peak, a mountain's peak,\nIn the mountains, a mountain's peak.\n\nMountain's peak, a mountain's peak,\nA mountain's peak, a mountain's peak,\nIn the mountains, a mountain's peak.",
+          "correct": true,
+          "answer_tokens": 101,
+          "repeated_4grams": 15
+        },
+        {
+          "domain": "chat",
+          "prompt": "Give me three tips for better sleep, as a numbered list.",
+          "answer": "1. Maintain a consistent sleep schedule: Go to bed and wake up at the same time every day, even on weekends.\n\n2. Create a relaxing bedtime routine: Engage in relaxing activities like reading, meditation, or taking a warm bath before bed.\n\n3. Limit exposure to screens before bed: Avoid screens for at least an hour before bedtime. The blue light emitted by phones, tablets, computers, and TVs can interfere with your body's production of melatonin, a hormone that regulates sleep.",
+          "correct": true,
+          "answer_tokens": 101,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Explain in two sentences why the sky is blue.",
+          "answer": "The sky is blue because of a phenomenon known as Rayleigh scattering, which occurs when sunlight enters Earth's atmosphere and encounters tiny molecules of gases such as nitrogen and oxygen. These molecules scatter the shorter wavelengths of light, such as blue and violet, in all directions, while the longer wavelengths, like red and orange, are scattered in a more random manner. This scattering effect is responsible for the blue color of the sky, as it allows more blue light to reach our eyes than other wavelengths.",
+          "correct": true,
+          "answer_tokens": 101,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "What is the largest ocean on Earth?",
+          "answer": "The largest ocean on Earth is the Pacific Ocean. It covers approximately 46% of the Earth's surface and is the largest of the Earth's five oceans.",
+          "correct": true,
+          "answer_tokens": 101,
+          "repeated_4grams": 0
+        }
+      ]
+    },
+    "chat/sampled": {
+      "summary": {
+        "total": 12,
+        "correct": 11,
+        "by_domain": {
+          "chat": {
+            "correct": 11,
+            "total": 12
+          }
+        },
+        "seconds": 28.7,
+        "setting": "sampled"
+      },
+      "transcripts": [
+        {
+          "domain": "chat",
+          "prompt": "What is 15 percent of 240?",
+          "answer": "To find 15 percent of 240, we need to multiply 240 by 0.15. \n\n240 * 0.15 = 36\n\nSo, 15 percent of 240 is 36.",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "If I have 3 apples and buy 2 more, then give away 1, how many apples do I have?",
+          "answer": "If you have 3 apples and buy 2 more, then give away 1, you will have 3 - 2 = 1 apple left.",
+          "correct": false,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Write a Python function named is_even(n) that returns True if n is even.",
+          "answer": "Here's a Python function that checks if a number is even:\n\n```python\ndef is_even(n):\n    return n % 2 == 0\n```\n\nThis function uses the modulus operator (`%`) to find the remainder of `n` divided by 2. If the remainder is 0, then `n` is even. Otherwise, it's odd.\n\nYou can use this function like this:\n\n```python\nprint(is_even(10))  # Output: True\nprint(is_even(11))  # Output: False\n```",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "What is the difference between a list and a tuple in Python? Answer briefly.",
+          "answer": "A list is an ordered collection of items that can be of any data type, including strings, integers, floats, and other lists. Tuples are ordered, immutable collections of items that cannot be changed after creation.",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "List the planets of the solar system in order from the sun.",
+          "answer": "1. Mercury\n2. Venus\n3. Earth\n4. Mars\n5. Jupiter\n6. Saturn\n7. Uranus\n8. Neptune",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Translate to French: Good morning, my friend.",
+          "answer": "Bonjour, mademoiselle.",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Who was Albert Einstein? Answer in one sentence.",
+          "answer": "Albert Einstein was a German-born theoretical physicist who made significant contributions to the field of physics, particularly in the areas of relativity and quantum mechanics.",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "What does HTTP stand for?",
+          "answer": "HTTP stands for Hypertext Transfer Protocol. It is the standard protocol used for transferring data over the internet.",
+          "correct": true,
+          "answer_tokens": 127,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Write a haiku about mountains.",
+          "answer": "Mountains stand tall,\nReflections of the sky,\nEchoes of the past.\n\nMountains, majestic,\nGlowing with the sun,\nA symbol of strength.\n\nMountains, ancient,\nEchoes of the earth,\nA reminder of the past.\n\nMountains, majestic,\nReflections of the sky,\nEchoes of the past.",
+          "correct": true,
+          "answer_tokens": 98,
+          "repeated_4grams": 7
+        },
+        {
+          "domain": "chat",
+          "prompt": "Give me three tips for better sleep, as a numbered list.",
+          "answer": "1. Maintain a consistent sleep schedule: Go to bed and wake up at the same time every day, even on weekends.\n\n2. Create a relaxing bedtime routine: Engage in calming activities such as reading, meditation, or taking a warm bath before bed.\n\n3. Limit exposure to screens before bed: Avoid screens for at least an hour before bedtime. The blue light emitted by devices can interfere with your body's production of melatonin, a hormone that regulates sleep.",
+          "correct": true,
+          "answer_tokens": 98,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "Explain in two sentences why the sky is blue.",
+          "answer": "The sky is blue because of a phenomenon called Rayleigh scattering, which occurs when sunlight enters Earth's atmosphere and encounters tiny molecules of gases such as nitrogen and oxygen. These molecules scatter the shorter wavelengths of light, such as blue and violet, in all directions, while the longer wavelengths, like red and orange, are scattered in a more random manner. This scattering effect is responsible for the blue color of the sky, as it allows more blue light to reach our eyes than other wavelengths.",
+          "correct": true,
+          "answer_tokens": 98,
+          "repeated_4grams": 0
+        },
+        {
+          "domain": "chat",
+          "prompt": "What is the largest ocean on Earth?",
+          "answer": "The largest ocean on Earth is the Pacific Ocean. It covers approximately 46% of the Earth's surface and is the largest of the Earth's five oceans.",
+          "correct": true,
+          "answer_tokens": 98,
+          "repeated_4grams": 0
+        }
+      ]
+    }
+  }
+}

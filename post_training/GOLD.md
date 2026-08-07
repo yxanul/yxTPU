@@ -262,7 +262,24 @@ tokens. Instruction-format is the shared floor: Gemma 2/8, ours 3/8 —
 no-letter-e at ~300M. IFEval under our harness: Gemma measures 31.4
 mean (its published 51.2 does not survive harness transfer) vs our
 41.3 (GOLD-over-SFT) and 51.0 (mix300k) — both checkpoints beat it
-under identical conditions. Attribution: the entire deficit is termination
+under identical conditions.
+
+The SmolLM pair extends the calibration (same battery, measured):
+SmolLM-360M-Instruct (600B tokens, 2024 recipe) panel 19/42, IFEval
+16.1; SmolLM2-360M-Instruct (4T tokens, mature recipe) **panel 34/42**,
+IFEval 40.1 (matching its published 41.0), instruction section 5/8 —
+so strict-format following is hard at this size but not a ceiling. The
+v1→v2 jump at fixed parameter count (panel +15, IFEval +24) is the
+whole verdict in one model family: data + post-training recipe, not
+size. SmolLM2 is the strongest same-size external — best freeform of
+the three, a hair under GOLD-over-SFT on IFEval, 11 under mix300k —
+and its freeform still loops once (Parmesan ×20), so even mature
+pipelines only suppress the spiral at ~360M. It is also the only
+external reaching capability parity: measured loglik ours 3/4 (arc-c
+37.5 vs 34.0, piqa 73.4 vs 71.3, winogrande 58.0 vs 57.6) with its 4T
+tokens buying a real hellaswag win (56.8 vs 53.5). The target to beat
+after on-policy is SmolLM2's 34/42, keeping our loglik and IFEval
+edges. Attribution: the entire deficit is termination
 discipline and answer ritual — post-training properties — and the
 right-answer-then-drift signature is textbook exposure bias, the
 failure class on-policy distillation exists to fix.
