@@ -1,0 +1,138 @@
+\section{Post-training: SFT and offline logit distillation}
+\label{sec:posttraining}
+
+Post-training proceeded in two stages: supervised fine-tuning to install
+the chat format, then offline logit distillation from a frozen
+Qwen3.5-4B teacher to install the teacher's token-level distribution.
+Every stage decision below was fixed by a measured A/B rather than
+convention; the ledger records nulls as prominently as wins.
+
+\subsection{Data}
+
+SFT used the Mephisto instruction corpora together with a large public
+SFT mix (6.27M rows total, minimum packing length 4096). Two of the
+Mephisto sets --- \texttt{Mephisto-IF\_172k} (instruction following) and
+\texttt{Mephisto-Knowledge\_538k} (knowledge), published under the
+\texttt{Yxanul} organization --- were generated on a TPU \emph{v6e}
+slice with this project's own batched decoding stack;
+\texttt{Mephisto-MathCode\_2M} completes the mix with third-party
+math/code completions. The distillation stage draws prompts from the
+same pools but replaces the completions' one-hot supervision with
+teacher distributions.
+
+\subsection{The distillation objective}
+
+\paragraph{Teacher projection.} The subset map \eqref{eq:subset-map}
+makes the teacher's distribution directly comparable to the student's.
+Given teacher logits $z^{T} \in \R^{|V_t|}$ at a position (truncated to
+the 248{,}077 real rows of the padded 248{,}320-wide head --- padded
+embedding rows emit real logits and must be excluded), the projected
+teacher log-probabilities on the student support and the residual mass
+are
+\begin{equation}
+\ell_i = z^{T}_{m(i)} - \log\!\!\sum_{v \in V_t}\!\! e^{z^{T}_v}
+\quad (i \in V_s),
+\qquad
+\rho = 1 - \sum_{i \in V_s} e^{\ell_i},
+\label{eq:projection}
+\end{equation}
+computed with a blockwise log-sum-exp (block 32{,}768, per-block fp32
+cast). The residual $\rho$ --- the teacher's mass outside the student's
+image, $\sim$1.25\% on the training mixture per
+\S\ref{sec:tokenizer} --- is \emph{reported and renormalized away},
+never trained against. Because $m$ is injective and length-preserving,
+teacher position $i$ supervises student position $i$ with no alignment
+pass; the property was verified empirically by checking that shifting
+the teacher by one position strictly worsens agreement.
+
+\paragraph{Divergence.} With renormalized teacher
+$p_i = e^{\ell_i}/(1-\rho)$ and student $q = \mathrm{softmax}(z^{S})$,
+the general objective is a $\beta$-weighted Jensen--Shannon divergence,
+\begin{equation}
+D_\beta(p \,\|\, q) \;=\; \beta \KL{p}{m_\beta} + (1-\beta)\KL{q}{m_\beta},
+\qquad m_\beta = \beta p + (1-\beta) q,
+\label{eq:jsd}
+\end{equation}
+with the convention that $\beta$ weights the \emph{teacher}, so
+$\beta \to 0$ recovers forward KL $\KL{p}{q}$ (mass-covering) and
+$\beta \to 1$ reverse KL (mode-seeking); the small-$\beta$ limit
+$D_\beta \approx \beta \KL{p}{q}$ is pinned by a unit test, guarding the
+orientation. The campaign ran $\beta = 0$ throughout.
+
+\paragraph{Top-$K$ compression and the coverage term.} Storing full
+49k-wide teacher distributions is wasteful; the pipeline precomputes,
+once per example, the teacher's top-$K$ ($K \in \{32, 64\}$,
+$\sim$90 bytes/position at $K{=}32$ compressed) via an approximate
+top-$K$ (recall 0.95; exact top-$k$ lowers to a full sort on TPU and is
+$87\times$ slower --- a missed boundary entry simply stays in the tail
+bucket). With kept set $\mathcal{K}$, tail $r = 1 - \sum_{i \in
+\mathcal{K}} e^{\ell_i}$, and renormalized teacher $\tilde{p}$ on
+$\mathcal{K}$, the $\beta{=}0$ loss uses the student's \emph{raw}
+probabilities at the kept ids:
+\begin{equation}
+D \;=\; \sum_{i \in \mathcal{K}} \tilde{p}_i
+\big(\log \tilde{p}_i - \log q_i\big)
+\;=\;
+\underbrace{\KL{\tilde{p}}{\tilde{q}}}_{\text{truncated forward KL}}
+\;\; \underbrace{- \log\!\!\sum_{i \in \mathcal{K}}\!\! q_i}_{\text{coverage}},
+\label{eq:topk}
+\end{equation}
+where $\tilde{q}$ is the student renormalized on $\mathcal{K}$. The
+decomposition on the right is the design: an exact truncated forward KL
+plus a penalty on student mass leaking outside the teacher's top-$K$
+--- non-negative, and zero exactly when the student matches the
+renormalized teacher on $\mathcal{K}$ and carries no outside mass. At
+$K = |V_s|$ the compression is exact and \eqref{eq:topk} reproduces the
+full-support loss (also pinned by test). The composite objective
+$\mathcal{L} = w_d D + w_{ce}\,\mathrm{CE}$ shares one masked-position
+denominator between both terms; the campaign ran pure distillation
+($w_d = 1$, $w_{ce} = 0$) with CE logged as a monitor.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/gold_curves.pdf}
+\caption{The 300k-example distillation run (top: losses; bottom:
+top-1 agreement and residual mass). The distillation loss falls 37\%
+while the CE monitor barely moves --- the student is learning the
+teacher's \emph{distribution}, not memorizing tokens. Teacher top-1
+agreement with the data's labels sits at 90\% (an upper reference),
+student agreement climbs toward 76\%, and the teacher's rest mass
+holds near 1.5\%.}
+\label{fig:gold}
+\end{figure}
+
+\subsection{Results ladder and the epoch null}
+
+\begin{table}[h]
+\centering
+\small
+\caption{The post-training lineage. IFEval is the mean of the four
+strict/loose prompt/instruction accuracies; panel is a 42-prompt scored
+transcript battery. All decoding at each checkpoint's swept settings.}
+\label{tab:lineage}
+\begin{tabular}{llcc}
+\toprule
+checkpoint & recipe & IFEval & panel /42 \\
+\midrule
+gen-2 & base + SFT 690k rows & 40.4 & 10 \\
+GOLD-10k & gen-2 + distill 10k IF & 42.1 & --- \\
+GOLD-50k & gen-2 + distill 50k IF & 48.4 & 12 \\
+GOLD-mix300k & gen-2 + distill 100k$\times$\{IF, Know, MathCode\} & \textbf{51.0} & 16 \\
+SFT-6M & base + SFT 6.27M rows & 35.3 & 15 \\
+GOLD-over-SFT & SFT-6M + distill 1/3 mix, $K{=}32$ & 41.3 & \textbf{22} \\
+\;(2-epoch control) & same store, 2 epochs & 40.3 & 22 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings organize the ladder. \emph{Distillation dominates SFT
+per row}: 300k distilled examples beat 6.27M one-hot rows by $+15.7$
+IFEval --- soft targets carry more supervision per example than hard
+labels by more than an order of magnitude at this scale. \emph{Mixed
+diets beat matched diets}: distilling knowledge and math/code rows
+alongside instruction data improved \emph{instruction following} beyond
+what pure-IF distillation achieved. \emph{One epoch per store}: a
+controlled second epoch over the same precomputed targets moved the
+training loss ($0.504 \to 0.480$) and nothing downstream (IFEval
+$41.3 \to 40.3$, panel $22 \to 22$) --- the marginal unit of compute
+belongs to fresh rows, not repetition.

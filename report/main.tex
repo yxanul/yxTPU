@@ -1,0 +1,73 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=1.05in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{siunitx}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{float}
+\usepackage{caption}
+\captionsetup{font=small, labelfont=bf}
+
+\newtheorem{proposition}{Proposition}
+\newcommand{\diag}{\operatorname{Diag}}
+\newcommand{\KL}[2]{D_{\mathrm{KL}}\!\left(#1 \,\middle\|\, #2\right)}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{\textbf{yx49k-L20: A 308M Hybrid Gated-Delta-Attention Language
+Model Trained on 367B Tokens on TPU v4}}
+\author{David-Franco Buga (Yxanul)\\
+\small\texttt{github.com/yxanul} $\cdot$ \texttt{huggingface.co/Yxanul}}
+\date{August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe the complete construction of a 307.7M-parameter hybrid
+language model trained end-to-end on TPU Research Cloud hardware: a
+gated-delta-attention (KDA) architecture with per-channel decay
+interleaved 3:1 with NoPE global attention; custom fused Pallas training
+kernels built around a chunkwise WY representation, a divide-and-conquer
+nilpotent inverse, and an overflow-bounded decay factorization that turns
+the gate's lower bound into a kernel compute parameter; a
+precision policy qualified against fp64 on real text; a matrix/scalar
+split optimizer with orthogonalized updates and a logit-growth guard; and
+a 49{,}152-token tokenizer constructed as an exact subset projection of a
+4B-parameter teacher's vocabulary, which later makes logit distillation
+alignment-free by construction. The model was pretrained on 367B tokens
+of ClimbMix on a 32-chip TPU v4-64 at a median 1.09M tokens/s, surviving
+a mid-anneal crash with a verified clean resume. At 0-shot it reaches
+HellaSwag 56.9, PIQA 75.2, ARC-e 67.5, and WinoGrande 59.4 --- ahead of a
+same-size reference model trained on 11$\times$ more tokens on every
+comparable benchmark. A post-training stage of supervised fine-tuning
+plus offline top-$K$ logit distillation lifts instruction following to
+IFEval 51.0, above both major same-size instruction-tuned references when
+all models are measured under an identical harness. We close with a
+measured attribution of what remains: capability favors our base;
+decode-time discipline favors the references' deeper post-training; and
+the failure signature identifies on-policy distillation as the indicated
+next stage.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/01-intro}
+\input{sections/02-architecture}
+\input{sections/03-kernels}
+\input{sections/04-numerics}
+\input{sections/05-optimizer}
+\input{sections/06-tokenizer}
+\input{sections/07-pretraining}
+\input{sections/08-evaluation}
+\input{sections/09-posttraining}
+\input{sections/10-calibration}
+\input{sections/11-discussion}
+
+\appendix
+\input{sections/appendix}
+
+\end{document}

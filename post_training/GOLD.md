@@ -249,7 +249,7 @@ through both models, checkers identical, Gemma at its better decode per
 panel (`results/gemma-vs-gold/COMPARISON.md` has the full transcripts).
 Result: **capability ours, behavior Gemma's, strict-format neither's.**
 Measured loglikelihood is a 4/4 sweep for GOLD-over-SFT (hellaswag
-+15.8, arc-c +9.3, piqa +7.2, winogrande +5.7) despite Gemma's ~120×
++15.8, arc-c +9.3, piqa +7.2, winogrande +5.7) despite Gemma's ~16×
 pretraining-token advantage — the base is not the problem. Transcripts
 invert it: panel 31/42 Gemma vs 22/42 ours, driven entirely by math
 (8/8 vs 4/8, their drilled `Final Answer` ritual vs our
@@ -291,7 +291,7 @@ large-scale SFT, with zero numerics incidents across every run. The
 epoch null plus the compositionality result fix the campaign shape:
 one epoch, mixed domains, fresh rows over repeats. The Gemma
 head-to-head adds the external calibration: the base wins on capability
-at 120× less data, so pretraining, size, and the pretraining diet stay
+at ~11-16× less data, so pretraining, size, and the pretraining diet stay
 fixed; every next unit of compute belongs to post-training. Recommended
 next rungs, in expected-value order: (1) an IF-weighted distillation
 pass on the GOLD-over-SFT checkpoint (its one trailing metric is a mix

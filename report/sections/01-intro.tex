@@ -1,0 +1,70 @@
+\section{Introduction}
+
+This report documents a complete small-language-model program carried out
+on TPU Research Cloud hardware between 2026-07-20 and 2026-08-08: kernel
+development on a single-host TPU v6e-8, a 367B-token pretraining campaign
+on a 32-chip TPU v4-64, and a post-training stage (supervised fine-tuning
+plus offline logit distillation) evaluated against the strongest publicly
+available models of the same size class, all measured under one harness.
+
+The program's through-line is that every layer of the stack was
+co-designed with the ones above and below it. The architecture's gate
+bound is also the kernel's floating-point overflow budget
+(\S\ref{sec:kernels}). The tokenizer is not merely small; it is an exact
+subset projection of a 4B teacher's vocabulary, which later deletes an
+entire class of distillation alignment machinery
+(\S\ref{sec:tokenizer}, \S\ref{sec:posttraining}). The optimizer's
+logit-growth guard is priced at zero because its trigger never fired in
+700{,}000 steps --- a fact we can state only because the training loop
+recorded per-head maximum logits the whole way (\S\ref{sec:optimizer}).
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A hybrid gated-delta-attention (KDA) model,
+  \texttt{kda\_hybrid\_yx49k\_l20}: 307{,}698{,}680 parameters, 20 layers
+  as five \([\mathrm{KDA},\mathrm{KDA},\mathrm{KDA},\mathrm{GQA}]\)
+  cycles, trained at sequence length 2048 (\S\ref{sec:architecture}).
+  \item Fused TPU training kernels for KDA built on a chunkwise WY form:
+  a divide-and-conquer explicit inverse that is exact by nilpotency, a
+  decay-anchored dot-product factorization with a provable fp32 overflow
+  bound, and a split-backward variant for the older v4 ISA
+  (\S\ref{sec:kernels}), with a numerics policy qualified against fp64 on
+  real text (\S\ref{sec:numerics}).
+  \item A matrix/scalar split optimizer --- orthogonalized momentum for
+  matrices, AdamW for the rest --- with a grouped-query adaptation of
+  attention-logit clipping (\S\ref{sec:optimizer}).
+  \item The yx49k tokenizer: 49{,}152 tokens, each mapping to a distinct
+  token of the teacher vocabulary, at practical parity with a
+  2.6$\times$ larger reference tokenizer on bytes-per-token
+  (\S\ref{sec:tokenizer}).
+  \item The campaign itself: 700k steps at 524{,}288 tokens per step on
+  32 chips, median 1.09M tokens/s, a mid-anneal crash with a
+  measurably clean resume, and a terminal anneal worth $-0.195$ nats of
+  holdout loss (\S\ref{sec:pretraining}, \S\ref{sec:evaluation}).
+  \item A post-training arc --- SFT at 6.27M rows, then offline top-$K$
+  logit distillation from a frozen 4B teacher --- with every design
+  decision A/B-measured, including a clean null result on repeated
+  epochs (\S\ref{sec:posttraining}), and an external calibration against
+  Gemma~3 270M IT and SmolLM 360M v1/v2 under identical measurement
+  (\S\ref{sec:calibration}).
+\end{enumerate}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Summary card.}
+\label{tab:summary}
+\begin{tabular}{ll}
+\toprule
+Parameters & 307{,}698{,}680 (tied embeddings) \\
+Layers & 20 = 5 $\times$ [KDA, KDA, KDA, GQA], $d_{\mathrm{model}}=1024$ \\
+Tokenizer & yx49k (49{,}152 BPE, exact teacher subset) \\
+Pretraining data & ClimbMix, 367B step-tokens ($\sim$341B unique) \\
+Hardware & TPU v4-64: 32 chips / 8 hosts, pure data parallel \\
+Throughput & median 1.09M tokens/s (480 ms / 524{,}288-token step) \\
+Final loss & train 2.3617, holdout 2.3494 (ppl 10.48) \\
+0-shot & HellaSwag 56.9, PIQA 75.2, ARC-e 67.5, WinoGrande 59.4 \\
+Post-training & IFEval mean 51.0 (GOLD mix300k checkpoint) \\
+\bottomrule
+\end{tabular}
+\end{table}

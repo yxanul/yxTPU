@@ -1,0 +1,42 @@
+\section{Discussion and future work}
+\label{sec:discussion}
+
+\paragraph{What the evidence supports.} At the 300M scale, this program
+found (i) architecture and data quality dominate raw token count --- a
+0.37T-token hybrid beats a same-size 4T-token reference on most
+capability measures; (ii) the terminal anneal is the highest-leverage
+10\% of a fixed pretraining budget; (iii) soft-target distillation
+carries over an order of magnitude more supervision per example than
+one-hot SFT; and (iv) the remaining gap to the best same-size
+instruction models is decode-time discipline --- a post-training
+property, purchasable at this size, as the SmolLM v1$\to$v2 delta
+demonstrates.
+
+\paragraph{Limitations.} The base model's knowledge-bound axis (MMLU,
+TriviaQA) reflects its token budget and remains below the 4T-token
+reference. Strict-format instruction following is hard for every model
+measured at this size; the best reference reaches 5/8 on that panel
+section where we reach 3/8. The repetition spiral survives offline
+distillation; whether it survives on-policy training is the next
+experiment's question, and the honest possibility remains that some of
+it is a capacity effect. All pretraining ran at sequence length 2048;
+the architecture's long-context economics
+(Fig.~\ref{fig:seqsweep}) are demonstrated for throughput but not yet
+exercised by training.
+
+\paragraph{Next.} In order of expected value: an on-policy distillation
+stage (student-sampled rollouts scored by the teacher --- directly
+targeted at the observed failure class); the full offline campaign over
+the remaining prompt pools at $K{=}32$ with termination-weighted data;
+and a width/depth scale-up for which the measured groundwork (an 884M
+configuration's loss-head and sharding sweeps) already exists in the
+repository. The comparison battery of \S\ref{sec:calibration} is fully
+scripted and will be re-run unchanged after each stage; the bar it sets
+is precise --- match SmolLM2-360M-Instruct's 34/42 transcript discipline
+while keeping the capability and IFEval leads --- and clearing it would
+make this the strongest model of its size class outright.
+
+\paragraph{Acknowledgments.} Compute was provided by the TPU Research
+Cloud. The pretraining corpus is ClimbMix; evaluation uses the
+EleutherAI lm-evaluation-harness; the distillation teacher and the
+tokenizer's parent vocabulary are Qwen3.5.

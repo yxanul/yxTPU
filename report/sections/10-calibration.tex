@@ -1,0 +1,62 @@
+\section{External calibration}
+\label{sec:calibration}
+
+Published numbers do not transfer across evaluation harnesses, so the
+final calibration measured every model under this project's own
+conventions: identical prompts, identical scoring code, IFEval with the
+same chat-template and generation settings, and each model decoded at
+its documented or swept-best settings. The references are the three
+strongest openly available instruction-tuned models near 300M:
+Gemma~3 270M IT, SmolLM2-360M-Instruct, and SmolLM-360M-Instruct.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Everything measured, one harness. Panel: 42 scored prompts
+(knowledge/math/code/instruction-format). Chat: 12 freeform prompts with
+lenient checkers. Loglik: measured 0-shot (hellaswag / arc-c / piqa /
+winogrande). IFEval: mean of the four accuracies.}
+\label{tab:calibration}
+\begin{tabular}{lcccc}
+\toprule
+ & SmolLM-IT & Gemma3 IT & \textbf{ours} & SmolLM2-IT \\
+ & 360M / 0.6T & 270M / 6T & 308M / 0.37T & 360M / 4T \\
+\midrule
+panel /42 & 19 & 31 & 22 & \textbf{34} \\
+chat /12 & 10 & 8 & 9 & \textbf{11} \\
+IFEval (GOLD-over-SFT / mix300k) & 16.1 & 31.4 & 41.3 / \textbf{51.0} & 40.1 \\
+loglik: hellaswag & 52.7 & 37.7$^{\dagger}$ & 53.5 & \textbf{56.8} \\
+loglik: arc-challenge & 33.0 & 28.2$^{\dagger}$ & \textbf{37.5} & 34.0 \\
+loglik: piqa & 70.6 & 66.2$^{\dagger}$ & \textbf{73.4} & 71.3 \\
+loglik: winogrande & 53.6 & 52.3$^{\dagger}$ & \textbf{58.0} & 57.6 \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize $^{\dagger}$Gemma's published IT numbers
+(0-shot, matching tasks); its measured IFEval of 31.4 sits far below its}\\
+\multicolumn{5}{l}{\footnotesize published 51.2 --- the concrete case for
+measuring everything under one harness.}
+\end{tabular}
+\end{table}
+
+The matrix separates two axes cleanly. On \emph{capability} (the
+loglikelihood rows) our model leads 3/4 against every reference, from
+11--16$\times$ less pretraining data; only SmolLM2's 4T tokens buy it
+one row (HellaSwag). On \emph{behavior} (the transcript panel) the
+deeply post-trained references lead: SmolLM2's mature SFT+preference
+pipeline yields drilled math/code answer rituals (8/8 and 8/8 on those
+panel sections vs.\ our 4/8, 4/8) and disciplined termination, while our
+transcripts' signature failure is producing the \emph{correct} answer
+and then destroying it in continued generation --- computing 144 and
+talking itself to 1440, repeating a birthday greeting thirty-six times.
+Notably, our IFEval still leads all references (mix300k's 51.0 is
+$+10.9$ over the best measured reference), and the same-family
+SmolLM v1$\to$v2 jump (panel $19 \to 34$, IFEval $16.1 \to 40.1$ at
+identical parameter count) is an existence proof that everything
+separating the columns is data and post-training recipe --- not
+architecture, and not size.
+
+The failure signature also names the cure. Right-answer-then-drift is
+textbook exposure bias: teacher-forced training (SFT and offline
+distillation alike) never shows the model its own repetition spirals, so
+nothing ever penalizes them. On-policy distillation --- sampling from
+the student and letting the teacher score the student's own
+continuations --- attacks exactly this, and is the designated next stage.

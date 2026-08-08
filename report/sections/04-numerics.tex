@@ -1,0 +1,53 @@
+\section{Numerics and the precision policy}
+\label{sec:numerics}
+
+TPU matrix units evaluate an ``fp32'' matmul as one, three, or six
+decomposed bf16 passes. The kernel's policy, called
+\texttt{guarded\_fp32}, spends the passes exactly where the algebra is
+fragile and nowhere else:
+
+\begin{table}[h]
+\centering
+\small
+\caption{Per-stage precision inside the fused kernels.}
+\label{tab:precision}
+\begin{tabular}{lll}
+\toprule
+stage & storage & matmul passes \\
+\midrule
+$q, k, v$ streams & bf16 & 1 \\
+fast-weight state $S$, cumulative decay $G$ & fp32 & 1 \\
+pairwise dots \eqref{eq:pairwise}, chunk scan & fp32 accum & 1 \\
+WY inverse formation \eqref{eq:dc-inverse} & fp32 & 6 (v6e) / 3 emulated (v4) \\
+inverse application, solve adjoints & fp32 & 6 (v6e) / 3 emulated (v4) \\
+logits, softmax, loss & fp32 & --- \\
+master weights, optimizer state & fp32 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two measurements fix the policy's shape. First, running \emph{every}
+stage at one pass is $4.9\times$ faster in the isolated core and
+destroys the model: the loss reaches NaN by the second optimizer step.
+Guarding only the solve recovers a stable loss curve at 561k tok/s ---
+91\% of the full fused speedup. Second, the rejected repeated-squaring
+solve (\S\ref{sec:inverse}) is a cautionary tale about validating on
+real data: on random keys its intermediate powers stay tame, but
+correlated real-text keys drive $\lVert T^{2^j} \rVert$ toward
+$10^{12}$, and although the \emph{forward} answer survives, the backward
+pass loses to catastrophic cancellation --- gradient norm 3{,}933.7
+against a reference of 2.407. The divide-and-conquer inverse at three
+emulated passes closes to a gradient norm of 2.406743 vs.\ the fp32
+reference 2.406825 (relative $\ell_2$ error 1.86\% at cosine 0.99983),
+and a per-layer sweep of solve condition numbers on checkpoint
+activations ($\kappa_2 \le 10.4$, solve error $\le 2.3\times10^{-5}$
+against fp64) qualified the 3-pass setting for the campaign.
+
+The v4 3-pass mode is emulated in-kernel: each fp32 operand splits into
+a bf16 high part and a bf16 residual, the three significant cross
+products accumulate in fp32, and the dropped low$\times$low term is
+bounded near $2^{-16}$ relative --- with a one-line rollback to six
+passes kept in the source. Stability is a necessary but not sufficient
+claim: the policy's residual 1.86\% gradient error is \emph{monitored},
+not assumed away, and the campaign's loss/gradient telemetry
+(\S\ref{sec:pretraining}) is the ongoing evidence that it never mattered.

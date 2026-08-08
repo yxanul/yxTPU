@@ -1,0 +1,116 @@
+\section{Model architecture}
+\label{sec:architecture}
+
+\subsection{Gated delta attention with per-channel decay}
+
+The sequence mixer used in three of every four layers is a linear
+attention layer whose state update follows the \emph{delta rule}: rather
+than accumulating outer products indiscriminately, each write first
+subtracts what the state already predicts for the incoming key. With a
+scalar forgetting factor this is
+\begin{equation}
+S_t \;=\; \alpha_t \left(I - \beta_t k_t k_t^{\top}\right) S_{t-1}
+\;+\; \beta_t k_t v_t^{\top},
+\qquad o_t = S_t^{\top} q_t ,
+\label{eq:scalar-delta}
+\end{equation}
+where $S_t \in \R^{d_k \times d_v}$ is a per-head fast-weight matrix,
+$\beta_t \in (0,1)$ a learned write strength, and $\alpha_t \in (0,1]$ a
+learned decay. KDA generalizes the decay from a scalar to a
+\emph{per-channel} vector $\alpha_t \in (0,1]^{d_k}$:
+\begin{equation}
+\boxed{\;
+S_t \;=\; \left(I - \beta_t k_t k_t^{\top}\right) \diag(\alpha_t)\,
+S_{t-1} \;+\; \beta_t k_t v_t^{\top},
+\qquad o_t = S_t^{\top} q_t .
+\;}
+\label{eq:kda}
+\end{equation}
+Each key channel now has its own forgetting timescale, so one head can
+simultaneously hold long-lived and rapidly-refreshed features. This is
+the modeling win that motivates the entire kernel effort of
+\S\ref{sec:kernels}: per-channel decay breaks the algebraic shortcuts
+available to scalar-decay linear attention, and the training-time
+chunkwise form must track a full decay \emph{profile} per position.
+
+\subsection{The bounded gate}
+
+The decay is produced in log space by a low-rank head with a hard lower
+bound. With $A = \exp(A_{\log}) \in \R^{H}$ a per-head positive rate and
+$f(x) = W^{\uparrow}(W^{\downarrow} x) + b_{dt}$ a rank-128 projection of
+the token's hidden state,
+\begin{equation}
+\log \alpha_t \;=\; g_t \;=\; \ell \,\cdot\, \sigma\!\big(A \odot f(x_t)\big),
+\qquad \ell = -5,
+\label{eq:safe-gate}
+\end{equation}
+so that $g_t \in (-5, 0)$ always. An unbounded softplus form
+$g_t = -A\,\mathrm{softplus}(f(x_t))$ is implemented as an alternative,
+but the bounded form is required by the production kernel: the bound
+$|g| < 5$ is exactly what makes the kernel's decay-factorized dot
+products representable in fp32 (\S\ref{sec:pairwise}). The write
+strength is a per-head scalar $\beta_t = \sigma(w_\beta^{\top} x_t)$.
+
+\subsection{The full layer}
+
+Around the recurrence, the layer applies a fused QKV projection, a
+short causal depthwise convolution (width $w{=}4$, one filter per
+channel) with a SiLU activation,
+\begin{equation}
+\tilde{x}_t = \mathrm{silu}\!\Big(\textstyle\sum_{j=0}^{w-1}
+W^{\mathrm{conv}}_j \odot x_{t-(w-1)+j}\Big),
+\qquad (q_t, k_t, v_t) = \mathrm{split}(\tilde{x}_t),
+\end{equation}
+then $\ell_2$-normalizes $q$ and $k$ per head
+($\hat{u} = u / \max(\lVert u \rVert_2, \varepsilon)$, with
+$q \leftarrow \hat{q}/\sqrt{d_k}$), runs \eqref{eq:kda}, and finishes
+with a per-head RMSNorm modulated by a learned low-rank output gate:
+\begin{equation}
+y_t = W_o\left(\mathrm{RMSNorm}(o_t) \odot
+\sigma\!\big(W_g^{\uparrow} (W_g^{\downarrow} x_t) + b_g\big)\right).
+\end{equation}
+Heads are $H = 8$ with $d_k = d_v = 128$.
+
+\subsection{The hybrid stack}
+
+Layers are arranged in cycles of four --- three KDA layers followed by
+one full-attention layer --- repeated five times for the 20-layer model.
+The global layer is grouped-query attention (8 query heads, 2 KV heads,
+$d_h = 128$) with \emph{no positional encoding} (NoPE): position
+information reaches it only through the recurrent layers below and the
+causal convolutions, which measurably suffices at this scale and keeps
+the decode-time KV cache free of any position-dependent transform. The
+channel mixer everywhere is a fused SwiGLU MLP,
+$\mathrm{MLP}(x) = W_o\big(\mathrm{silu}(W_1 x) \odot W_2 x\big)$ with
+inner width 2816; normalization is pre-norm RMSNorm
+($\varepsilon = 10^{-5}$, no centering, no bias); the output head is
+tied to the input embedding. Cycles are scanned with parameters stacked
+along a scan axis, and rematerialization operates per cycle.
+
+\begin{table}[h]
+\centering
+\small
+\caption{\texttt{kda\_hybrid\_yx49k\_l20} hyperparameters.}
+\label{tab:hparams}
+\begin{tabular}{llll}
+\toprule
+vocabulary & 49{,}152 & layers & 20 (5 cycles) \\
+$d_{\mathrm{model}}$ & 1024 & cycle & [KDA, KDA, KDA, GQA] \\
+MLP inner & 2816 (SwiGLU) & norm & RMSNorm, $\varepsilon{=}10^{-5}$ \\
+KDA heads & 8 $\times$ ($d_k{=}d_v{=}128$) & conv width & 4 \\
+gate & rank 128, $\ell = -5$ & $q,k$ & $\ell_2$-normalized \\
+GQA heads & 8 query / 2 KV, $d_h{=}128$ & positions & NoPE \\
+embeddings & tied & sequence & 2048 \\
+precision & bf16 compute, fp32 master & params & 307{,}698{,}680 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Parameter accounting: the tied embedding contributes
+$49{,}152 \times 1024 = 50.3$M; each cycle carries three KDA mixers,
+one GQA mixer, four SwiGLU blocks, and their norms; five cycles plus the
+final norm bring the total to 307{,}698{,}680. Relative to same-size
+references, the small vocabulary shifts roughly 25M parameters from the
+embedding table into the transformer body --- a deliberate exchange of
+rare-token coverage for depth-adjusted compute, made survivable by the
+tokenizer's byte-level fallback (\S\ref{sec:tokenizer}).

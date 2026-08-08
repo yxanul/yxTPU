@@ -1,0 +1,73 @@
+\section{Kernel experiment ledger (digest)}
+\label{app:ledger}
+
+The kernel program ran as 42 numbered experiments over nine days on a
+TPU v6e-8, then a v4-64. The decision path, compressed:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lp{11cm}}
+\toprule
+EXP-001..008 & Baselines: 272M dense transformer, INT8 rejected,
+modern GQA recipe, orthogonalized-momentum optimizer adopted. \\
+EXP-009..015 & KDA implemented (reference recurrence, chunkwise form);
+3:1 hybrid matched for throughput; external kernel codebases audited
+--- only the state-scan skeleton proved reusable. \\
+EXP-016..023 & The backward problem: blocked Pallas solve, analytical
+XLA VJP (31.9 ms), then the fused Pallas pair (18.3 ms core); grid
+collapse and selective bf16 (\S\ref{sec:numerics}) reach 616k tok/s
+full-model. \\
+EXP-024..028 & Batch/remat/sequence sweeps; the 16k crossover of
+Fig.~\ref{fig:seqsweep}. \\
+EXP-029..037 & Real-data gates: 10B-token smoke, precision-on-real-text
+audit (kills repeated squaring), 1B-token gradient gate, stable
+substitution fallback, divide-and-conquer inverse adopted ($+30\%$),
+conv folding, fused linear CE (v6e only). \\
+EXP-038..042 & v4-64 era: optimizer matricization decompositions,
+WY-conditioning statistics on real text, 3-pass emulated solve
+qualified, output-gate A/B (neutral), learning-rate sweep (the
+$10\times$ under-tuning finding). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Configuration dump}
+\label{app:config}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Campaign configuration (values as launched).}
+\begin{tabular}{ll@{\qquad}ll}
+\toprule
+model & \texttt{kda\_hybrid\_yx49k\_l20} & optimizer & MuonClip \\
+steps & 700{,}000 & peak LR & $2\times10^{-3}$ \\
+anneal & cosine, final 70k steps & warmup & brief linear \\
+seq len & 2048 & per-device batch & 8 \\
+tokens/step & 524{,}288 & grad clip & 1.0 (global $\ell_2$) \\
+weight decay & 0.1 (both arms) & NS steps & 5 \\
+Muon $\beta$ & 0.95 & AdamW $\beta_{1,2}$ & 0.9, 0.95 \\
+QK-clip $\tau$ & 100 & consistent-RMS & 0.2 \\
+KDA precision & \texttt{guarded\_fp32} & solve & inverse, 3-pass (v4) \\
+remat & minimal-with-context & loss & standard CE, no z-loss \\
+data & ClimbMix, streamed & shuffle buffer & 50{,}000 docs \\
+holdout & 1\%, eval every 2{,}500 & lm-eval & 10 tasks / $\sim$20k \\
+checkpoints & every $\sim$19k steps, keep 6 & mesh & 32-way data parallel \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Evaluation conventions}
+\label{app:conventions}
+
+Loglikelihood tasks use lm-eval defaults with each task's conventional
+primary metric (acc\_norm where defined). IFEval runs generatively with
+the chat template, 512 max new tokens, and each model's documented or
+swept decode settings; all four accuracies (prompt/instruction $\times$
+strict/loose) are reported and the mean is used as the scalar. The
+42-prompt transcript panel scores programmatic checkers (code is
+executed against assertions; formats are matched exactly); each model
+was measured at greedy \emph{and} its shipped sampling settings, quoting
+the better. Externally-published numbers appear only where a task was
+not re-measured, and are marked as such wherever they occur.

@@ -1,0 +1,68 @@
+\section{The yx49k tokenizer: an exact subset of the teacher}
+\label{sec:tokenizer}
+
+Most small models inherit a large general-purpose tokenizer and spend a
+third or more of their parameters on the embedding table. We built a
+49{,}152-token BPE with one additional structural requirement chosen for
+what comes after pretraining: \emph{every} student token must correspond
+to a distinct token of the Qwen3.5 vocabulary (the tokenizer of the 4B
+model later used as a distillation teacher).
+
+Formally, with student vocabulary $V_s$ ($|V_s| = 49{,}152$) and teacher
+vocabulary $V_t$ ($|V_t| = 248{,}077$), the construction fixes an
+injective map
+\begin{equation}
+m : V_s \hookrightarrow V_t
+\qquad \text{such that } \mathrm{bytes}(i) = \mathrm{bytes}(m(i))
+\;\; \forall i \in V_s,
+\label{eq:subset-map}
+\end{equation}
+i.e.\ the student vocabulary \emph{is} a 49k-token sub-vocabulary of the
+teacher's, selected by BPE training on a 545 MB multi-domain corpus
+restricted to the teacher's token inventory (with a closure pass adding
+8{,}366 tokens so every merge's constituents are present). The map has
+two consequences measured at build time:
+\begin{itemize}
+  \item \textbf{Mass coverage.} On held-out teacher-domain text, the
+  teacher assigns on average $98.75\%$ of its next-token probability
+  mass to tokens in the image $m(V_s)$ (5th percentile $95.7\%$). The
+  teacher's distribution restricted and renormalized to the student
+  vocabulary is therefore a faithful target (\S\ref{sec:posttraining}).
+  \item \textbf{Position alignment.} Any student-tokenized sequence maps
+  token-by-token to a valid teacher input $m(x_1), \ldots, m(x_n)$ of
+  the \emph{same length}, so teacher position $i$ scores exactly student
+  position $i$. Distillation needs no edit-distance or byte-offset
+  alignment machinery at all --- the failure class where student and
+  teacher segmentations drift apart is impossible by construction.
+\end{itemize}
+
+Efficiency was not sacrificed. Held-out fertility is 1.0113
+tokens/word-piece target, with 98.8\% of positions tokenized identically
+to the teacher; on 1{,}041 ClimbMix documents the tokenizer achieves
+4.637 characters per token --- within 3.2\% of a reference 128k-vocab
+tokenizer at $2.6\times$ smaller vocabulary, and at parity with GPT-2's
+50k. The 41-check build-time validation suite (round-trips, specials,
+injectivity, coverage) passed in full.
+
+\begin{table}[h]
+\centering
+\small
+\caption{yx49k at a glance.}
+\label{tab:tokenizer}
+\begin{tabular}{ll}
+\toprule
+vocabulary & 49{,}152 (divisible by 128 through 4096) \\
+construction & BPE over teacher-token inventory; injective $m: V_s \to V_t$ \\
+teacher & Qwen3.5 (248{,}077 real tokens; 248{,}320 padded logit width) \\
+teacher mass in-image & 98.75\% mean, 95.7\% p5 \\
+held-out fertility & 1.0113; identical-to-teacher positions 98.8\% \\
+compression & 4.637 chars/token on ClimbMix ($-3.2\%$ vs.\ 128k reference) \\
+specials & 33 chat/tool tokens at ids 49119--49151 \\
+embedding cost at $d{=}1024$ & 50.3M parameters \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two variants ship: the canonical tokenizer (EOS \texttt{<|im\_end|>})
+and a pretraining variant binding EOS to \texttt{<|endoftext|>}, keeping
+the chat terminator out of the base distribution until the SFT stage.

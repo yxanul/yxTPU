@@ -1,0 +1,91 @@
+\section{Optimizer: orthogonalized updates with a logit guard}
+\label{sec:optimizer}
+
+The optimizer, called \emph{MuonClip} in the codebase, routes every
+parameter by role: two-dimensional ``matrix-like'' parameters (the KDA
+projections, GQA QKV and output, both SwiGLU matrices) receive
+orthogonalized momentum updates; everything else (embeddings, the tied
+logit head, norm scales, biases, depthwise conv filters, the gate's
+per-head scalars) receives AdamW. Routing is fail-closed: a parameter
+with no declared role, or a matrix parameter without declared
+factorization axes, is a build error rather than a silent default.
+
+\subsection{The matrix update}
+
+For a matrix gradient $M$ (after global clipping and momentum
+$\beta = 0.95$ with Nesterov), the update direction is the approximate
+orthogonalization of $M$ by a Newton--Schulz iteration on the normalized
+matrix $X_0 = M / (\lVert M \rVert_F + \varepsilon)$:
+\begin{equation}
+X_{n+1} \;=\; a X_n + \big(b\, A_n + c\, A_n^2\big) X_n,
+\qquad A_n = X_n X_n^{\top},
+\qquad (a, b, c) = (3.4445,\, -4.7750,\, 2.0315),
+\label{eq:ns}
+\end{equation}
+run for five iterations. The polynomial's fixed coefficients push every
+singular value of $X$ toward 1, so the update has near-uniform spectral
+footprint --- the property that lets small models take unusually large
+stable learning rates. The applied update is scaled for consistent
+root-mean-square magnitude across shapes,
+\begin{equation}
+\Delta W \;=\; -\,\eta \cdot 0.2 \sqrt{\max(\mathrm{fan_{in}},
+\mathrm{fan_{out}})} \cdot \mathrm{NS}_5(M),
+\label{eq:consistent-rms}
+\end{equation}
+which corrects a $6$--$10\times$ effective learning-rate undershoot that
+the default width-scaling rule produces at these shapes. Scanned cycles
+treat the scan axis as a batch of independent orthogonalization
+problems; decoupled weight decay ($\lambda = 0.1$) and the learning-rate
+schedule are shared with the AdamW arm
+($\beta_1 = 0.9$, $\beta_2 = 0.95$, nesterov), and global gradient
+clipping to norm 1 runs before either arm in fp32.
+
+\subsection{QK-Clip for grouped-query attention}
+
+Orthogonalized updates are known to permit slow unbounded growth of
+attention logits over very long runs. As insurance, after each update
+the fused QKV kernel of every cycle's attention layer is rescaled
+whenever any head's maximum pre-softmax logit $s^{\max}_{c,h}$ (recorded
+on-device across the global batch) exceeds a threshold $\tau = 100$:
+\begin{equation}
+\gamma_{c,h} = \min\!\left(1,\; \frac{\tau}{s^{\max}_{c,h} + \epsilon}\right),
+\qquad
+W_q^{(h)} \mathrel{*}= \sqrt{\gamma_{c,h}},
+\qquad
+W_k^{(j)} \mathrel{*}= \sqrt{\min_{h \in \mathrm{group}(j)} \gamma_{c,h}} .
+\label{eq:qkclip}
+\end{equation}
+The grouped-query structure requires the adaptation on the right: a KV
+head shared by several query heads takes the group's most conservative
+scale, so the product of applied factors never exceeds any member
+head's $\gamma$. Values and optimizer state are untouched.
+
+The guard's cost--benefit is now measurable: across all 700{,}000
+campaign steps the recorded maximum attention logit peaked at
+\textbf{27.5} --- a factor 3.6 below the threshold. The clip never
+fired. It cost one reduction and one conditional rescale per step and
+bought the certainty that the run could not be lost to logit blow-up;
+insurance that never paid out, priced at approximately zero.
+
+\subsection{Learning-rate schedule}
+
+The campaign schedule is warmup--constant--anneal:
+\begin{equation}
+\eta(t) =
+\begin{cases}
+\eta_{\max}\, t / t_w & t < t_w \quad \text{(brief linear warmup)}\\[2pt]
+\eta_{\max} & t_w \le t < T - T_a \\[2pt]
+\eta_{\max} \cdot \tfrac{1}{2}\big(1 + \cos \pi \tfrac{t - (T - T_a)}{T_a}\big)
+& t \ge T - T_a,
+\end{cases}
+\label{eq:schedule}
+\end{equation}
+with $\eta_{\max} = 2 \times 10^{-3}$, total steps $T = 700\mathrm{k}$
+and a terminal anneal of $T_a = 70\mathrm{k}$ steps. The constant
+plateau keeps the option of extending the run open until the end; the
+entire convergence benefit of decay is then collected in the final 10\%
+of the budget (\S\ref{sec:pretraining}). The peak value itself came out
+of an earlier sweep on the predecessor campaign, which found the
+then-current setting roughly $10\times$ under-tuned --- with
+consistent-RMS scaling \eqref{eq:consistent-rms}, $2\times10^{-3}$ is
+comfortably stable for a 308M model.

@@ -22,10 +22,10 @@ quoted, the same courtesy our checkpoints got from their decode sweep.
 | --- | --- | --- |
 | parameters | 268M (~170M embedding, ~100M transformer) | 308M (~76M embedding, ~232M transformer) |
 | vocabulary | 256k | 49k (yx49k, Qwen3.5 subset) |
-| pretraining | ~6T tokens, Google data | **50B tokens**, ClimbMix |
+| pretraining | ~6T tokens, Google data | **367B step-tokens (~341B unique)**, ClimbMix |
 | post-training | Google's full IT pipeline (curated SFT + distillation + RLHF) | SFT 6.27M rows + GOLD λ=0 distill ~100k rows (⅓ mix, K=32) |
 
-The pretraining budgets differ by ~120×. Hold that number against the
+The pretraining budgets differ by ~16×. Hold that number against the
 capability tables below.
 
 ## Capability: ours, decisively
@@ -45,7 +45,7 @@ Base-vs-base tells the same story: our base@700k at 0-shot beats Gemma
 3 PT 270M's published numbers even where Gemma's were taken with
 few-shot help — hellaswag 54.5 vs 40.9 (theirs 10-shot), arc_easy 65.4
 vs 57.7, piqa 73.7 vs 67.7, arc_challenge 38.0 (0-shot) vs 29.0
-(25-shot); the one loss is boolq 60.3 vs 61.4. A 50B-token base
+(25-shot); the one loss is boolq 60.3 vs 61.4. A 367B-token base
 clearing a 6T-token base across the board means pretraining is not the
 bottleneck in this lineage.
 
@@ -190,7 +190,7 @@ Readings:
 
 - **Capability (knowledge, reasoning priors): ours ahead, large.**
   Measured on every loglikelihood benchmark, both base and IT, despite
-  120× less pretraining data. Pretraining, tokenizer, and architecture
+  ~16× less pretraining data. Pretraining, tokenizer, and architecture
   are doing their jobs.
 - **Behavior (termination, formatting, arithmetic ritual): Gemma ahead,
   large.** These are exactly the properties Google's post-training
