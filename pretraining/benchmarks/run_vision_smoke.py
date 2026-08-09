@@ -193,12 +193,21 @@ def main() -> int:
 
     train_step = _make_train_step(config)
     records = []
-    with logical_mesh_context(mesh, rules):
-        for step_index in range(arguments.steps):
-            began = time.perf_counter()
-            host_batch = next(iterator)
-            data_wait_ms = (time.perf_counter() - began) * 1000.0
-            batch = _device_batch(host_batch, mesh)
+    global_batch = process_batch * jax.process_count()
+    for step_index in range(arguments.steps):
+        began = time.perf_counter()
+        host_batch = next(iterator)
+        data_wait_ms = (time.perf_counter() - began) * 1000.0
+        # Formed OUTSIDE logical_mesh_context, exactly like the proven
+        # multi-host SFT loop: an ambient mesh context must not influence
+        # the host-local -> global conversion.
+        batch = _device_batch(host_batch, mesh)
+        if step_index == 0 and batch["input_ids"].shape[0] != global_batch:
+            raise RuntimeError(
+                f"global batch is {batch['input_ids'].shape[0]}, expected "
+                f"{global_batch}: host-local to global conversion failed"
+            )
+        with logical_mesh_context(mesh, rules):
             metrics = train_step(state, batch)
             metrics = {
                 key: float(value)
