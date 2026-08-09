@@ -45,7 +45,7 @@ from yxtpu_pretrain.runtime.data import load_fast_tokenizer
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
-from yxtpu_pretrain.runtime.vision_data import FineVisionIterator, VisionBatchSpec
+from yxtpu_pretrain.runtime.vision_data import MixedVisionTextIterator, VisionBatchSpec
 from yxtpu_pretrain.train import _make_train_step
 
 
@@ -67,8 +67,18 @@ def main() -> int:
     parser.add_argument("--dataset", default="HuggingFaceM4/FineVisionMax")
     parser.add_argument("--steps", type=int, default=60)
     parser.add_argument("--batch-per-device", type=int, default=4)
+    parser.add_argument("--sequence-length", type=int, default=4096)
     parser.add_argument("--learning-rate", type=float, default=1.0e-4)
     parser.add_argument("--min-visual-dependency", type=int, default=0)
+    parser.add_argument("--p-text", type=float, default=0.3,
+                        help="probability a packed row is a plain-text "
+                             "document from the pretraining corpus")
+    parser.add_argument("--text-row-tokens", type=int, default=1024)
+    parser.add_argument("--max-images", type=int, default=4)
+    parser.add_argument("--prefetch", type=int, default=4)
+    parser.add_argument("--no-output-gate", action="store_true",
+                        help="disable the head-specific sigmoid output gate "
+                             "(G1) on the attention layers")
     parser.add_argument("--allow-device-mismatch", action="store_true")
     parser.add_argument("--metrics-out", default="/tmp/vision_smoke_steps.jsonl")
     parser.add_argument("--set", action="append", dest="overrides", default=[])
@@ -83,11 +93,13 @@ def main() -> int:
         "experiment.harness_eval.enabled=false",
         "experiment.diagnostics.enabled=false",
         "experiment.wandb.enabled=false",
+        f"data.sequence_length={arguments.sequence_length}",
         f"data.per_device_batch_size={arguments.batch_per_device}",
         f"optimizer.learning_rate={arguments.learning_rate}",
         f"optimizer.schedule_steps={max(arguments.steps, 4)}",
         "optimizer.warmup_steps=2",
         "model.vision.enabled=true",
+        f"model.attention.output_gate={str(not arguments.no_output_gate).lower()}",
     ] + list(arguments.overrides or [])
     config = load_config(
         model=arguments.model, optimizer="muonclip", data=arguments.data,
@@ -104,8 +116,12 @@ def main() -> int:
           f"({vision.visual_tokens_per_image} visual tokens/image)", flush=True)
 
     if not arguments.no_init:
+        # The restore twin must match the checkpoint's parameter tree
+        # exactly: no vision tower, no attention output gate. Both graft
+        # onto the vision model afterwards and train from fresh init.
         text_config = config.model_copy(deep=True)
         text_config.model.vision.enabled = False
+        text_config.model.attention.output_gate = False
         text_config.experiment.checkpoint.enabled = True
         text_config.experiment.checkpoint.destination = arguments.init_destination
         text_config.experiment.acknowledge_no_checkpoint = False
@@ -140,18 +156,34 @@ def main() -> int:
         placeholder_id=vision.placeholder_token_id,
         pad_id=49119,
         eos_id=49119,
+        max_images=arguments.max_images,
     )
     process_batch = config.data.per_device_batch_size * jax.local_device_count()
-    iterator = FineVisionIterator(
+    iterator = MixedVisionTextIterator(
         tokenizer=tokenizer,
         spec=spec,
         batch_size=process_batch,
-        dataset_name=arguments.dataset,
+        vision_dataset=arguments.dataset,
+        text_dataset=config.data.dataset_name if arguments.p_text > 0 else None,
+        text_field=config.data.text_field,
+        p_text=arguments.p_text,
+        text_row_tokens=arguments.text_row_tokens,
         min_visual_dependency=arguments.min_visual_dependency,
         shuffle_seed=config.data.shuffle_seed,
         shard_index=jax.process_index(),
         shard_count=jax.process_count(),
     )
+    if arguments.prefetch > 1:
+        from yxtpu_pretrain.runtime.data import PrefetchIterator
+
+        source = iterator
+        iterator = PrefetchIterator(source, depth=arguments.prefetch)
+        iterator.rows_stats = lambda: (source.rows_consumed, source.rows_skipped,
+                                       source.vision_rows, source.text_rows)
+    else:
+        source = iterator
+        iterator.rows_stats = lambda: (source.rows_consumed, source.rows_skipped,
+                                       source.vision_rows, source.text_rows)
 
     train_step = _make_train_step(config)
     sharding = NamedSharding(mesh, PartitionSpec("data"))
@@ -168,12 +200,15 @@ def main() -> int:
                 for key, value in metrics.items()
                 if jnp.ndim(value) == 0
             }
+            consumed, skipped, vision_rows, text_rows = iterator.rows_stats()
             record = {
                 "step": step_index,
                 "step_ms": round((time.perf_counter() - began) * 1000.0, 1),
                 "data_wait_ms": round(data_wait_ms, 1),
-                "rows_consumed": iterator.rows_consumed,
-                "rows_skipped": iterator.rows_skipped,
+                "rows_consumed": consumed,
+                "rows_skipped": skipped,
+                "vision_rows": vision_rows,
+                "text_rows": text_rows,
                 **{key: round(value, 6) for key, value in metrics.items()},
             }
             records.append(record)

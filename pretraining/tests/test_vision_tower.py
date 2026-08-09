@@ -26,7 +26,7 @@ from yxtpu_pretrain.model import HybridLanguageModel, count_parameters
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
-from yxtpu_pretrain.runtime.vision_data import VisionBatchSpec, render_row
+from yxtpu_pretrain.runtime.vision_data import VisionBatchSpec, pack_rows
 
 TINY_VISION = dict(
     enabled=True,
@@ -156,32 +156,44 @@ def test_tower_output_shape_and_model_gradients_flow():
     assert float(jnp.max(jnp.abs(base - moved))) > 0.0
 
 
-def test_render_row_masks_visual_prefix_and_padding():
+def test_pack_rows_segments_masks_and_images():
     spec = VisionBatchSpec(
         sequence_length=16,
-        visual_tokens=4,
+        visual_tokens=3,
         image_size=8,
         placeholder_id=250,
         pad_id=0,
         eos_id=1,
+        max_images=2,
     )
-    image = np.zeros((8, 8, 3), dtype=np.float32)
-    example = render_row([5, 6, 7], image, spec)
-    assert example is not None
-    ids, labels, mask = (
+    image = np.full((8, 8, 3), 0.5, dtype=np.float32)
+    vision_row = ([250, 250, 250, 5, 6, 1], image)  # visual prefix + text + eos
+    text_row = ([7, 8, 9, 1], None)
+    example = pack_rows([vision_row, text_row], spec)
+
+    ids, labels, mask, segments, positions = (
         example["input_ids"],
         example["labels"],
         example["loss_mask"],
+        example["segment_ids"],
+        example["positions"],
     )
-    assert list(ids[:4]) == [250] * 4
-    # Labels inside the visual run are placeholders and carry no loss.
-    assert mask[:3].sum() == 0.0
-    # The boundary position (last placeholder -> first text token) is
-    # supervised: predicting the first text token from the image is real.
-    assert mask[3] == 1.0
-    text_span = slice(4, 4 + 4)  # 3 text tokens + eos
-    assert list(ids[text_span]) == [5, 6, 7, 1]
-    assert mask[4] == 1.0 and mask[5] == 1.0 and mask[6] == 1.0
-    assert mask[7:].sum() == 0.0
-    assert example["segment_ids"][:7].all() and not example["segment_ids"][8:].any()
-    assert example["images"].shape == (1, 8, 8, 3)
+    # Layout: row1 tokens 0-5, row2 tokens 6-9, pad 10-16.
+    assert list(segments[:6]) == [1] * 6 and list(segments[6:10]) == [2] * 4
+    assert not segments[10:].any()
+    # Positions restart at each row.
+    assert list(positions[:6]) == [0, 1, 2, 3, 4, 5]
+    assert list(positions[6:10]) == [0, 1, 2, 3]
+    # Placeholder labels carry no loss; the image->text boundary does.
+    assert mask[0] == 0.0 and mask[1] == 0.0  # labels are placeholders
+    assert mask[2] == 1.0  # last placeholder -> first text token
+    assert mask[3] == 1.0 and mask[4] == 1.0  # text and eos supervised
+    # The cross-row boundary is masked (row 1 eos must not predict row 2).
+    assert mask[5] == 0.0
+    # Row 2 text supervised, pad masked.
+    assert mask[6] == 1.0 and mask[7] == 1.0 and mask[8] == 1.0
+    assert mask[9:].sum() == 0.0
+    # One real image in slot 0, blank in slot 1.
+    assert example["images"].shape == (2, 8, 8, 3)
+    np.testing.assert_allclose(example["images"][0], 0.5)
+    np.testing.assert_allclose(example["images"][1], 0.0)
