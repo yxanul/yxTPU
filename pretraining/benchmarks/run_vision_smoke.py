@@ -84,6 +84,11 @@ def main() -> int:
                         help="disable the head-specific sigmoid output gate "
                              "(G1) on the attention layers")
     parser.add_argument("--allow-device-mismatch", action="store_true")
+    parser.add_argument("--profile-dir", default=None,
+                        help="capture a jax profiler trace on the primary "
+                             "process over a few steady-state steps")
+    parser.add_argument("--profile-start", type=int, default=8)
+    parser.add_argument("--profile-count", type=int, default=3)
     parser.add_argument("--metrics-out", default="/tmp/vision_smoke_steps.jsonl")
     parser.add_argument("--set", action="append", dest="overrides", default=[])
     arguments = parser.parse_args()
@@ -194,7 +199,10 @@ def main() -> int:
     train_step = _make_train_step(config)
     records = []
     global_batch = process_batch * jax.process_count()
+    profiling = arguments.profile_dir and jax.process_index() == 0
     for step_index in range(arguments.steps):
+        if profiling and step_index == arguments.profile_start:
+            jax.profiler.start_trace(arguments.profile_dir)
         began = time.perf_counter()
         host_batch = next(iterator)
         data_wait_ms = (time.perf_counter() - began) * 1000.0
@@ -228,6 +236,12 @@ def main() -> int:
             records.append(record)
             if jax.process_index() == 0:
                 print(json.dumps(record), flush=True)
+        if (
+            profiling
+            and step_index == arguments.profile_start + arguments.profile_count
+        ):
+            jax.profiler.stop_trace()
+            print(f"profile written to {arguments.profile_dir}", flush=True)
 
     if jax.process_index() == 0:
         with open(arguments.metrics_out, "w", encoding="utf-8") as handle:
