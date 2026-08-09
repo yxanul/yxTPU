@@ -34,7 +34,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import nnx
-from jax.sharding import NamedSharding, PartitionSpec
 from maxtext.common.train_state_nnx import TrainStateNNX
 
 from yxtpu_pretrain.config import load_config
@@ -45,8 +44,12 @@ from yxtpu_pretrain.runtime.data import load_fast_tokenizer
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
-from yxtpu_pretrain.runtime.vision_data import MixedVisionTextIterator, VisionBatchSpec
-from yxtpu_pretrain.train import _make_train_step
+from yxtpu_pretrain.runtime.vision_data import (
+    MixedVisionTextIterator,
+    PooledMixedIterator,
+    VisionBatchSpec,
+)
+from yxtpu_pretrain.train import _device_batch, _make_train_step
 
 
 class _NoIterator:
@@ -76,6 +79,7 @@ def main() -> int:
     parser.add_argument("--text-row-tokens", type=int, default=1024)
     parser.add_argument("--max-images", type=int, default=4)
     parser.add_argument("--prefetch", type=int, default=4)
+    parser.add_argument("--producer-threads", type=int, default=4)
     parser.add_argument("--no-output-gate", action="store_true",
                         help="disable the head-specific sigmoid output gate "
                              "(G1) on the attention layers")
@@ -159,41 +163,42 @@ def main() -> int:
         max_images=arguments.max_images,
     )
     process_batch = config.data.per_device_batch_size * jax.local_device_count()
-    iterator = MixedVisionTextIterator(
-        tokenizer=tokenizer,
-        spec=spec,
-        batch_size=process_batch,
-        vision_dataset=arguments.dataset,
-        text_dataset=config.data.dataset_name if arguments.p_text > 0 else None,
-        text_field=config.data.text_field,
-        p_text=arguments.p_text,
-        text_row_tokens=arguments.text_row_tokens,
-        min_visual_dependency=arguments.min_visual_dependency,
-        shuffle_seed=config.data.shuffle_seed,
-        shard_index=jax.process_index(),
-        shard_count=jax.process_count(),
+    threads = max(1, arguments.producer_threads)
+
+    def make_source(thread_index: int) -> MixedVisionTextIterator:
+        return MixedVisionTextIterator(
+            tokenizer=tokenizer,
+            spec=spec,
+            batch_size=process_batch,
+            vision_dataset=arguments.dataset,
+            text_dataset=config.data.dataset_name if arguments.p_text > 0 else None,
+            text_field=config.data.text_field,
+            p_text=arguments.p_text,
+            text_row_tokens=arguments.text_row_tokens,
+            min_visual_dependency=arguments.min_visual_dependency,
+            shuffle_seed=config.data.shuffle_seed,
+            shard_index=jax.process_index() * threads + thread_index,
+            shard_count=jax.process_count() * threads,
+        )
+
+    pool = PooledMixedIterator(
+        make_source, threads=threads, batch_size=process_batch
     )
+    iterator = pool
     if arguments.prefetch > 1:
         from yxtpu_pretrain.runtime.data import PrefetchIterator
 
-        source = iterator
-        iterator = PrefetchIterator(source, depth=arguments.prefetch)
-        iterator.rows_stats = lambda: (source.rows_consumed, source.rows_skipped,
-                                       source.vision_rows, source.text_rows)
-    else:
-        source = iterator
-        iterator.rows_stats = lambda: (source.rows_consumed, source.rows_skipped,
-                                       source.vision_rows, source.text_rows)
+        iterator = PrefetchIterator(pool, depth=arguments.prefetch)
+        iterator.rows_stats = pool.rows_stats
 
     train_step = _make_train_step(config)
-    sharding = NamedSharding(mesh, PartitionSpec("data"))
     records = []
     with logical_mesh_context(mesh, rules):
         for step_index in range(arguments.steps):
             began = time.perf_counter()
             host_batch = next(iterator)
             data_wait_ms = (time.perf_counter() - began) * 1000.0
-            batch = jax.device_put(host_batch, sharding)
+            batch = _device_batch(host_batch, mesh)
             metrics = train_step(state, batch)
             metrics = {
                 key: float(value)

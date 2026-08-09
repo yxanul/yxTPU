@@ -263,3 +263,56 @@ class MixedVisionTextIterator:
             key: np.stack([example[key] for example in examples])
             for key in examples[0]
         }
+
+
+class PooledMixedIterator:
+    """N producer threads over disjoint stream shards, one example queue.
+
+    A single producer thread decodes images, tokenizes, and packs at
+    roughly one 4k sequence per 25 ms - slower than a heavy training
+    step consumes them across a local batch. The pool splits the shard
+    N ways (each thread owns its own HF streams; they are not
+    thread-safe) and the consumer assembles batches in arrival order,
+    so batch composition is nondeterministic across runs but each row
+    is still seen exactly once per epoch per shard."""
+
+    def __init__(self, factory, *, threads: int, batch_size: int):
+        import queue
+        import threading
+
+        self.batch_size = batch_size
+        self._sources = [factory(thread) for thread in range(threads)]
+        self._queue: queue.Queue = queue.Queue(maxsize=max(2 * batch_size, 8))
+        self._threads = []
+        for source in self._sources:
+            worker = threading.Thread(
+                target=self._produce, args=(source,), daemon=True
+            )
+            worker.start()
+            self._threads.append(worker)
+
+    def _produce(self, source) -> None:
+        while True:
+            try:
+                example = source._next_example()
+            except StopIteration:
+                return
+            self._queue.put(example)
+
+    def rows_stats(self):
+        return (
+            sum(source.rows_consumed for source in self._sources),
+            sum(source.rows_skipped for source in self._sources),
+            sum(source.vision_rows for source in self._sources),
+            sum(source.text_rows for source in self._sources),
+        )
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        examples = [self._queue.get() for _ in range(self.batch_size)]
+        return {
+            key: np.stack([example[key] for example in examples])
+            for key in examples[0]
+        }

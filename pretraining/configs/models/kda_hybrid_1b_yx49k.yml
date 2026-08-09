@@ -1,0 +1,48 @@
+# ~0.98B depth-first hybrid on the yx49k vocabulary: kda_hybrid_1b_deep
+# with the 128k table swapped for the 49,152-token exact-teacher-subset
+# tokenizer. Tied embeddings put ~92% of parameters in the transformer
+# body (75.5M embedding, ~900M compute-bearing), and the small head keeps
+# the chunked loss light. KDA heads scale with width (H = d/128 = 12).
+# remat_save_kda_residuals is off: at seq 4096 the saved state history is
+# ~0.8 GB per KDA layer per microbatch-4 - the 2% step saving does not
+# survive 24 layers at this width.
+name: kda_hybrid_1b_yx49k
+vocab_size: 49152
+emb_dim: 1536
+num_layers: 32
+cycle: [kda, kda, kda, gqa]
+num_cycles: 8
+mlp_dim: 4096
+fused_mlp: true
+rms_norm_epsilon: 1.0e-5
+dtype: bfloat16
+weight_dtype: float32
+param_scan_axis: 1
+remat_policy: minimal_with_context
+remat_save_kda_residuals: false
+residual_policy: block_attnres
+logits_via_embedding: true
+dropout_rate: 0.0
+kda:
+  chunk_size: 64
+  num_heads: 12
+  key_head_dim: 128
+  value_head_dim: 128
+  conv_kernel_size: 4
+  gate_rank: 128
+  qk_norm: true
+  safe_gate: true
+  gate_lower_bound: -5.0
+  precision: guarded_fp32
+attention:
+  implementation: tokamax_splash
+  num_query_heads: 12
+  num_kv_heads: 3
+  head_dim: 128
+  block_q: 1024
+  block_q_dkv: 2048
+  fused_qkv: true
+  rope: false
+loss:
+  implementation: chunked
+  block_tokens: 1024
