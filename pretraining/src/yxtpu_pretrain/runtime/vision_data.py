@@ -130,7 +130,10 @@ class MixedVisionTextIterator:
         min_visual_dependency: int = 0,
         split: str = "train",
         shuffle_seed: int = 42,
-        shuffle_buffer: int = 1000,
+        # Image rows are heavy; the buffer must fill before the first
+        # example emerges, so keep it modest and let file-shard order plus
+        # a small window provide the mixing.
+        shuffle_buffer: int = 256,
         shard_index: int = 0,
         shard_count: int = 1,
     ):
@@ -147,26 +150,34 @@ class MixedVisionTextIterator:
         self.min_visual_dependency = min_visual_dependency
         self._rng = np.random.default_rng(shuffle_seed * 1009 + shard_index)
 
-        def sharded(stream):
-            for ordinal, row in enumerate(stream):
-                if ordinal % shard_count == shard_index:
-                    yield row
+        def open_stream(name, seed):
+            stream = load_dataset(name, split=split, streaming=True)
+            # Shard by FILES, never by row-modulo: a modulo shard still
+            # downloads every row and discards shard_count-1 of every
+            # shard_count - at 8 hosts x 4 producer threads that is 32x
+            # redundant download of image-heavy rows, and the first
+            # example only appears after shuffle_buffer * shard_count
+            # raw rows. File shards are disjoint from the first byte.
+            if shard_count > 1:
+                try:
+                    stream = stream.shard(num_shards=shard_count, index=shard_index)
+                except Exception:
+                    base = stream
 
-        vision_stream = load_dataset(vision_dataset, split=split, streaming=True)
-        if shuffle_buffer:
-            vision_stream = vision_stream.shuffle(
-                seed=shuffle_seed, buffer_size=shuffle_buffer
-            )
-        self._vision = sharded(iter(vision_stream))
-        if text_dataset:
-            text_stream = load_dataset(text_dataset, split=split, streaming=True)
+                    def modulo(source):
+                        for ordinal, row in enumerate(source):
+                            if ordinal % shard_count == shard_index:
+                                yield row
+
+                    return iter(modulo(iter(base)))
             if shuffle_buffer:
-                text_stream = text_stream.shuffle(
-                    seed=shuffle_seed + 1, buffer_size=shuffle_buffer
-                )
-            self._text = sharded(iter(text_stream))
-        else:
-            self._text = None
+                stream = stream.shuffle(seed=seed, buffer_size=shuffle_buffer)
+            return iter(stream)
+
+        self._vision = open_stream(vision_dataset, shuffle_seed)
+        self._text = (
+            open_stream(text_dataset, shuffle_seed + 1) if text_dataset else None
+        )
         self._pending = None
         self.rows_consumed = 0
         self.rows_skipped = 0
