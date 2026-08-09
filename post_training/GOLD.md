@@ -322,7 +322,7 @@ survives it.
   logind's RemoveIPC purges /dev/shm when the owning session ends,
   which silently deleted a distributed dataset once.
 - Multi-host data-limited runs need COLLECTIVE termination (allgather a
-  has-data flag; c3a1d6d): per-host shards exhaust at different step
+  has-data flag; 9696ff4): per-host shards exhaust at different step
   counts, and one host breaking alone deadlocks the rest in the next
   collective — cost SFT-6M its final save before the fix.
 - Per-host sharded stores align with per-host data shards by

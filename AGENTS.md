@@ -56,13 +56,13 @@ State is dynamic; verify it before relying on this section.
 - Benchmarks 2026-07-22 (synthetic, selected profile, pure data parallel
   over 32 chips): MaxText 247M GQA baseline ~2.26M tokens/s global
   (~105 TFLOP/s/device, ~38% MFU). KDA 273M with the fully fused v4 kernel
-  (fused forward + split fused backward, commit 3cfc1a9): ~1.54M tokens/s
+  (fused forward + split fused backward, commit e77a4ae): ~1.54M tokens/s
   global at 8/device x 2048 - about 32% below the GQA baseline, matching
   the 20-40% gap measured on v6e. 16/device x 2048 (~1.53M) and
   8/device x 4096 (~1.55M) also fit; 16 x 4096 still OOMs by ~0.7 GiB.
   The earlier forward-only hybrid measured ~630k tokens/s and OOMed at
   batch 16 from its XLA-tape backward; it remains only as a fallback.
-- BlockAttnRes perf pass 2026-07-22 (commits 41d7aeb..878bb28): split-
+- BlockAttnRes perf pass 2026-07-22 (commits 6deb5fc..fc7ff38): split-
   scoring, RMSNorm-fold into the pseudo-query, and bf16 dot operands cut the
   depth-read overhead from ~17% to ~4% (steady step ~484 ms vs 464 baseline)
   with losses overlaying to ~1e-4. optimizer.muon_ns_bf16 (bf16 momentum +
@@ -72,7 +72,7 @@ State is dynamic; verify it before relying on this section.
   so it stays default-false; revisit at larger widths where NS FLOPs grow
   quadratically. Toggling it changes the optimizer-state pytree (checkpoint
   incompatibility across the flag).
-- KDA backward-bandwidth pass 2026-07-23 (commits f657066..28c7242): the
+- KDA backward-bandwidth pass 2026-07-23 (commits 4caa0a2..0c41bac): the
   cycle remat was re-running the fused KDA forward inside every backward.
   The fwd rule now checkpoint_names its output and state history, and
   model.remat_save_kda_residuals (default true) adds both names to the
@@ -93,8 +93,8 @@ State is dynamic; verify it before relying on this section.
   ~4e-3 transient wobble at the mid-run grad spike, no drift). Note:
   tests/test_kimi_delta_attention.py has 5 pre-existing failures when run
   on v4 hardware (sublane-gather in the non-v4 kernels; identical at
-  4de5b4a) - only its v4-path tests are meaningful gates there.
-- KDA pairwise pass 2026-07-28 (PR #2 gates; commits 32f0c6d, 8792cd6 landed
+  fc1eaa9) - only its v4-path tests are meaningful gates there.
+- KDA pairwise pass 2026-07-28 (PR #2 gates; commits 9d61a35, 14da17d landed
   on main): merged system/intra pairwise + q@S/w@S state reads + exp(-inf)
   trim verified BITWISE-identical on-device across all 8 fwd/bwd outputs
   (benchmarks/verify_kda_v4_kernel_equivalence.py --bitwise); 16-row pairwise
@@ -122,7 +122,7 @@ State is dynamic; verify it before relying on this section.
   (460.2 ms) - K3 §2.5 reproduced, now a real 1B-A/B candidate; both +
   exact scale compensation -0.015, inside the 0.016-nat envelope,
   confirming the original -0.073 was the shape-rule artifact.
-- Batch prefetch 2026-07-23 (commit d8aece3): the loop now stages batch i+1
+- Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array
   assembly in _device_batch, not the fetch). Validated: losses identical to
@@ -185,7 +185,7 @@ State is dynamic; verify it before relying on this section.
   exist on the workers (~81 GB free per host, 60 GB on the worker-3
   logger); intermediate rotations (19073..76427) were already gone before
   the export.
-- SFT stage bootstrapped 2026-07-23/24 (commits 8b0ac80..7a4e90b, module
+- SFT stage bootstrapped 2026-07-23/24 (commits 3163483..6a4a457, module
   pretraining/src/yxtpu_pretrain/sft/): 12 chat specials on the free padded
   ids 128001-128012 (K2.5-style roles + im_middle/im_end + single-token
   <think>/</think> + five tool-call markers, exact-id asserted), jinja
@@ -226,7 +226,7 @@ State is dynamic; verify it before relying on this section.
   (ours is loglikelihood-only), ifbench absent from lm-eval 0.4.12, and
   social_iqa/logiqa/wsc273 are script-based datasets the modern datasets
   library refuses.
-- Per-host local checkpointing hardened 2026-07-23 (commits cb2ce06..f065265,
+- Per-host local checkpointing hardened 2026-07-23 (commits 29808ab..b5d9115,
   preflight-validated save->resume->continue on all 8 hosts): orbax on
   non-shared disks needs FOUR things together - (1)
   MultiprocessingOptions(primary_host=None, active_processes={self},
@@ -262,7 +262,7 @@ State is dynamic; verify it before relying on this section.
   the flags were not adopted into v4-64.yml. Remaining ranked levers from
   the profile: per-device batch 16 (fits per the memory survey), deeper
   prefetch queue against the >1 s step spikes, mixer_only AttnRes ablation.
-- BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit 7028526; same
+- BlockAttnRes A/B 2026-07-22 (arXiv:2603.15031, commit d158182; same
   kda_hybrid_128k + muonclip protocol as run 3): PASSES both gates - final
   loss 3.796 vs 3.872, holdout 3.850 vs 3.882. lambada, the hybrid's one
   campaign loss, jumped 0.112 -> 0.164 acc (ppl 7,161 -> 2,247), beating
@@ -279,15 +279,15 @@ State is dynamic; verify it before relying on this section.
   3.882 (best, and the calmest gradients: mean 0.39, max 2.03). Two bugs
   were found and fixed en route: benchmark-sized LR schedules decaying to
   the floor by step 30, and optax Muon defaulting to width-transfer scaling
-  (fixed with consistent_rms=0.2, commit 5f134c7) - the un-fixed muonclip
+  (fixed with consistent_rms=0.2, commit b752751) - the un-fixed muonclip
   run lost a full nat of loss and its grad norms rose all run. Multi-host
-  lm-eval works as of ecbc7b8; each full ten-task round costs ~2 minutes.
-- Tied embeddings (model.logits_via_embedding, commit 6472af7): now actually
+  lm-eval works as of 57c75ab; each full ten-task round costs ~2 minutes.
+- Tied embeddings (model.logits_via_embedding, commit daa0c89): now actually
   implemented (the flag was schema-only before). On v4-64 at 8x4096 the tied
   273m model runs ~1.554M tokens/s (unchanged, as expected) with
   parameter_count 239,381,088 - exactly vocab x emb fewer. For the gpt2
   model the same flag saves 51.6M parameters (~17%).
-- Input-projection fusion (kda.fused_in_proj, commit c841282): merges the
+- Input-projection fusion (kda.fused_in_proj, commit 0922cc7): merges the
   four input-side KDA projections into one [embed, 3336] GEMM. Proven exactly
   equivalent (transplant test, 2e-5) and guarded against muon-family
   optimizers pending blocked Newton-Schulz routing. A/B on v4-64 measured it
@@ -325,7 +325,7 @@ State is dynamic; verify it before relying on this section.
     sessions must be foreground with a short timeout, verified terminated,
     or use -o ConnectTimeout so a dead worker fails fast instead of
     retrying forever.
-- Setup completed 2026-07-22 on all 8 workers: repo at `main` (`6aeaf4a`,
+- Setup completed 2026-07-22 on all 8 workers: repo at `main` (`866cb0b`,
   full clone — doctor's pin check needs git history, so never clone with
   `--depth 1`), `uv sync --locked --extra dev`, HF token in
   `~/.cache/huggingface/token` and W&B key in `~/.netrc` (both verified by
