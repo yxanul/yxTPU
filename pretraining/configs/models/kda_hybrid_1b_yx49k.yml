@@ -3,9 +3,12 @@
 # tokenizer. Tied embeddings put ~92% of parameters in the transformer
 # body (75.5M embedding, ~900M compute-bearing), and the small head keeps
 # the chunked loss light. KDA heads scale with width (H = d/128 = 12).
-# remat_save_kda_residuals is off: at seq 4096 the saved state history is
-# ~0.8 GB per KDA layer per microbatch-4 - the 2% step saving does not
-# survive 24 layers at this width.
+# remat_save_kda_residuals is off (at seq 4096 the saved state history
+# is ~0.8 GB per KDA layer per microbatch-4), and remat is
+# save_dot_except_mlp: MEASURED at 884M on v4-64, minimal_with_context
+# already exceeds HBM at PDB 8/2048, and the 1B at PDB 4/4096 with
+# minimal_with_context asks 35.89G of HLO temporaries against 30.75G.
+# Chunked block 256 keeps the loss temporaries at ~200 MB.
 name: kda_hybrid_1b_yx49k
 vocab_size: 49152
 emb_dim: 1536
@@ -18,7 +21,7 @@ rms_norm_epsilon: 1.0e-5
 dtype: bfloat16
 weight_dtype: float32
 param_scan_axis: 1
-remat_policy: minimal_with_context
+remat_policy: save_dot_except_mlp
 remat_save_kda_residuals: false
 residual_policy: block_attnres
 logits_via_embedding: true
@@ -45,4 +48,4 @@ attention:
   rope: false
 loss:
   implementation: chunked
-  block_tokens: 1024
+  block_tokens: 256
