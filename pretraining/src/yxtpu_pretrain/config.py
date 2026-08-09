@@ -80,6 +80,58 @@ class AttentionConfig(StrictModel):
         return self
 
 
+class VisionConfig(StrictModel):
+    """Native vision pathway: a from-scratch encoder trained jointly under
+    the next-token objective (no contrastive stage, no pretrained ViT).
+
+    Images enter as runs of ``placeholder_token_id`` in the token stream;
+    the tower's projected features replace those positions' embeddings and
+    the loss never lands on them. ``encoder_layers: 0`` selects the
+    encoder-free arm: patches -> pixel shuffle -> projector, leaving all
+    visual mixing to the backbone."""
+
+    enabled: bool = False
+    encoder_layers: int = 12
+    encoder_dim: int = 384
+    encoder_heads: int = 6
+    encoder_mlp_dim: int = 1536
+    patch_size: int = 16
+    image_size: int = 448
+    # Space-to-depth factor applied before the projector (K3-style): an s x s
+    # neighborhood of patch features folds into one visual token of s^2 * dim
+    # channels, cutting visual tokens per image by s^2.
+    pixel_shuffle: int = 2
+    placeholder_token_id: int = 49150
+    max_images_per_sequence: int = 1
+
+    @property
+    def patch_grid(self) -> int:
+        return self.image_size // self.patch_size
+
+    @property
+    def token_grid(self) -> int:
+        return self.patch_grid // self.pixel_shuffle
+
+    @property
+    def visual_tokens_per_image(self) -> int:
+        return self.token_grid**2
+
+    @model_validator(mode="after")
+    def validate_geometry(self) -> VisionConfig:
+        if self.image_size % (self.patch_size * self.pixel_shuffle):
+            raise ValueError(
+                "image_size must be divisible by patch_size * pixel_shuffle "
+                "so the token grid is exact"
+            )
+        if self.encoder_layers < 0:
+            raise ValueError("encoder_layers must be non-negative (0 = encoder-free)")
+        if self.encoder_layers and self.encoder_dim % self.encoder_heads:
+            raise ValueError("encoder_dim must be divisible by encoder_heads")
+        if self.max_images_per_sequence < 1:
+            raise ValueError("max_images_per_sequence must be positive")
+        return self
+
+
 class LossConfig(StrictModel):
     # "standard" materializes [B, T, V] logits (~4 GB compiled temporaries at
     # 337M/PDB-8, scaling with batch); "tokamax_fused" is hard-blocked on v4;
@@ -132,9 +184,12 @@ class ModelConfig(StrictModel):
     kda: KDAConfig = Field(default_factory=KDAConfig)
     attention: AttentionConfig = Field(default_factory=AttentionConfig)
     loss: LossConfig = Field(default_factory=LossConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
 
     @model_validator(mode="after")
     def validate_layout(self) -> ModelConfig:
+        if self.vision.enabled and not 0 <= self.vision.placeholder_token_id < self.vocab_size:
+            raise ValueError("vision.placeholder_token_id must lie inside the vocabulary")
         if self.num_layers != self.num_cycles * len(self.cycle):
             raise ValueError("num_layers must equal num_cycles * len(cycle)")
         allowed_cycles = (

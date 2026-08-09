@@ -25,6 +25,7 @@ from yxtpu_pretrain.layers.roles import (
     declare_norm,
     declare_parameter,
 )
+from yxtpu_pretrain.layers.vision import VisionTower, splice_visual_embeddings
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 
 ACTIVATION_LOGICAL_AXES = (
@@ -390,6 +391,16 @@ class HybridLanguageModel(nnx.Module):
         self.token_embedding.embedding = declare_parameter(
             self.token_embedding.embedding, ParamRole.EMBEDDING
         )
+        if model.vision.enabled:
+            self.vision_tower = VisionTower(
+                model.vision,
+                model.emb_dim,
+                leaf_config=self.leaf_config,
+                mesh=mesh,
+                rngs=rngs.fork(),
+            )
+        else:
+            self.vision_tower = None
         self.cycles = nnx_scan.create_scanned_layers(
             lambda cycle_rngs: HybridCycle(
                 config=config,
@@ -490,6 +501,7 @@ class HybridLanguageModel(nnx.Module):
         self,
         token_ids,
         *,
+        images=None,
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
@@ -501,6 +513,14 @@ class HybridLanguageModel(nnx.Module):
                 jnp.arange(token_ids.shape[1], dtype=jnp.int32), token_ids.shape
             )
         hidden_states = self.token_embedding(token_ids, model_mode=MODEL_MODE_TRAIN)
+        if self.vision_tower is not None and images is not None:
+            visual = self.vision_tower(images)
+            hidden_states = splice_visual_embeddings(
+                hidden_states,
+                token_ids,
+                visual,
+                self.config.model.vision.placeholder_token_id,
+            )
         hidden_states = nn.with_logical_constraint(hidden_states, ACTIVATION_LOGICAL_AXES)
         if self.final_read is not None:
             # Block AttnRes: slot 0 is the token embedding; each cycle writes
@@ -571,12 +591,14 @@ class HybridLanguageModel(nnx.Module):
         self,
         token_ids,
         *,
+        images=None,
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
     ):
         hidden_states = self.hidden_states(
             token_ids,
+            images=images,
             decoder_segment_ids=decoder_segment_ids,
             decoder_positions=decoder_positions,
             record_max_logits=record_max_logits,

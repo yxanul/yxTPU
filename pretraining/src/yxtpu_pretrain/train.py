@@ -45,6 +45,7 @@ from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
     hidden_states = model.hidden_states(
         batch["input_ids"],
+        images=batch["images"] if "images" in batch else None,
         decoder_segment_ids=batch["segment_ids"],
         decoder_positions=batch["positions"],
         record_max_logits=record_max_logits,

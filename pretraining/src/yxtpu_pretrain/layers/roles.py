@@ -21,6 +21,12 @@ class ParamRole(StrEnum):
     MLP_INPUT = "mlp_input"
     MLP_OUTPUT = "mlp_output"
     ATTNRES_PSEUDOQUERY = "attnres_pseudoquery"
+    # Vision tower (native from-scratch pathway): dense matrices take Muon
+    # like every other matrix; the patch embedding and learned 2D position
+    # table are embedding-like and take AdamW, matching the routing
+    # philosophy of EMBEDDING / DEPTHWISE_CONV.
+    VIT_MATRIX = "vit_matrix"
+    VIT_EMBED = "vit_embed"
 
 
 MUON_ROLES = frozenset(
@@ -30,6 +36,7 @@ MUON_ROLES = frozenset(
         ParamRole.GQA_OUTPUT,
         ParamRole.MLP_INPUT,
         ParamRole.MLP_OUTPUT,
+        ParamRole.VIT_MATRIX,
     }
 )
 
@@ -42,6 +49,7 @@ ADAMW_ROLES = frozenset(
         ParamRole.DEPTHWISE_CONV,
         ParamRole.KDA_SCALAR,
         ParamRole.ATTNRES_PSEUDOQUERY,
+        ParamRole.VIT_EMBED,
     }
 )
 
