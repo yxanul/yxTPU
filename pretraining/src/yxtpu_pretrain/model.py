@@ -92,6 +92,11 @@ def _remat_policy(name: str, save_kda_residuals: bool):
         names = ("qkv_proj", "context", "out_proj", "mlpwi", "mlpwo")
     elif name == "save_dot_except_mlp":
         names = ("qkv_proj", "out_proj")
+    elif name == "save_dot_context":
+        # save_dot_except_mlp plus the splash attention context: the GQA
+        # layers' saved (out, lse) cost ~410 MB stacked at 1B/4096 and
+        # delete the splash forward re-run from the backward scan.
+        names = ("qkv_proj", "context", "out_proj")
     else:
         raise ValueError(f"unknown rematerialization policy: {name}")
     if save_kda_residuals:
@@ -492,7 +497,12 @@ class HybridLanguageModel(nnx.Module):
             ),
             prevent_cse=False,
         )
-        hidden_states, scanned_state = jax.lax.scan(cycle_fn, hidden_states, (params, state))
+        hidden_states, scanned_state = jax.lax.scan(
+            cycle_fn,
+            hidden_states,
+            (params, state),
+            unroll=self.config.model.scan_unroll,
+        )
         scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "cycles", 0)
         nnx.update(self.cycles, scanned_state)
         return hidden_states

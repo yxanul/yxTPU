@@ -1231,12 +1231,17 @@ class KimiDeltaAttention(nnx.Module):
       )
     else:
       self.in_proj_mixer = None
+      # Head-major output (H, 3, D): the projection GEMM writes the
+      # convolution's channel order directly, so the XLA mixer path needs
+      # no [B,T,3,H,D] -> [B,T,H,3,D] transpose (a ~151 MB copy per layer
+      # per pass at the 1B/4096 shape). A pure column permutation of the
+      # weight relative to the historical (3, H, D) layout.
       self.in_proj_qkv = DenseGeneral(
           in_features_shape=config.emb_dim,
-          out_features_shape=(3, self.num_heads, self.head_dim),
+          out_features_shape=(self.num_heads, 3, self.head_dim),
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
-          kernel_axes=("embed", "qkv", "gdn_head", None),
+          kernel_axes=("embed", "gdn_head", "qkv", None),
           matmul_precision=config.matmul_precision,
           rngs=rngs,
       )
@@ -1379,22 +1384,25 @@ class KimiDeltaAttention(nnx.Module):
       beta_logits = self.beta_proj(hidden_states)
       gate_hidden = self.output_gate_down(hidden_states)
     if use_fused_kernel:
-      # The fused Pallas kernel owns the causal depthwise convolution and
-      # SiLU, consuming the projection output directly as [B, T, 3, H, D].
-      # The convolution parameter keeps its (head, qkv, dim) channel order, so
-      # only the tiny weight is transposed to the kernel's [width, 3, H, D].
-      raw_qkv = qkv
+      # The fused folded kernel owns the causal depthwise convolution and
+      # SiLU, consuming [B, T, 3, H, D]; the head-major projection is
+      # transposed here (this v5e/v6e-only path pays the copy the XLA
+      # mixer path no longer does).
+      raw_qkv = qkv.transpose(0, 1, 3, 2, 4)
       query = key = value = None
     else:
-      qkv = qkv.transpose(0, 1, 3, 2, 4).reshape(batch, sequence_length, -1)
+      qkv = qkv.reshape(batch, sequence_length, -1)
       if _USE_SHIFTED_QKV_CONV:
         qkv = _causal_depthwise_conv(
             qkv,
             self.conv1d.kernel.value.astype(qkv.dtype),
         )
       else:
-        qkv = jnp.pad(qkv, ((0, 0), (self.config.gdn_conv_kernel_dim - 1, 0), (0, 0)))
-        qkv = self.conv1d(qkv)[:, -sequence_length:]
+        # padding="CAUSAL" already left-pads by width-1 inside the conv;
+        # composing it with a manual pad plus a trailing slice is bitwise
+        # identical and was two extra full-tensor materializations per
+        # layer per pass.
+        qkv = self.conv1d(qkv)
       qkv = jax.nn.silu(qkv.astype(jnp.float32)).astype(self.config.dtype)
       qkv = qkv.reshape(batch, sequence_length, self.num_heads, 3, self.head_dim)
       query, key, value = (qkv[..., i, :] for i in range(3))

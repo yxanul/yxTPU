@@ -179,9 +179,16 @@ class ModelConfig(StrictModel):
     dtype: Literal["bfloat16", "float32"] = "bfloat16"
     weight_dtype: Literal["float32"] = "float32"
     param_scan_axis: int = 1
-    remat_policy: Literal["minimal", "minimal_with_context", "save_dot_except_mlp", "full"] = (
-        "minimal_with_context"
-    )
+    remat_policy: Literal[
+        "minimal", "minimal_with_context", "save_dot_except_mlp",
+        "save_dot_context", "full"
+    ] = "minimal_with_context"
+    # Unroll factor for the cycle scan. 1 is the classic while-loop; higher
+    # values trade compile time and code size for static per-cycle parameter
+    # slices and schedulable gradient writes (the while-loop's per-iteration
+    # dynamic-slice/DUS bookkeeping measured ~380 ms/step of small copies at
+    # 1B/4096). num_cycles need not be divisible.
+    scan_unroll: int = 1
     # Save the KDA kernel's output and state history across the cycle remat so
     # the sequential fused forward never re-runs in the backward pass. Costs
     # ~2.0 GB resident HBM at 2048-seq/batch-8 (state history scales with
@@ -197,6 +204,8 @@ class ModelConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_layout(self) -> ModelConfig:
+        if self.scan_unroll < 1:
+            raise ValueError("scan_unroll must be at least 1")
         if self.vision.enabled and not 0 <= self.vision.placeholder_token_id < self.vocab_size:
             raise ValueError("vision.placeholder_token_id must lie inside the vocabulary")
         if self.num_layers != self.num_cycles * len(self.cycle):

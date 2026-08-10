@@ -122,8 +122,9 @@ def kda_step(mixer, hidden, recurrent_state, conv_cache):
     beta_logits = mixer.beta_proj(hidden)
     gate_hidden = mixer.output_gate_down(hidden)
 
-    # The trained convolution runs over the (head, qkv, dim) channel order.
-    flat = qkv.transpose(0, 1, 3, 2, 4).reshape(batch, 1, -1)
+    # The head-major projection already emits the convolution's
+    # (head, qkv, dim) channel order.
+    flat = qkv.reshape(batch, 1, -1)
     window = jnp.concatenate((conv_cache, flat), axis=1)
     kernel = jnp.asarray(mixer.conv1d.kernel[...], flat.dtype)[:, 0, :]
     convolved = jnp.sum(window * kernel[None], axis=1, keepdims=True)
