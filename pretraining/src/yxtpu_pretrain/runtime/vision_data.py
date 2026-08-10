@@ -234,6 +234,7 @@ class MixedVisionTextIterator:
             open_stream(text_dataset, shuffle_seed + 1) if text_dataset else None
         )
         self._pending = None
+        self._pending_fill = None
         self.rows_consumed = 0
         self.rows_skipped = 0
         self.text_rows = 0
@@ -312,8 +313,12 @@ class MixedVisionTextIterator:
         capacity = spec.sequence_length + 1
         rows, used, image_count = [], 0, 0
         while True:
-            row = self._pending if self._pending is not None else self._next_row()
-            self._pending = None
+            if self._pending is not None:
+                row, self._pending = self._pending, None
+            elif self._pending_fill is not None:
+                row, self._pending_fill = self._pending_fill, None
+            else:
+                row = self._next_row()
             tokens, image = row
             needs_image = 1 if image is not None else 0
             if used + len(tokens) > capacity or image_count + needs_image > spec.max_images:
@@ -325,6 +330,26 @@ class MixedVisionTextIterator:
             self.rows_consumed += 1
             if used >= capacity - 8:
                 break
+        # Budget-aware fill: when a stashed row ended the pack early (the
+        # image budget bound, or an oversized draw against a part-full
+        # sequence), the tail would otherwise be padding at full compute
+        # cost - measured at pad_fraction 0.28 under p_text 0.3. Text rows
+        # need no image slot, so fill the tail from the text stream; a draw
+        # that does not fit is stashed like the main loop's pending row and
+        # opens a later sequence.
+        if self._text is not None and self._pending is not None:
+            while used < capacity - 8:
+                if self._pending_fill is not None:
+                    row, self._pending_fill = self._pending_fill, None
+                else:
+                    row = self._next_text_row()
+                tokens, _ = row
+                if used + len(tokens) > capacity:
+                    self._pending_fill = row
+                    break
+                rows.append(row)
+                used += len(tokens)
+                self.rows_consumed += 1
         example = pack_rows(rows, spec)
         loss_mask = example["loss_mask"]
         vision_mask = example["vision_mask"]

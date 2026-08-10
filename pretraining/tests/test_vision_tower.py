@@ -339,3 +339,70 @@ def test_pack_rows_vision_mask_marks_image_row_labels():
     assert not flipped["vision_mask"][:3].any()
     assert list(flipped["vision_mask"][3:9]) == [1.0] * 6
     assert not flipped["vision_mask"][9:].any()
+
+
+def _bare_packer(spec, next_row, next_text_row):
+    """A MixedVisionTextIterator without its streams: packing logic only."""
+    from yxtpu_pretrain.runtime.vision_data import MixedVisionTextIterator
+
+    packer = object.__new__(MixedVisionTextIterator)
+    packer.spec = spec
+    packer._pending = None
+    packer._pending_fill = None
+    packer._text = object()  # non-None enables budget-aware fill
+    for counter in (
+        "rows_consumed",
+        "rows_skipped",
+        "text_rows",
+        "vision_rows",
+        "sequences_packed",
+        "tokens_total",
+        "tokens_padding",
+        "tokens_placeholder",
+        "images_packed",
+        "loss_tokens_vision",
+        "loss_tokens_text",
+    ):
+        setattr(packer, counter, 0)
+    packer._next_row = next_row
+    packer._next_text_row = next_text_row
+    return packer
+
+
+def test_budget_aware_fill_replaces_padding_with_text_rows():
+    spec = VisionBatchSpec(
+        sequence_length=64,
+        visual_tokens=4,
+        image_size=8,
+        placeholder_id=250,
+        pad_id=0,
+        eos_id=1,
+        max_images=1,
+    )
+    image = np.full((8, 8, 3), 0.5, dtype=np.float32)
+    vision_tokens = [250, 250, 250, 250, 5, 6, 7, 1]  # 8 tokens, 1 image
+    text_tokens = [9] * 11 + [1]  # 12 tokens
+
+    packer = _bare_packer(
+        spec,
+        next_row=lambda: (list(vision_tokens), image),
+        next_text_row=lambda: (list(text_tokens), None),
+    )
+    example = packer._next_example()
+    # The second vision draw hits the 1-image budget with 8/65 tokens used;
+    # without fill the remaining ~87% of the sequence would be padding. The
+    # fill packs text rows up to the margin: 8 + 4x12 = 56, and the fifth
+    # text draw (68 > 65) is stashed rather than dropped.
+    assert int((example["input_ids"] == 250).sum()) == 4  # one image only
+    padding = int((example["segment_ids"] == 0).sum())
+    assert padding <= 12, f"fill left {padding} padded positions"
+    assert packer._pending is not None and packer._pending[1] is not None
+    assert packer._pending_fill is not None and packer._pending_fill[1] is None
+    # Composition counters see the filled rows.
+    assert packer.loss_tokens_text > packer.loss_tokens_vision > 0
+
+    # The stashed rows open the next sequence: its image budget is available
+    # again, so the pending vision row packs first, then the stashed fill row.
+    second = packer._next_example()
+    assert int((second["input_ids"] == 250).sum()) == 4
+    assert int((second["segment_ids"] == 0).sum()) <= 12
