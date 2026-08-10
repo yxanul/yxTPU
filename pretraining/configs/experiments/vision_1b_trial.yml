@@ -1,15 +1,18 @@
 # 25B-token vision+text trial: the 1B hybrid with a from-scratch ViT-S
 # tower, jointly trained from step 0 on FineVisionMax + ClimbMix mixed
 # packing at seq 4096 (PDB 4 -> 524,288 tokens/step on v4-64; measured
-# 342k tok/s -> ~21 h). token_budget stops the run during step 48,000;
-# steps carries margin. Launch overrides supply the schedule (constant
-# LR with warmup 2,000 and a terminal cosine anneal over the final
-# 4,800 steps to zero). Checkpoints every 4,000 steps to per-host local
-# disks; the mixed stream position is not serializable, so restores are
-# weights+optimizer only and the stream restarts.
+# 1,508 ms/step on the 30-step smoke -> ~21 h). The step bound is the
+# stop: in mixed batches tokens_seen counts SUPERVISED tokens (~56% of
+# positions), so a processed-token budget would never bind - 48,000
+# steps x 524,288 = 25.17B processed tokens. Launch overrides supply
+# the schedule (constant LR with warmup 2,000 and a terminal cosine
+# anneal over the final 4,800 steps to zero). Checkpoints every 4,000
+# steps (~7.5 GB each) to per-host local disks; the mixed stream
+# position is not serializable, so restores are weights+optimizer only
+# and the stream restarts.
 name: vision_1b_trial
-steps: 48200
-token_budget: 25165824000
+steps: 48000
+token_budget: null
 gradient_accumulation_steps: 1
 run_dir: runs
 seed: 42
@@ -61,7 +64,11 @@ model_overrides:
     max_images_per_sequence: 4
     # Row-level Bernoulli; the supervision mix it induces is measured as
     # data/vision_loss_token_share - retune there, not here blindly.
-    p_text: 0.3
+    # MEASURED with budget-aware fill (64-sequence host run, 2026-08-10):
+    # p_text 0.45 -> share 0.378, pad_fraction 0.041, 2.3 images/seq;
+    # 0.55 -> share 0.321, pad 0.065. (Without fill, 0.3 gave share 0.68
+    # at pad 0.279.)
+    p_text: 0.45
   attention:
     output_gate: true
 data_overrides:
