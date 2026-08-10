@@ -40,6 +40,7 @@ from yxtpu_pretrain.config import VisionConfig
 from yxtpu_pretrain.layers.roles import (
     ParamRole,
     declare_dense_kernel,
+    declare_mlp,
     declare_norm,
     declare_parameter,
 )
@@ -119,8 +120,7 @@ class VisionBlock(nnx.Module):
             model_mode=MODEL_MODE_TRAIN,
             rngs=rngs,
         )
-        declare_dense_kernel(self.mlp.wi, ParamRole.VIT_MATRIX)
-        declare_dense_kernel(self.mlp.wo, ParamRole.VIT_MATRIX)
+        declare_mlp(self.mlp, ParamRole.VIT_MATRIX, ParamRole.VIT_MATRIX)
 
     def __call__(self, tokens):
         # tokens: [rows, patches, dim]; bidirectional attention, fp32 softmax.

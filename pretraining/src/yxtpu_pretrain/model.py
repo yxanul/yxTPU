@@ -22,6 +22,7 @@ from yxtpu_pretrain.layers.nope_gqa import NoPEGQA
 from yxtpu_pretrain.layers.roles import (
     ParamRole,
     declare_dense_kernel,
+    declare_mlp,
     declare_norm,
     declare_parameter,
 )
@@ -170,8 +171,7 @@ class HybridLayer(nnx.Module):
             model_mode=MODEL_MODE_TRAIN,
             rngs=rngs,
         )
-        declare_dense_kernel(self.mlp.wi, ParamRole.MLP_INPUT)
-        declare_dense_kernel(self.mlp.wo, ParamRole.MLP_OUTPUT)
+        declare_mlp(self.mlp, ParamRole.MLP_INPUT, ParamRole.MLP_OUTPUT)
         if config.model.residual_policy == "block_attnres":
             self.mixer_read = DepthAttnRead(
                 model.emb_dim,

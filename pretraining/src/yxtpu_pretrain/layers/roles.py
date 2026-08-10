@@ -132,3 +132,20 @@ def declare_dense_kernel(
 def declare_norm(module) -> None:
     if module.scale is not None:
         module.scale = declare_parameter(module.scale, ParamRole.NORM_SCALE)
+
+
+def declare_mlp(mlp, input_role: ParamRole, output_role: ParamRole) -> None:
+    """Declares an MlpBlock's kernels under either fusion layout.
+
+    Fused SwiGLU exposes one ``wi``; the unfused layout exposes one
+    ``wi_<i>`` per activation branch."""
+    if getattr(mlp, "wi", None) is not None:
+        declare_dense_kernel(mlp.wi, input_role)
+    else:
+        index = 0
+        while getattr(mlp, f"wi_{index}", None) is not None:
+            declare_dense_kernel(getattr(mlp, f"wi_{index}"), input_role)
+            index += 1
+        if index == 0:
+            raise ValueError("MlpBlock exposes neither wi nor wi_0")
+    declare_dense_kernel(mlp.wo, output_role)
