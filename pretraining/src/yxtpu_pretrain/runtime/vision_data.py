@@ -20,13 +20,20 @@ Q/A text) and plain-text rows (a ClimbMix-class corpus, one truncated
 document per row) are interleaved by a per-shard RNG at ``p_text`` and
 greedily packed into fixed-length sequences with per-row segments and
 restarting positions — the same whole-row packing contract the SFT stage
-uses, so the KDA state resets and cross-row attention is masked at every
-boundary by the existing model machinery.
+uses. Segment ids mask cross-row GQA attention and zero padded
+positions, but the KDA recurrent state is NOT reset at row boundaries:
+it only decays, with per-token log decay bounded by the safe gate, so a
+bounded channel-dependent carryover crosses each boundary (fast channels
+forget within tokens; slow channels can carry for hundreds). Loss
+masking still confines every label to its own row.
 
 Loss falls only on real text predicted from within its own row: row
 boundaries, placeholder labels, and padding are masked. Images ride in a
 fixed ``[max_images, H, W, 3]`` slot per sequence, blank-padded; a
 sequence of pure text simply never gathers the tower's output.
+``vision_mask`` marks (on label positions, like ``loss_mask``) the
+tokens belonging to image-carrying rows, so the loss can be split by
+modality on device.
 """
 
 from __future__ import annotations
@@ -73,12 +80,14 @@ def pack_rows(rows, spec: VisionBatchSpec):
     token count must not exceed ``sequence_length + 1`` and whose image
     count must not exceed ``max_images``."""
     flat, segments, positions, images = [], [], [], []
+    has_image = np.zeros(len(rows) + 1, dtype=bool)
     for index, (tokens, image) in enumerate(rows, start=1):
         flat.extend(tokens)
         segments.extend([index] * len(tokens))
         positions.extend(range(len(tokens)))
         if image is not None:
             images.append(image)
+            has_image[index] = True
     capacity = spec.sequence_length + 1
     if len(flat) > capacity:
         raise ValueError("packed rows exceed the sequence budget")
@@ -97,6 +106,7 @@ def pack_rows(rows, spec: VisionBatchSpec):
         & (segment_label > 0)
         & (labels != spec.placeholder_id)
     ).astype(np.float32)
+    vision_mask = has_image[segment_label].astype(np.float32)
 
     image_block = np.zeros(
         (spec.max_images, spec.image_size, spec.image_size, 3), dtype=np.float32
@@ -110,7 +120,52 @@ def pack_rows(rows, spec: VisionBatchSpec):
         "segment_ids": segment_in,
         "positions": positions[:-1],
         "images": image_block,
+        "vision_mask": vision_mask,
     }
+
+
+_COUNTER_KEYS = (
+    "rows_consumed",
+    "rows_skipped",
+    "vision_rows",
+    "text_rows",
+    "sequences_packed",
+    "tokens_total",
+    "tokens_padding",
+    "tokens_placeholder",
+    "images_packed",
+    "loss_tokens_vision",
+    "loss_tokens_text",
+)
+
+
+def _derived_stats(counters: dict[str, int], max_images: int) -> dict[str, float]:
+    """Raw packing counters plus the ratios that describe batch composition.
+
+    The ratios are the knobs' instruments: ``vision_loss_token_share`` is the
+    realized modality mix the loss actually sees (``p_text`` is a row-level
+    Bernoulli, so the token-level mix must be measured, not assumed);
+    ``pad_fraction`` exposes packing waste (padding still costs compute);
+    ``image_slot_utilization`` says whether ``max_images`` binds."""
+    stats: dict[str, float] = {key: float(counters[key]) for key in _COUNTER_KEYS}
+    sequences = counters["sequences_packed"]
+    tokens = counters["tokens_total"]
+    loss_total = counters["loss_tokens_vision"] + counters["loss_tokens_text"]
+    if tokens:
+        stats["pad_fraction"] = counters["tokens_padding"] / tokens
+        stats["visual_token_fraction"] = counters["tokens_placeholder"] / tokens
+    if sequences:
+        stats["images_per_sequence"] = counters["images_packed"] / sequences
+        stats["image_slot_utilization"] = counters["images_packed"] / (
+            sequences * max_images
+        )
+        stats["rows_per_sequence"] = counters["rows_consumed"] / sequences
+    if loss_total:
+        stats["vision_loss_token_share"] = counters["loss_tokens_vision"] / loss_total
+    rows_seen = counters["rows_consumed"] + counters["rows_skipped"]
+    if rows_seen:
+        stats["row_skip_rate"] = counters["rows_skipped"] / rows_seen
+    return stats
 
 
 class MixedVisionTextIterator:
@@ -183,6 +238,13 @@ class MixedVisionTextIterator:
         self.rows_skipped = 0
         self.text_rows = 0
         self.vision_rows = 0
+        self.sequences_packed = 0
+        self.tokens_total = 0
+        self.tokens_padding = 0
+        self.tokens_placeholder = 0
+        self.images_packed = 0
+        self.loss_tokens_vision = 0
+        self.loss_tokens_text = 0
 
     def _next_vision_row(self):
         spec = self.spec
@@ -263,7 +325,32 @@ class MixedVisionTextIterator:
             self.rows_consumed += 1
             if used >= capacity - 8:
                 break
-        return pack_rows(rows, spec)
+        example = pack_rows(rows, spec)
+        loss_mask = example["loss_mask"]
+        vision_mask = example["vision_mask"]
+        self.sequences_packed += 1
+        self.tokens_total += int(example["input_ids"].size)
+        self.tokens_padding += int((example["segment_ids"] == 0).sum())
+        self.tokens_placeholder += int((example["input_ids"] == spec.placeholder_id).sum())
+        self.images_packed += image_count
+        self.loss_tokens_vision += int((loss_mask * vision_mask).sum())
+        self.loss_tokens_text += int((loss_mask * (1.0 - vision_mask)).sum())
+        return example
+
+    def raw_counters(self) -> dict[str, int]:
+        return {key: int(getattr(self, key)) for key in _COUNTER_KEYS}
+
+    @property
+    def stats(self) -> dict[str, float]:
+        return _derived_stats(self.raw_counters(), self.spec.max_images)
+
+    def get_state(self):
+        """Checkpoint contract: the mixed stream position is not resumable.
+
+        ``CheckpointIO.save`` catches this and stores the unresumable
+        sentinel, so restores keep weights+optimizer and restart the
+        stream - the same policy as text streaming."""
+        raise RuntimeError("mixed vision+text stream position is not resumable")
 
     def __iter__(self):
         return self
@@ -317,6 +404,17 @@ class PooledMixedIterator:
             sum(source.vision_rows for source in self._sources),
             sum(source.text_rows for source in self._sources),
         )
+
+    @property
+    def stats(self) -> dict[str, float]:
+        totals = {key: 0 for key in _COUNTER_KEYS}
+        for source in self._sources:
+            for key, value in source.raw_counters().items():
+                totals[key] += value
+        return _derived_stats(totals, self._sources[0].spec.max_images)
+
+    def get_state(self):
+        raise RuntimeError("mixed vision+text stream position is not resumable")
 
     def __iter__(self):
         return self

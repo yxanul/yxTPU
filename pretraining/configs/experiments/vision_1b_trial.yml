@@ -1,0 +1,70 @@
+# 25B-token vision+text trial: the 1B hybrid with a from-scratch ViT-S
+# tower, jointly trained from step 0 on FineVisionMax + ClimbMix mixed
+# packing at seq 4096 (PDB 4 -> 524,288 tokens/step on v4-64; measured
+# 342k tok/s -> ~21 h). token_budget stops the run during step 48,000;
+# steps carries margin. Launch overrides supply the schedule (constant
+# LR with warmup 2,000 and a terminal cosine anneal over the final
+# 4,800 steps to zero). Checkpoints every 4,000 steps to per-host local
+# disks; the mixed stream position is not serializable, so restores are
+# weights+optimizer only and the stream restarts.
+name: vision_1b_trial
+steps: 48200
+token_budget: 25165824000
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: false
+prefetch_batches: 8
+checkpoint:
+  enabled: true
+  destination: /home/a1111/yxtpu_ckpts
+  save_interval: 4000
+  async_save: false
+  keep: 3
+  resume: true
+  allow_weights_only_resume: true
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: vision-1b-trial
+  tags: [v4-64, vision, 1b, finevisionmax, climbmix]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 500
+harness_eval:
+  enabled: true
+  interval: 4800
+  tasks:
+    - hellaswag
+    - piqa
+    - arc_easy
+    - arc_challenge
+    - sciq
+    - boolq
+    - openbookqa
+    - copa
+    - commonsense_qa
+    - lambada_openai
+  batch_size_per_device: 1
+  num_fewshot: 0
+  limit: null
+  use_cache: true
+model_overrides:
+  vision:
+    enabled: true
+    dataset_name: HuggingFaceM4/FineVisionMax
+    max_images_per_sequence: 4
+    # Row-level Bernoulli; the supervision mix it induces is measured as
+    # data/vision_loss_token_share - retune there, not here blindly.
+    p_text: 0.3
+  attention:
+    output_gate: true
+data_overrides:
+  sequence_length: 4096
+  per_device_batch_size: 4
+  eval_interval: 500

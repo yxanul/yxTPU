@@ -49,7 +49,7 @@ from yxtpu_pretrain.runtime.vision_data import (
     PooledMixedIterator,
     VisionBatchSpec,
 )
-from yxtpu_pretrain.train import _device_batch, _make_train_step
+from yxtpu_pretrain.train import _device_batch, _make_train_step, _vision_metrics
 
 
 class _NoIterator:
@@ -233,6 +233,27 @@ def main() -> int:
                 "text_rows": text_rows,
                 **{key: round(value, 6) for key, value in metrics.items()},
             }
+            vision_derived = _vision_metrics(metrics)
+            if vision_derived is not None:
+                record.update(
+                    {key: round(value, 6) for key, value in vision_derived.items()}
+                )
+            record.update(
+                {
+                    f"data_{key}": round(value, 6)
+                    for key, value in pool.stats.items()
+                    if key
+                    in (
+                        "pad_fraction",
+                        "visual_token_fraction",
+                        "vision_loss_token_share",
+                        "images_per_sequence",
+                        "image_slot_utilization",
+                        "rows_per_sequence",
+                        "row_skip_rate",
+                    )
+                }
+            )
             records.append(record)
             if jax.process_index() == 0:
                 print(json.dumps(record), flush=True)

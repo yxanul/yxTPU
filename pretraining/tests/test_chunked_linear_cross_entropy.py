@@ -103,6 +103,62 @@ def test_fully_masked_batch_returns_zero_loss_and_grads():
     assert all(bool(jnp.all(g == 0)) for g in grads)
 
 
+@pytest.mark.parametrize("block_tokens", (4, 16))
+def test_split_mask_is_reporting_only_and_partitions_the_sum(block_tokens):
+    x, labels, mask, weights = _fixture()
+    split = (jax.random.uniform(jax.random.key(9), labels.shape) > 0.5).astype(
+        jnp.float32
+    )
+
+    def unsplit(x_value, weight_value):
+        loss, _ = chunked_linear_cross_entropy(
+            x_value, labels, mask, weight_value, block_tokens=block_tokens
+        )
+        return loss
+
+    def with_split(x_value, weight_value):
+        loss, _, sums = chunked_linear_cross_entropy(
+            x_value,
+            labels,
+            mask,
+            weight_value,
+            block_tokens=block_tokens,
+            split_mask=split,
+        )
+        return loss, sums
+
+    (loss, sums), grads = jax.value_and_grad(
+        with_split, argnums=(0, 1), has_aux=True
+    )(x, weights)
+    base_loss, base_grads = jax.value_and_grad(unsplit, argnums=(0, 1))(x, weights)
+    # The differentiated loss and both gradients are the unsplit ones up to
+    # XLA reduction scheduling (the extra scan-carry element shifts fusion by
+    # ~1 ULP): the split is a reporting-only reduction sharing the block pass.
+    np.testing.assert_allclose(loss, base_loss, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(grads[0], base_grads[0], rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(grads[1], base_grads[1], rtol=1e-6, atol=1e-7)
+    # Complementary splits partition the total sum.
+    _, _, complement = chunked_linear_cross_entropy(
+        x, labels, mask, weights, block_tokens=block_tokens, split_mask=1.0 - split
+    )
+    np.testing.assert_allclose(
+        sums["loss_sum"] + complement["loss_sum"],
+        sums["total_loss_sum"],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert sums["token_count"] == jnp.sum(mask * split)
+    # And the split sum matches the reference per-token masked sum.
+    logits = jnp.einsum("bth,hv->btv", x, weights, preferred_element_type=jnp.float32)
+    safe = jnp.where(mask > 0, labels, 0)
+    per_token = jax.nn.logsumexp(logits, axis=-1) - jnp.take_along_axis(
+        logits, safe[..., None], axis=-1
+    )[..., 0]
+    np.testing.assert_allclose(
+        sums["loss_sum"], jnp.sum(per_token * mask * split), rtol=1e-5, atol=1e-5
+    )
+
+
 def test_indivisible_block_size_fails_closed():
     x, labels, mask, weights = _fixture()
     try:

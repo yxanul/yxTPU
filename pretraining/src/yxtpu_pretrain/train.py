@@ -29,6 +29,7 @@ from yxtpu_pretrain.model import (
     HybridLanguageModel,
     attention_logit_intermediates,
     count_parameters,
+    vision_probe_intermediates,
 )
 from yxtpu_pretrain.optimizers import (
     apply_gqa_muonclip,
@@ -51,7 +52,30 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
         record_max_logits=record_max_logits,
     )
     weights = batch["loss_mask"].astype(jnp.float32)
-    if model.config.model.loss.implementation == "chunked":
+    # Per-modality loss split: vision_mask (mixed vision+text batches only)
+    # marks label tokens of image-carrying rows; the chunked loss reduces both
+    # splits inside the same block pass. Reporting only — the differentiated
+    # loss is unchanged.
+    vision_mask = batch.get("vision_mask")
+    use_split = (
+        vision_mask is not None
+        and model.config.model.loss.implementation == "chunked"
+    )
+    vision_aux = {}
+    if use_split:
+        loss, token_count, split = chunked_linear_cross_entropy(
+            hidden_states,
+            batch["labels"],
+            weights,
+            model.output_projection_kernel(hidden_states.dtype),
+            block_tokens=model.config.model.loss.block_tokens,
+            split_mask=vision_mask,
+        )
+        vision_aux["vision_loss_sum"] = split["loss_sum"]
+        vision_aux["vision_token_count"] = split["token_count"]
+        vision_aux["text_loss_sum"] = split["total_loss_sum"] - split["loss_sum"]
+        vision_aux["text_token_count"] = token_count - split["token_count"]
+    elif model.config.model.loss.implementation == "chunked":
         loss, token_count = chunked_linear_cross_entropy(
             hidden_states,
             batch["labels"],
@@ -86,7 +110,75 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
             dtype=jnp.float32,
         )
     )
-    return loss, {"max_logits": logits_max, "tokens": token_count}
+    if "images" in batch and model.vision_probe is not None:
+        probe = vision_probe_intermediates(model)
+        vision_aux["visual_embed_rms"] = probe[0]
+        vision_aux["text_embed_rms"] = probe[1]
+        vision_aux["visual_embed_max_abs"] = probe[2]
+        # Final-hidden RMS split by position modality: the depth-integrated
+        # health of visual positions vs text positions after all cycles.
+        placeholder = (
+            batch["input_ids"] == model.config.model.vision.placeholder_token_id
+        )
+        nonpad = batch["segment_ids"] != 0
+        squares = jnp.mean(
+            jnp.square(jax.lax.stop_gradient(hidden_states).astype(jnp.float32)),
+            axis=-1,
+        )
+
+        def masked_rms(mask):
+            total = jnp.sum(jnp.where(mask, squares, 0.0))
+            return jnp.sqrt(total / jnp.maximum(jnp.sum(mask), 1))
+
+        vision_aux["hidden_visual_rms"] = masked_rms(placeholder & nonpad)
+        vision_aux["hidden_text_rms"] = masked_rms((~placeholder) & nonpad)
+    return loss, {"max_logits": logits_max, "tokens": token_count, **vision_aux}
+
+
+def _subtree_l2norm(gradients, needle: str):
+    """L2 norm over gradient leaves whose state path contains ``needle``."""
+    total = jnp.zeros((), jnp.float32)
+    for path, variable in nnx.to_flat_state(gradients):
+        if needle in path:
+            value = getattr(variable, "value", variable)
+            total = total + jnp.sum(jnp.square(jnp.asarray(value).astype(jnp.float32)))
+    return jnp.sqrt(total)
+
+
+def _vision_metrics(host_metrics) -> dict[str, float] | None:
+    """Derives the per-step vision group from host metrics, or None.
+
+    The train step emits split SUMS (exact under gradient accumulation:
+    sums-of-means divide out); the ratios are formed here on the host."""
+    if "vision_loss_sum" not in host_metrics:
+        return None
+    vision_tokens = float(host_metrics["vision_token_count"])
+    text_tokens = float(host_metrics["text_token_count"])
+    derived = {
+        "vision_loss": float(host_metrics["vision_loss_sum"]) / max(vision_tokens, 1.0),
+        "text_loss": float(host_metrics["text_loss_sum"]) / max(text_tokens, 1.0),
+        "vision_loss_tokens": vision_tokens,
+        "text_loss_tokens": text_tokens,
+    }
+    for key in (
+        "visual_embed_rms",
+        "text_embed_rms",
+        "visual_embed_max_abs",
+        "hidden_visual_rms",
+        "hidden_text_rms",
+    ):
+        if key in host_metrics:
+            derived[key] = float(host_metrics[key])
+    if derived.get("text_embed_rms"):
+        derived["embed_rms_ratio"] = (
+            derived["visual_embed_rms"] / derived["text_embed_rms"]
+        )
+    if "vit_grad_norm" in host_metrics:
+        vit = float(host_metrics["vit_grad_norm"])
+        total = float(host_metrics["grad_norm"])
+        derived["vit_grad_norm"] = vit
+        derived["lm_grad_norm"] = math.sqrt(max(total * total - vit * vit, 0.0))
+    return derived
 
 
 def _make_train_step(config: ResolvedConfig, loss_fn=None):
@@ -153,6 +245,11 @@ def _make_train_step(config: ResolvedConfig, loss_fn=None):
                     continue
                 extra_sums[key] = extra_sums.get(key, 0.0) + value
         gradients = jax.tree.map(lambda value: value / accumulate, accumulated_grads)
+        vit_grad_norm = (
+            _subtree_l2norm(gradients, "vision_tower")
+            if config.model.vision.enabled
+            else None
+        )
         state.apply_gradients(gradients)
         clip_metrics = None
         if use_clip:
@@ -167,6 +264,8 @@ def _make_train_step(config: ResolvedConfig, loss_fn=None):
             "tokens": token_sum,
             "grad_norm": max_utils.l2norm_pytree(gradients),
         }
+        if vit_grad_norm is not None:
+            metrics["vit_grad_norm"] = vit_grad_norm
         metrics.update(
             {key: value / accumulate for key, value in extra_sums.items()}
         )
@@ -212,6 +311,7 @@ def _make_diagnostics_step():
                 batch["input_ids"],
                 decoder_segment_ids=batch["segment_ids"],
                 decoder_positions=batch["positions"],
+                images=batch["images"] if "images" in batch else None,
                 record_max_logits=True,
             )
             weights = batch["loss_mask"].astype(jnp.float32)
@@ -430,6 +530,68 @@ def _process_batch_sizes(
     return process_update_batch, process_microbatch
 
 
+def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
+    """Builds the packed mixed vision+text stream for the main loop.
+
+    Selected when ``model.vision.enabled`` and ``model.vision.dataset_name``
+    are both set: vision rows stream from the vision corpus, text rows from
+    ``data``'s corpus at ``vision.p_text``, packed with per-row segments.
+    File-level sharding splits both streams disjointly across
+    ``process_count * producer_threads`` producers."""
+    from yxtpu_pretrain.runtime.data import load_fast_tokenizer
+    from yxtpu_pretrain.runtime.vision_data import (
+        MixedVisionTextIterator,
+        PooledMixedIterator,
+        VisionBatchSpec,
+    )
+
+    vision = config.model.vision
+    tokenizer = load_fast_tokenizer(
+        config.data.tokenizer, padded_vocab_size=config.model.vocab_size
+    )
+    spec = VisionBatchSpec(
+        sequence_length=config.data.sequence_length,
+        visual_tokens=vision.visual_tokens_per_image,
+        image_size=vision.image_size,
+        placeholder_id=vision.placeholder_token_id,
+        pad_id=vision.pad_token_id,
+        eos_id=vision.eos_token_id,
+        max_images=vision.max_images_per_sequence,
+    )
+    threads = max(1, vision.producer_threads)
+
+    def make_source(thread_index: int) -> MixedVisionTextIterator:
+        return MixedVisionTextIterator(
+            tokenizer=tokenizer,
+            spec=spec,
+            batch_size=process_batch,
+            vision_dataset=vision.dataset_name,
+            text_dataset=config.data.dataset_name if vision.p_text > 0 else None,
+            text_field=config.data.text_field,
+            p_text=vision.p_text,
+            text_row_tokens=vision.text_row_tokens,
+            min_visual_dependency=vision.min_visual_dependency,
+            shuffle_seed=config.data.shuffle_seed,
+            shard_index=jax.process_index() * threads + thread_index,
+            shard_count=jax.process_count() * threads,
+        )
+
+    iterator = PooledMixedIterator(
+        make_source, threads=threads, batch_size=process_batch
+    )
+    iterator.metadata = {
+        "pipeline": "mixed_vision_text",
+        "vision_dataset": vision.dataset_name,
+        "text_dataset": config.data.dataset_name,
+        "p_text": vision.p_text,
+        "text_row_tokens": vision.text_row_tokens,
+        "max_images_per_sequence": vision.max_images_per_sequence,
+        "min_visual_dependency": vision.min_visual_dependency,
+        "producer_threads": threads,
+    }
+    return iterator
+
+
 def _learning_rate(config: ResolvedConfig, step: int) -> float:
     """Host-side mirror of the Optax schedule, avoiding a TPU dispatch for logging."""
     optimizer = config.optimizer
@@ -479,13 +641,16 @@ def run(
             }
         )
     )
-    data_iterator = create_data_iterator(
-        process_data,
-        global_batch_size=train_process_batch,
-        vocab_size=config.model.vocab_size,
-        process_index=jax.process_index(),
-        process_count=jax.process_count(),
-    )
+    if config.model.vision.enabled and config.model.vision.dataset_name:
+        data_iterator = _create_mixed_vision_iterator(config, train_process_batch)
+    else:
+        data_iterator = create_data_iterator(
+            process_data,
+            global_batch_size=train_process_batch,
+            vocab_size=config.model.vocab_size,
+            process_index=jax.process_index(),
+            process_count=jax.process_count(),
+        )
     if config.experiment.prefetch_batches > 1:
         data_iterator = _PrefetchedIterator(
             data_iterator, config.experiment.prefetch_batches - 1
@@ -697,32 +862,38 @@ def run(
                     "min_scale": host_metrics["muonclip_min_scale"].tolist(),
                     "clipped_heads": host_metrics["muonclip_clipped_heads"].tolist(),
                 }
+            vision_metrics = _vision_metrics(host_metrics)
+            if vision_metrics is not None:
+                record["vision"] = vision_metrics
             metrics_writer.write(record)
             emit(record)
             if step % config.experiment.log_interval == 0:
-                tracker.log(
-                    {
-                        "train": {
-                            "loss": loss,
-                            "perplexity": math.exp(min(loss, 80.0)),
-                        },
-                        "performance": {
-                            "tokens_per_second": throughput,
-                            "wall_tokens_per_second": record["wall_tokens_per_second"],
-                            "step_ms": elapsed * 1_000,
-                            "data_wait_ms": record["data_wait_ms"],
-                            "host_to_device_ms": record["host_to_device_ms"],
-                        },
-                        "data": _data_pipeline_stats(data_iterator),
-                        "optimizer": {
-                            "grad_norm": grad_norm,
-                            "learning_rate": record["learning_rate"],
-                        },
-                        "stability": {
-                            "loss_finite": float(math.isfinite(loss)),
-                            "grad_norm_finite": float(math.isfinite(grad_norm)),
-                        },
+                log_groups = {
+                    "train": {
+                        "loss": loss,
+                        "perplexity": math.exp(min(loss, 80.0)),
                     },
+                    "performance": {
+                        "tokens_per_second": throughput,
+                        "wall_tokens_per_second": record["wall_tokens_per_second"],
+                        "step_ms": elapsed * 1_000,
+                        "data_wait_ms": record["data_wait_ms"],
+                        "host_to_device_ms": record["host_to_device_ms"],
+                    },
+                    "data": _data_pipeline_stats(data_iterator),
+                    "optimizer": {
+                        "grad_norm": grad_norm,
+                        "learning_rate": record["learning_rate"],
+                    },
+                    "stability": {
+                        "loss_finite": float(math.isfinite(loss)),
+                        "grad_norm_finite": float(math.isfinite(grad_norm)),
+                    },
+                }
+                if vision_metrics is not None:
+                    log_groups["vision"] = vision_metrics
+                tracker.log(
+                    log_groups,
                     step=step,
                     tokens_seen=tokens_seen,
                 )

@@ -84,6 +84,22 @@ def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
     declare_norm(layer.output_norm)
 
 
+def _embedding_probe(hidden_states, placeholder_mask, segment_ids):
+    """[visual_rms, text_rms, visual_max_abs] over post-splice embeddings."""
+    values = hidden_states.astype(jnp.float32)
+    squares = jnp.mean(jnp.square(values), axis=-1)
+    nonpad = segment_ids != 0
+    visual = placeholder_mask & nonpad
+    text = (~placeholder_mask) & nonpad
+
+    def masked_rms(mask):
+        total = jnp.sum(jnp.where(mask, squares, 0.0))
+        return jnp.sqrt(total / jnp.maximum(jnp.sum(mask), 1))
+
+    visual_max = jnp.max(jnp.where(visual[..., None], jnp.abs(values), 0.0))
+    return jnp.stack([masked_rms(visual), masked_rms(text), visual_max])
+
+
 def _remat_policy(name: str, save_kda_residuals: bool):
     if name == "full":
         return None
@@ -404,8 +420,15 @@ class HybridLanguageModel(nnx.Module):
                 mesh=mesh,
                 rngs=rngs.fork(),
             )
+            # Post-splice embedding health, written on every vision forward:
+            # [visual_rms, text_rms, visual_max_abs]. The visual/text RMS
+            # ratio is the canonical early-warning for a from-scratch tower
+            # drifting off the language embedding scale (the projector norm
+            # constrains its input, not its output).
+            self.vision_probe = nnx.Intermediate(jnp.zeros((3,), jnp.float32))
         else:
             self.vision_tower = None
+            self.vision_probe = None
         self.cycles = nnx_scan.create_scanned_layers(
             lambda cycle_rngs: HybridCycle(
                 config=config,
@@ -531,6 +554,10 @@ class HybridLanguageModel(nnx.Module):
                 visual,
                 self.config.model.vision.placeholder_token_id,
             )
+            placeholder_mask = token_ids == self.config.model.vision.placeholder_token_id
+            self.vision_probe.value = jax.lax.stop_gradient(
+                _embedding_probe(hidden_states, placeholder_mask, decoder_segment_ids)
+            )
         hidden_states = nn.with_logical_constraint(hidden_states, ACTIVATION_LOGICAL_AXES)
         if self.final_read is not None:
             # Block AttnRes: slot 0 is the token embedding; each cycle writes
@@ -623,3 +650,9 @@ def count_parameters(model: nnx.Module) -> int:
 def attention_logit_intermediates(model: HybridLanguageModel):
     """Returns `[cycles,batch,query_heads]` maxima after a MuonClip forward."""
     return model.cycles.layer_3.mixer.max_logits.value
+
+
+def vision_probe_intermediates(model: HybridLanguageModel):
+    """Returns `[visual_rms, text_rms, visual_max_abs]` from the last vision
+    forward (zeros before the first image batch)."""
+    return model.vision_probe.value

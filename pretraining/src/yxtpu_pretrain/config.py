@@ -112,6 +112,27 @@ class VisionConfig(StrictModel):
     pixel_shuffle: int = 2
     placeholder_token_id: int = 49150
     max_images_per_sequence: int = 1
+    # Mixed vision+text streaming, consumed by the main training loop when
+    # ``enabled`` and ``dataset_name`` are both set: the loop then streams
+    # this vision corpus interleaved with ``data``'s text corpus through the
+    # packed mixed pipeline instead of ``create_data_iterator``. The stream
+    # position is not resumable, so checkpoints degrade to weights+optimizer
+    # exactly like text streaming (``allow_weights_only_resume``).
+    dataset_name: str | None = None
+    # Probability a packed row is a plain-text document. This is a row-level
+    # Bernoulli, NOT the supervision mix: a vision row carries mostly
+    # loss-free placeholder tokens while a text row is almost fully
+    # supervised. The realized mix is measured, not assumed - tune this
+    # against data/vision_loss_token_share.
+    p_text: float = 0.3
+    text_row_tokens: int = 1024
+    min_visual_dependency: int = 0
+    # Keep at 1: fsspec's cached HTTP filesystem is not thread-safe, and one
+    # producer per host sustains 1B-scale step times.
+    producer_threads: int = 1
+    # Stream framing ids for the packed contract (yx49k: pad doubles as eos).
+    pad_token_id: int = 49119
+    eos_token_id: int = 49119
 
     @property
     def patch_grid(self) -> int:
@@ -138,6 +159,10 @@ class VisionConfig(StrictModel):
             raise ValueError("encoder_dim must be divisible by encoder_heads")
         if self.max_images_per_sequence < 1:
             raise ValueError("max_images_per_sequence must be positive")
+        if not 0.0 <= self.p_text <= 1.0:
+            raise ValueError("vision.p_text must be in [0, 1]")
+        if self.producer_threads < 1:
+            raise ValueError("vision.producer_threads must be positive")
         return self
 
 

@@ -46,8 +46,12 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def _block_loss_and_grads(x_block, labels_block, mask_block, weights):
-    """Loss sum plus both gradients for one [B, block] token slab, in fp32."""
+def _block_loss_and_grads(x_block, labels_block, mask_block, weights, split_block=None):
+    """Loss sum plus both gradients for one [B, block] token slab, in fp32.
+
+    ``split_block`` (optional) additionally reduces the same per-token losses
+    under ``mask_block * split_block`` — a reporting-only sum sharing the
+    block's logits, so the split costs no extra GEMM."""
     logits = jnp.einsum(
         "bth,hv->btv",
         x_block,
@@ -62,6 +66,9 @@ def _block_loss_and_grads(x_block, labels_block, mask_block, weights):
     target_logits = jnp.take_along_axis(logits, safe_labels[..., None], axis=-1)
     per_token = (log_sum_exp - target_logits)[..., 0]
     loss_sum = jnp.sum(per_token * mask_block, dtype=jnp.float32)
+    split_sum = None
+    if split_block is not None:
+        split_sum = jnp.sum(per_token * mask_block * split_block, dtype=jnp.float32)
 
     # dL/dlogits for the masked SUM: (softmax - onehot) * mask.
     probabilities = jnp.exp(shifted) / sum_exp
@@ -80,7 +87,7 @@ def _block_loss_and_grads(x_block, labels_block, mask_block, weights):
         dlogits.astype(x_block.dtype),
         preferred_element_type=jnp.float32,
     )
-    return loss_sum, dx_block, dweights_block
+    return loss_sum, split_sum, dx_block, dweights_block
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(4,))
@@ -107,7 +114,7 @@ def _chunked_sum_fwd(x, labels, loss_mask, weights, block_tokens):
         mask_block = jax.lax.dynamic_slice_in_dim(
             loss_mask, start, block_tokens, axis=1
         )
-        block_sum, dx_block, dweights_block = _block_loss_and_grads(
+        block_sum, _, dx_block, dweights_block = _block_loss_and_grads(
             x_block, labels_block, mask_block, weights
         )
         return (loss_sum + block_sum, dweights + dweights_block), dx_block
@@ -146,6 +153,84 @@ def _chunked_sum_bwd(block_tokens, residuals, loss_cotangent):
 _chunked_sum.defvjp(_chunked_sum_fwd, _chunked_sum_bwd)
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(5,))
+def _chunked_sum_split(x, labels, loss_mask, split_mask, weights, block_tokens):
+    return _chunked_sum_split_fwd(x, labels, loss_mask, split_mask, weights, block_tokens)[0]
+
+
+def _chunked_sum_split_fwd(x, labels, loss_mask, split_mask, weights, block_tokens):
+    """The ``_chunked_sum`` scan with one extra reporting reduction per block.
+
+    The split sum is diagnostics only: its cotangent is deliberately dropped
+    in the backward rule, and the public wrapper stop-gradients it, so the
+    differentiated loss and both gradients are exactly ``_chunked_sum``'s."""
+    sequence_length = x.shape[1]
+    if sequence_length % block_tokens:
+        raise ValueError(
+            f"sequence length {sequence_length} must be divisible by "
+            f"loss.block_tokens {block_tokens}"
+        )
+    num_blocks = sequence_length // block_tokens
+
+    def scan_body(carry, block_index):
+        loss_sum, split_sum, dweights = carry
+        start = block_index * block_tokens
+        x_block = jax.lax.dynamic_slice_in_dim(x, start, block_tokens, axis=1)
+        labels_block = jax.lax.dynamic_slice_in_dim(
+            labels, start, block_tokens, axis=1
+        )
+        mask_block = jax.lax.dynamic_slice_in_dim(
+            loss_mask, start, block_tokens, axis=1
+        )
+        split_block = jax.lax.dynamic_slice_in_dim(
+            split_mask, start, block_tokens, axis=1
+        )
+        block_sum, block_split, dx_block, dweights_block = _block_loss_and_grads(
+            x_block, labels_block, mask_block, weights, split_block
+        )
+        return (
+            loss_sum + block_sum,
+            split_sum + block_split,
+            dweights + dweights_block,
+        ), dx_block
+
+    (loss_sum, split_sum, dweights), dx_blocks = jax.lax.scan(
+        scan_body,
+        (
+            jnp.zeros((), jnp.float32),
+            jnp.zeros((), jnp.float32),
+            jnp.zeros(weights.shape, jnp.float32),
+        ),
+        jnp.arange(num_blocks),
+    )
+    dx = jnp.transpose(dx_blocks, (1, 0, 2, 3)).reshape(x.shape)
+    residuals = (
+        dx,
+        dweights,
+        jnp.zeros((0,), x.dtype),
+        jnp.zeros((0,), weights.dtype),
+        labels,
+        loss_mask,
+    )
+    return (loss_sum, split_sum), residuals
+
+
+def _chunked_sum_split_bwd(block_tokens, residuals, cotangents):
+    del block_tokens
+    loss_cotangent, _ = cotangents
+    dx, dweights, x_token, weights_token, labels, loss_mask = residuals
+    return (
+        (loss_cotangent * dx).astype(x_token.dtype),
+        np.zeros(labels.shape, dtype=jax.dtypes.float0),
+        jnp.zeros_like(loss_mask),
+        jnp.zeros_like(loss_mask),
+        (loss_cotangent * dweights).astype(weights_token.dtype),
+    )
+
+
+_chunked_sum_split.defvjp(_chunked_sum_split_fwd, _chunked_sum_split_bwd)
+
+
 def chunked_linear_cross_entropy(
     hidden_states: jax.Array,
     labels: jax.Array,
@@ -153,13 +238,22 @@ def chunked_linear_cross_entropy(
     weights: jax.Array,
     *,
     block_tokens: int,
-) -> tuple[jax.Array, jax.Array]:
+    split_mask: jax.Array | None = None,
+):
     """Returns the globally normalized mean loss and the valid-token count.
 
     ``hidden_states`` is [B, T, H], ``weights`` the [H, V] output projection
     (for the tied head, the scaled transposed embedding compute copy — its
     cotangent flows back to the fp32 master through the caller's autodiff).
     ``loss_mask`` must be binary, matching the owned data pipelines.
+
+    With ``split_mask`` (binary [B, T], e.g. the vision pipeline's
+    ``vision_mask``) a third value is returned: a dict of non-differentiable
+    reporting sums — ``loss_sum`` and ``token_count`` under
+    ``loss_mask * split_mask`` plus ``total_loss_sum`` — computed inside the
+    same block pass at no extra GEMM cost. The differentiated loss and both
+    gradients are mathematically unchanged (the extra scan-carry element can
+    shift XLA reduction fusion by ~1 ULP).
     """
     if hidden_states.ndim != 3 or weights.ndim != 2:
         raise ValueError("chunked loss expects hidden_states[B,T,H] and weights[H,V]")
@@ -168,6 +262,19 @@ def chunked_linear_cross_entropy(
     if labels.shape != hidden_states.shape[:2] or loss_mask.shape != labels.shape:
         raise ValueError("labels and loss_mask must be [B, T]")
     mask = loss_mask.astype(jnp.float32)
-    loss_sum = _chunked_sum(hidden_states, labels, mask, weights, block_tokens)
     token_count = jnp.sum(mask, dtype=jnp.float32)
-    return loss_sum / jnp.maximum(token_count, 1.0), token_count
+    if split_mask is None:
+        loss_sum = _chunked_sum(hidden_states, labels, mask, weights, block_tokens)
+        return loss_sum / jnp.maximum(token_count, 1.0), token_count
+    if split_mask.shape != labels.shape:
+        raise ValueError("split_mask must be [B, T]")
+    split = split_mask.astype(jnp.float32)
+    loss_sum, split_sum = _chunked_sum_split(
+        hidden_states, labels, mask, split, weights, block_tokens
+    )
+    split_sums = {
+        "loss_sum": jax.lax.stop_gradient(split_sum),
+        "token_count": jnp.sum(mask * split, dtype=jnp.float32),
+        "total_loss_sum": jax.lax.stop_gradient(loss_sum),
+    }
+    return loss_sum / jnp.maximum(token_count, 1.0), token_count, split_sums
