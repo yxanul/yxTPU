@@ -559,6 +559,32 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
         max_images=vision.max_images_per_sequence,
     )
     threads = max(1, vision.producer_threads)
+    if vision.text_datasets:
+        text_sources = [
+            {
+                "name": source.name,
+                "dataset": source.dataset,
+                "subset": source.subset,
+                "weight": source.weight,
+                "field": source.field,
+                "format": source.format,
+                "row_tokens": source.row_tokens or vision.text_row_tokens,
+            }
+            for source in vision.text_datasets
+        ]
+    elif vision.p_text > 0:
+        text_sources = [
+            {
+                "name": "text",
+                "dataset": config.data.dataset_name,
+                "field": config.data.text_field,
+                "weight": 1.0,
+                "format": "plain",
+                "row_tokens": vision.text_row_tokens,
+            }
+        ]
+    else:
+        text_sources = []
 
     def make_source(thread_index: int) -> MixedVisionTextIterator:
         return MixedVisionTextIterator(
@@ -566,8 +592,7 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
             spec=spec,
             batch_size=process_batch,
             vision_dataset=vision.dataset_name,
-            text_dataset=config.data.dataset_name if vision.p_text > 0 else None,
-            text_field=config.data.text_field,
+            text_sources=text_sources,
             p_text=vision.p_text,
             text_row_tokens=vision.text_row_tokens,
             min_visual_dependency=vision.min_visual_dependency,
@@ -582,7 +607,10 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
     iterator.metadata = {
         "pipeline": "mixed_vision_text",
         "vision_dataset": vision.dataset_name,
-        "text_dataset": config.data.dataset_name,
+        "text_sources": [
+            {key: value for key, value in source.items()}
+            for source in text_sources
+        ],
         "p_text": vision.p_text,
         "text_row_tokens": vision.text_row_tokens,
         "max_images_per_sequence": vision.max_images_per_sequence,
@@ -715,6 +743,36 @@ def run(
             if config.experiment.checkpoint.resume
             else 0
         )
+        if start_step == 0 and config.experiment.init_from_run:
+            # Warm-start: weights from another run's latest checkpoint, then
+            # a FRESH optimizer so momentum, second moments, and the
+            # schedule's step count all restart at zero - the
+            # continuation-after-anneal pattern. The foreign restore fills
+            # the whole TrainStateNNX (the model trees must match); the
+            # optimizer rebuild below discards its optimizer half.
+            init_config = config.model_copy(deep=True)
+            init_config.experiment.checkpoint.enabled = True
+            init_config.experiment.acknowledge_no_checkpoint = False
+            if config.experiment.init_from_destination:
+                init_config.experiment.checkpoint.destination = (
+                    config.experiment.init_from_destination
+                )
+            init_loader = CheckpointIO(
+                init_config, run_name=config.experiment.init_from_run
+            )
+            init_step = init_loader.restore(state, data_iterator)
+            init_loader.close()
+            if init_step == 0:
+                raise RuntimeError(
+                    f"init_from_run {config.experiment.init_from_run!r} has no checkpoint"
+                )
+            state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+            if jax.process_index() == 0:
+                print(
+                    f"warm-start: weights from {config.experiment.init_from_run} "
+                    f"step {init_step}; fresh optimizer, schedule from step 0",
+                    flush=True,
+                )
         train_step = _make_train_step(config)
         eval_step = _make_eval_step()
         diagnostics_step = _make_diagnostics_step()

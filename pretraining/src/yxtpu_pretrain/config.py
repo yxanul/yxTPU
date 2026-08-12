@@ -89,6 +89,34 @@ class AttentionConfig(StrictModel):
         return self
 
 
+class TextSourceConfig(StrictModel):
+    """One text stream of the mixed vision+text pipeline.
+
+    ``weight`` is the per-DRAW probability mass within the text side of the
+    mix; with uniform ``row_tokens`` across sources it approximates the
+    loss-token share, and the realized share is measured per source as
+    ``data/<name>_loss_token_share``. ``format: repo`` renders
+    Stack-v3-style rows (one repository per row with a ``files[]`` array)
+    as ``# path\\ncontent`` blocks; ``plain`` reads ``field`` directly."""
+
+    name: str
+    dataset: str
+    subset: str | None = None
+    weight: float = 1.0
+    field: str = "text"
+    format: Literal["plain", "repo"] = "plain"
+    # Per-source row length override; None uses vision.text_row_tokens.
+    row_tokens: int | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> TextSourceConfig:
+        if self.weight <= 0:
+            raise ValueError("text source weight must be positive")
+        if self.row_tokens is not None and self.row_tokens < 8:
+            raise ValueError("row_tokens must be at least 8")
+        return self
+
+
 class VisionConfig(StrictModel):
     """Native vision pathway: a from-scratch encoder trained jointly under
     the next-token objective (no contrastive stage, no pretrained ViT).
@@ -127,6 +155,10 @@ class VisionConfig(StrictModel):
     p_text: float = 0.3
     text_row_tokens: int = 1024
     min_visual_dependency: int = 0
+    # Weighted multi-source text mix. Empty means the single legacy source:
+    # ``data``'s corpus at weight 1. Non-empty REPLACES it - list the
+    # pretraining corpus explicitly alongside the extra sources.
+    text_datasets: tuple[TextSourceConfig, ...] = ()
     # Keep at 1: fsspec's cached HTTP filesystem is not thread-safe, and one
     # producer per host sustains 1B-scale step times.
     producer_threads: int = 1
@@ -532,6 +564,13 @@ class ExperimentConfig(StrictModel):
     # background thread necessarily runs the iterator ahead of the last
     # trained step.
     prefetch_batches: int = 1
+    # Warm-start: when set and no own checkpoint exists, restore WEIGHTS
+    # from this other run's latest checkpoint (same model tree required)
+    # and train from step 0 with a fresh optimizer and schedule - the
+    # continuation-after-anneal pattern (re-warmup handles the LR jump;
+    # Muon momentum rebuilds within tens of steps).
+    init_from_run: str | None = None
+    init_from_destination: str | None = None
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     diagnostics: DiagnosticsConfig = Field(default_factory=DiagnosticsConfig)

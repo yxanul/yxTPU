@@ -170,14 +170,28 @@ def main() -> int:
     process_batch = config.data.per_device_batch_size * jax.local_device_count()
     threads = max(1, arguments.producer_threads)
 
+    text_sources = (
+        [
+            {
+                "name": "text",
+                "dataset": config.data.dataset_name,
+                "field": config.data.text_field,
+                "weight": 1.0,
+                "format": "plain",
+                "row_tokens": arguments.text_row_tokens,
+            }
+        ]
+        if arguments.p_text > 0
+        else []
+    )
+
     def make_source(thread_index: int) -> MixedVisionTextIterator:
         return MixedVisionTextIterator(
             tokenizer=tokenizer,
             spec=spec,
             batch_size=process_batch,
             vision_dataset=arguments.dataset,
-            text_dataset=config.data.dataset_name if arguments.p_text > 0 else None,
-            text_field=config.data.text_field,
+            text_sources=text_sources,
             p_text=arguments.p_text,
             text_row_tokens=arguments.text_row_tokens,
             min_visual_dependency=arguments.min_visual_dependency,

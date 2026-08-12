@@ -1,0 +1,91 @@
+# 30B-token continuation of the vision-1b-trial checkpoint with the
+# widened text mix: ClimbMix + Stack-v3 code (one file per row, content
+# only) + Nemotron-CC-Math 4plus_MIND. Warm-start: weights from the
+# trial's step-48,000 (post-anneal) checkpoint, fresh optimizer and
+# schedule (launch overrides: LR 1.2e-3, re-warmup 1,500, terminal
+# cosine anneal over the final 5,722 steps to zero). 57,220 steps x
+# 524,288 = 30.0B processed tokens (~24 h at the uint8-fixed 348k
+# tok/s). Text-source weights are per-draw within the text side; with
+# uniform row_tokens they approximate loss-token shares - verify
+# against data/<name>_loss_token_share and retune there. Target mix
+# (loss tokens): vision ~0.35, climbmix ~0.40, stack ~0.17, math ~0.08.
+# NOTE: Nemotron-CC-Math is GATED - the HF account behind the workers'
+# token must have accepted its license or every producer fails at
+# stream open.
+name: vision_1b_cont30b
+steps: 57220
+token_budget: null
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: false
+prefetch_batches: 8
+init_from_run: kda_hybrid_1b_yx49k-muonclip-vision_1b_trial
+init_from_destination: /home/a1111/yxtpu_ckpts
+checkpoint:
+  enabled: true
+  destination: /home/a1111/yxtpu_ckpts
+  save_interval: 4000
+  async_save: false
+  keep: 3
+  resume: true
+  allow_weights_only_resume: true
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: vision-1b-cont30b
+  tags: [v4-64, vision, 1b, finevisionmax, climbmix, stack-v3, nemotron-math]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 500
+harness_eval:
+  enabled: true
+  interval: 4800
+  tasks:
+    - hellaswag
+    - piqa
+    - arc_easy
+    - arc_challenge
+    - sciq
+    - boolq
+    - openbookqa
+    - copa
+    - commonsense_qa
+    - lambada_openai
+  batch_size_per_device: 1
+  num_fewshot: 0
+  limit: null
+  use_cache: true
+model_overrides:
+  vision:
+    enabled: true
+    dataset_name: HuggingFaceM4/FineVisionMax
+    max_images_per_sequence: 4
+    p_text: 0.45
+    text_datasets:
+      - name: climbmix
+        dataset: karpathy/climbmix-400b-shuffle
+        weight: 0.615
+        field: text
+        format: plain
+      - name: stack
+        dataset: HuggingFaceCode/stack-v3-train
+        weight: 0.262
+        format: repo
+      - name: math
+        dataset: nvidia/Nemotron-CC-Math-v1
+        subset: 4plus_MIND
+        weight: 0.123
+        field: text
+        format: plain
+  attention:
+    output_gate: true
+data_overrides:
+  sequence_length: 4096
+  per_device_batch_size: 4
+  eval_interval: 500

@@ -146,7 +146,11 @@ _COUNTER_KEYS = (
 )
 
 
-def _derived_stats(counters: dict[str, int], max_images: int) -> dict[str, float]:
+def _derived_stats(
+    counters: dict[str, int],
+    max_images: int,
+    source_loss_tokens: dict[str, int] | None = None,
+) -> dict[str, float]:
     """Raw packing counters plus the ratios that describe batch composition.
 
     The ratios are the knobs' instruments: ``vision_loss_token_share`` is the
@@ -169,6 +173,8 @@ def _derived_stats(counters: dict[str, int], max_images: int) -> dict[str, float
         stats["rows_per_sequence"] = counters["rows_consumed"] / sequences
     if loss_total:
         stats["vision_loss_token_share"] = counters["loss_tokens_vision"] / loss_total
+        for name, tokens_of_source in (source_loss_tokens or {}).items():
+            stats[f"{name}_loss_token_share"] = tokens_of_source / loss_total
     rows_seen = counters["rows_consumed"] + counters["rows_skipped"]
     if rows_seen:
         stats["row_skip_rate"] = counters["rows_skipped"] / rows_seen
@@ -185,8 +191,11 @@ class MixedVisionTextIterator:
         spec: VisionBatchSpec,
         batch_size: int,
         vision_dataset: str = "HuggingFaceM4/FineVisionMax",
-        text_dataset: str | None = None,
-        text_field: str = "text",
+        # Weighted text sources: each entry is a dict with ``name``,
+        # ``dataset``, optional ``subset``, ``weight``, ``field``,
+        # ``format`` ("plain" | "repo") and optional ``row_tokens``.
+        # A text draw picks a source by normalized weight.
+        text_sources: tuple | list = (),
         p_text: float = 0.0,
         text_row_tokens: int = 1024,
         min_visual_dependency: int = 0,
@@ -201,19 +210,18 @@ class MixedVisionTextIterator:
     ):
         from datasets import load_dataset
 
-        if p_text > 0.0 and not text_dataset:
-            raise ValueError("p_text > 0 requires a text_dataset")
+        if p_text > 0.0 and not text_sources:
+            raise ValueError("p_text > 0 requires at least one text source")
         self.tokenizer = tokenizer
         self.spec = spec
         self.batch_size = batch_size
         self.p_text = p_text
         self.text_row_tokens = text_row_tokens
-        self.text_field = text_field
         self.min_visual_dependency = min_visual_dependency
         self._rng = np.random.default_rng(shuffle_seed * 1009 + shard_index)
 
-        def open_stream(name, seed):
-            stream = load_dataset(name, split=split, streaming=True)
+        def open_stream(name, seed, subset=None):
+            stream = load_dataset(name, subset, split=split, streaming=True)
             # Shard by FILES, never by row-modulo: a modulo shard still
             # downloads every row and discards shard_count-1 of every
             # shard_count - at 8 hosts x 4 producer threads that is 32x
@@ -237,9 +245,27 @@ class MixedVisionTextIterator:
             return iter(stream)
 
         self._vision = open_stream(vision_dataset, shuffle_seed)
-        self._text = (
-            open_stream(text_dataset, shuffle_seed + 1) if text_dataset else None
-        )
+        self._text_sources = []
+        for offset, source in enumerate(text_sources):
+            entry = dict(source)
+            entry.setdefault("field", "text")
+            entry.setdefault("format", "plain")
+            entry.setdefault("weight", 1.0)
+            if not entry.get("row_tokens"):
+                entry["row_tokens"] = text_row_tokens
+            # Slice text to this many chars BEFORE tokenizing: ~8 chars per
+            # eventual token of budget, a generous margin over the ~3-5
+            # chars/token of prose and code, so multi-megabyte documents
+            # and source files never reach the tokenizer whole (data_wait
+            # protection).
+            entry["char_cap"] = 8 * entry["row_tokens"]
+            entry["stream"] = open_stream(
+                entry["dataset"], shuffle_seed + 1 + offset, entry.get("subset")
+            )
+            entry["queue"] = []
+            entry["loss_tokens"] = 0
+            self._text_sources.append(entry)
+        self._weight_total = sum(entry["weight"] for entry in self._text_sources)
         self._pending = None
         self._pending_fill = None
         self.rows_consumed = 0
@@ -292,26 +318,69 @@ class MixedVisionTextIterator:
                 + [spec.eos_id]
             )
             self.vision_rows += 1
-            return tokens, image
+            return tokens, image, "vision"
+
+    def _pick_source(self):
+        threshold = self._rng.random() * self._weight_total
+        cumulative = 0.0
+        for entry in self._text_sources:
+            cumulative += entry["weight"]
+            if threshold < cumulative:
+                return entry
+        return self._text_sources[-1]
+
+    def _next_source_text(self, source) -> str:
+        """One document's text from a source stream.
+
+        ``plain`` reads the text field. ``repo`` (Stack-v3-style rows: one
+        repository per row with a ``files[]`` array) emits each usable
+        file's ``content`` as its own document - content ONLY, no paths or
+        metadata in the token stream; the packer's per-row segments are
+        the file boundaries. Vendor files are skipped, files are capped
+        per repository, and content is char-sliced at collection time so
+        giant repositories cannot stall the producer."""
+        if source["format"] == "plain":
+            while True:
+                row = next(source["stream"])
+                text = (row.get(source["field"]) or "").strip()
+                if text:
+                    return text
+                self.rows_skipped += 1
+        while True:
+            if source["queue"]:
+                return source["queue"].pop()
+            row = next(source["stream"])
+            contents = []
+            for file in row.get("files") or []:
+                if file.get("is_vendor"):
+                    continue
+                content = file.get("content") or ""
+                if len(content) < 32:
+                    continue
+                contents.append(content[: source["char_cap"]])
+                if len(contents) >= 64:
+                    break
+            if not contents:
+                self.rows_skipped += 1
+                continue
+            contents.reverse()  # pop() then consumes in original file order
+            source["queue"] = contents
 
     def _next_text_row(self):
         spec = self.spec
+        source = self._pick_source()
         while True:
-            document = next(self._text)
-            text = (document.get(self.text_field) or "").strip()
-            if not text:
-                self.rows_skipped += 1
-                continue
+            text = self._next_source_text(source)[: source["char_cap"]]
             ids = self.tokenizer.encode(text, add_special_tokens=False)
             ids = [i for i in ids if i != spec.placeholder_id]
             if len(ids) < 8:
                 self.rows_skipped += 1
                 continue
             self.text_rows += 1
-            return ids[: self.text_row_tokens] + [spec.eos_id], None
+            return ids[: source["row_tokens"]] + [spec.eos_id], None, source["name"]
 
     def _next_row(self):
-        if self._text is not None and self._rng.random() < self.p_text:
+        if self._text_sources and self._rng.random() < self.p_text:
             return self._next_text_row()
         return self._next_vision_row()
 
@@ -326,7 +395,7 @@ class MixedVisionTextIterator:
                 row, self._pending_fill = self._pending_fill, None
             else:
                 row = self._next_row()
-            tokens, image = row
+            tokens, image, _ = row
             needs_image = 1 if image is not None else 0
             if used + len(tokens) > capacity or image_count + needs_image > spec.max_images:
                 self._pending = row
@@ -341,23 +410,29 @@ class MixedVisionTextIterator:
         # image budget bound, or an oversized draw against a part-full
         # sequence), the tail would otherwise be padding at full compute
         # cost - measured at pad_fraction 0.28 under p_text 0.3. Text rows
-        # need no image slot, so fill the tail from the text stream; a draw
-        # that does not fit is stashed like the main loop's pending row and
-        # opens a later sequence.
-        if self._text is not None and self._pending is not None:
+        # need no image slot, so fill the tail from the text streams; a
+        # draw that does not fit is stashed like the main loop's pending
+        # row and opens a later sequence.
+        if self._text_sources and self._pending is not None:
             while used < capacity - 8:
                 if self._pending_fill is not None:
                     row, self._pending_fill = self._pending_fill, None
                 else:
                     row = self._next_text_row()
-                tokens, _ = row
+                tokens, _, _ = row
                 if used + len(tokens) > capacity:
                     self._pending_fill = row
                     break
                 rows.append(row)
                 used += len(tokens)
                 self.rows_consumed += 1
-        example = pack_rows(rows, spec)
+        # Per-source supervision accounting: a fully packed text row of L
+        # tokens contributes exactly L-1 in-segment labels (the boundary
+        # label is masked), so consume-time counting is exact.
+        for tokens, image, source_name in rows:
+            if image is None:
+                self._source_loss_counter(source_name, len(tokens) - 1)
+        example = pack_rows([(tokens, image) for tokens, image, _ in rows], spec)
         loss_mask = example["loss_mask"]
         vision_mask = example["vision_mask"]
         self.sequences_packed += 1
@@ -369,12 +444,23 @@ class MixedVisionTextIterator:
         self.loss_tokens_text += int((loss_mask * (1.0 - vision_mask)).sum())
         return example
 
+    def _source_loss_counter(self, name: str, count: int) -> None:
+        for entry in self._text_sources:
+            if entry["name"] == name:
+                entry["loss_tokens"] += count
+                return
+
     def raw_counters(self) -> dict[str, int]:
         return {key: int(getattr(self, key)) for key in _COUNTER_KEYS}
 
+    def raw_source_loss_tokens(self) -> dict[str, int]:
+        return {entry["name"]: int(entry["loss_tokens"]) for entry in self._text_sources}
+
     @property
     def stats(self) -> dict[str, float]:
-        return _derived_stats(self.raw_counters(), self.spec.max_images)
+        return _derived_stats(
+            self.raw_counters(), self.spec.max_images, self.raw_source_loss_tokens()
+        )
 
     def get_state(self):
         """Checkpoint contract: the mixed stream position is not resumable.
@@ -440,10 +526,13 @@ class PooledMixedIterator:
     @property
     def stats(self) -> dict[str, float]:
         totals = {key: 0 for key in _COUNTER_KEYS}
+        source_totals: dict[str, int] = {}
         for source in self._sources:
             for key, value in source.raw_counters().items():
                 totals[key] += value
-        return _derived_stats(totals, self._sources[0].spec.max_images)
+            for name, value in source.raw_source_loss_tokens().items():
+                source_totals[name] = source_totals.get(name, 0) + value
+        return _derived_stats(totals, self._sources[0].spec.max_images, source_totals)
 
     def get_state(self):
         raise RuntimeError("mixed vision+text stream position is not resumable")

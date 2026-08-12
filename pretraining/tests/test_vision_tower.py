@@ -349,7 +349,9 @@ def _bare_packer(spec, next_row, next_text_row):
     packer.spec = spec
     packer._pending = None
     packer._pending_fill = None
-    packer._text = object()  # non-None enables budget-aware fill
+    # A truthy source list enables budget-aware fill and receives the
+    # per-source loss-token counts.
+    packer._text_sources = [{"name": "text", "weight": 1.0, "loss_tokens": 0}]
     for counter in (
         "rows_consumed",
         "rows_skipped",
@@ -385,8 +387,8 @@ def test_budget_aware_fill_replaces_padding_with_text_rows():
 
     packer = _bare_packer(
         spec,
-        next_row=lambda: (list(vision_tokens), image),
-        next_text_row=lambda: (list(text_tokens), None),
+        next_row=lambda: (list(vision_tokens), image, "vision"),
+        next_text_row=lambda: (list(text_tokens), None, "text"),
     )
     example = packer._next_example()
     # The second vision draw hits the 1-image budget with 8/65 tokens used;
@@ -398,8 +400,9 @@ def test_budget_aware_fill_replaces_padding_with_text_rows():
     assert padding <= 12, f"fill left {padding} padded positions"
     assert packer._pending is not None and packer._pending[1] is not None
     assert packer._pending_fill is not None and packer._pending_fill[1] is None
-    # Composition counters see the filled rows.
+    # Composition counters see the filled rows, globally and per source.
     assert packer.loss_tokens_text > packer.loss_tokens_vision > 0
+    assert packer.raw_source_loss_tokens()["text"] == packer.loss_tokens_text
 
     # The stashed rows open the next sequence: its image budget is available
     # again, so the pending vision row packs first, then the stashed fill row.
@@ -448,3 +451,68 @@ def test_pack_rows_keeps_uint8_images_uint8():
     assert example["images"].dtype == np.uint8
     np.testing.assert_array_equal(example["images"][0], 200)
     np.testing.assert_array_equal(example["images"][1], 0)  # blank slot
+
+
+def test_repo_source_emits_one_file_per_row_content_only():
+    from yxtpu_pretrain.runtime.vision_data import MixedVisionTextIterator
+
+    packer = object.__new__(MixedVisionTextIterator)
+    packer.rows_skipped = 0
+    repo_row = {
+        "repo_id": "octo/example",
+        "files": [
+            {"content": "def main():\n    return 1\n" + "#" * 20, "is_vendor": False,
+             "file_path": "src/main.py"},
+            {"content": "vendored junk " * 10, "is_vendor": True,
+             "file_path": "vendor/lib.js"},
+            {"content": "short", "is_vendor": False, "file_path": "x"},
+            {"content": "SELECT 1 FROM t;\n" + "-" * 40, "is_vendor": False,
+             "file_path": "query.sql"},
+        ],
+    }
+    source = {
+        "name": "stack",
+        "format": "repo",
+        "char_cap": 8192,
+        "queue": [],
+        "stream": iter([repo_row]),
+    }
+    first = packer._next_source_text(source)
+    second = packer._next_source_text(source)
+    # Only the two usable files, in file order, content verbatim - no
+    # paths, repo ids, or metadata in the text.
+    assert first.startswith("def main():")
+    assert second.startswith("SELECT 1 FROM t;")
+    for text in (first, second):
+        assert "src/main.py" not in text and "octo/example" not in text
+    # Vendor and trivially short files were never queued.
+    assert source["queue"] == []
+
+
+def test_weighted_source_pick_tracks_weights():
+    from yxtpu_pretrain.runtime.vision_data import MixedVisionTextIterator
+
+    packer = object.__new__(MixedVisionTextIterator)
+    packer._rng = np.random.default_rng(7)
+    packer._text_sources = [
+        {"name": "a", "weight": 0.6},
+        {"name": "b", "weight": 0.3},
+        {"name": "c", "weight": 0.1},
+    ]
+    packer._weight_total = 1.0
+    draws = [packer._pick_source()["name"] for _ in range(4000)]
+    for name, weight in (("a", 0.6), ("b", 0.3), ("c", 0.1)):
+        share = draws.count(name) / len(draws)
+        assert abs(share - weight) < 0.03, (name, share)
+
+
+def test_text_source_config_validates():
+    from yxtpu_pretrain.config import TextSourceConfig
+
+    source = TextSourceConfig(
+        name="stack", dataset="HuggingFaceCode/stack-v3-train", format="repo",
+        weight=0.262,
+    )
+    assert source.field == "text" and source.row_tokens is None
+    with pytest.raises(Exception):
+        TextSourceConfig(name="bad", dataset="x", weight=0.0)
