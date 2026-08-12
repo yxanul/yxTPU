@@ -226,7 +226,15 @@ class VisionTower(nnx.Module):
         return tokens.reshape(rows, (grid // s) ** 2, s * s * dim)
 
     def __call__(self, images):
-        """[batch, images, H, W, 3] float -> [batch, images * tokens, emb]."""
+        """[batch, images, H, W, 3] -> [batch, images * tokens, emb].
+
+        Integer input is raw uint8 pixels (the pipeline's transfer format:
+        4x less host->device traffic than fp32) and is normalized to
+        [-1, 1] here on device - the same a/255*2-1 mapping the pipeline
+        used to apply on the host, up to fp rounding that vanishes in the
+        bf16 cast. Float input is assumed already normalized."""
+        if jnp.issubdtype(images.dtype, jnp.integer):
+            images = images.astype(jnp.float32) / 127.5 - 1.0
         batch, per_row = images.shape[0], images.shape[1]
         flat = images.reshape(batch * per_row, *images.shape[2:])
         tokens = self.patch_embed(self._patchify(flat).astype(self.dtype))

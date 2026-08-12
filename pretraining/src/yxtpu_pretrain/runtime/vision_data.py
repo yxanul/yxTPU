@@ -55,10 +55,14 @@ class VisionBatchSpec:
 
 
 def process_image(image, image_size: int) -> np.ndarray:
-    """PIL image -> [size, size, 3] float32 in [-1, 1]."""
+    """PIL image -> [size, size, 3] uint8 raw pixels.
+
+    Pixels stay uint8 through packing and the host->device transfer (4x
+    less traffic than fp32 - the fp32 image block was 154 MB/host/step
+    and its assembly chronically exceeded the 1.5 s device step); the
+    vision tower normalizes to [-1, 1] on device."""
     resized = image.convert("RGB").resize((image_size, image_size))
-    array = np.asarray(resized, dtype=np.float32) / 255.0
-    return array * 2.0 - 1.0
+    return np.asarray(resized, dtype=np.uint8)
 
 
 def render_texts(turns) -> str:
@@ -108,8 +112,11 @@ def pack_rows(rows, spec: VisionBatchSpec):
     ).astype(np.float32)
     vision_mask = has_image[segment_label].astype(np.float32)
 
+    # The block dtype follows the rows' images (uint8 in the production
+    # pipeline; float in unit tests exercising the tower's float path).
+    block_dtype = images[0].dtype if images else np.uint8
     image_block = np.zeros(
-        (spec.max_images, spec.image_size, spec.image_size, 3), dtype=np.float32
+        (spec.max_images, spec.image_size, spec.image_size, 3), dtype=block_dtype
     )
     for slot, image in enumerate(images):
         image_block[slot] = image

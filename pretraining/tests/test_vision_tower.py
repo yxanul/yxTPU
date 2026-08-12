@@ -406,3 +406,45 @@ def test_budget_aware_fill_replaces_padding_with_text_rows():
     second = packer._next_example()
     assert int((second["input_ids"] == 250).sum()) == 4
     assert int((second["segment_ids"] == 0).sum()) <= 12
+
+
+def test_uint8_images_match_host_normalized_float_path():
+    """The device-side uint8 normalization must reproduce the old host
+    float path (a/255*2-1) through the whole tower - the transfer-format
+    change may not move the model."""
+    config = tiny_config()
+    mesh = create_mesh(config.hardware, allow_device_mismatch=True)
+    rules = make_leaf_config(config).logical_axis_rules
+    with logical_mesh_context(mesh, rules):
+        tower = VisionTower(
+            config.model.vision,
+            config.model.emb_dim,
+            leaf_config=make_leaf_config(config),
+            mesh=mesh,
+            rngs=nnx.Rngs(0),
+        )
+        size = config.model.vision.image_size
+        rng = np.random.default_rng(3)
+        raw = rng.integers(0, 256, (1, 1, size, size, 3), dtype=np.uint8)
+        normalized = raw.astype(np.float32) / 255.0 * 2.0 - 1.0
+        out_uint8 = np.asarray(tower(jnp.asarray(raw)))
+        out_float = np.asarray(tower(jnp.asarray(normalized)))
+    scale = np.abs(out_float).max()
+    np.testing.assert_allclose(out_uint8, out_float, atol=0.02 * scale, rtol=0.05)
+
+
+def test_pack_rows_keeps_uint8_images_uint8():
+    spec = VisionBatchSpec(
+        sequence_length=16,
+        visual_tokens=3,
+        image_size=8,
+        placeholder_id=250,
+        pad_id=0,
+        eos_id=1,
+        max_images=2,
+    )
+    image = np.full((8, 8, 3), 200, dtype=np.uint8)
+    example = pack_rows([([250, 250, 250, 5, 1], image)], spec)
+    assert example["images"].dtype == np.uint8
+    np.testing.assert_array_equal(example["images"][0], 200)
+    np.testing.assert_array_equal(example["images"][1], 0)  # blank slot

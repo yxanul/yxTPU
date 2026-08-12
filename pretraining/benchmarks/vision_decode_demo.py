@@ -98,10 +98,10 @@ def _dataset_prompts(count: int, image_size: int, *, shard: tuple[int, int] | No
 
 
 def _synthetic_prompts(image_size: int):
-    red = np.full((image_size, image_size, 3), -1.0, dtype=np.float32)
-    red[..., 0] = 1.0
-    blue = np.full((image_size, image_size, 3), -1.0, dtype=np.float32)
-    blue[..., 2] = 1.0
+    red = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+    red[..., 0] = 255
+    blue = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+    blue[..., 2] = 255
     question = "Q: What color is the image?\nA:"
     return [
         {"name": "synthetic_red", "image": red, "prompt": question, "reference": "red"},
@@ -274,7 +274,7 @@ def main() -> int:
         logits = current_model(ids, images=images)
         return jax.lax.dynamic_index_in_dim(logits[0], position, axis=0, keepdims=False)
 
-    blank = np.zeros((1, 1, vision.image_size, vision.image_size, 3), np.float32)
+    blank = np.zeros((1, 1, vision.image_size, vision.image_size, 3), np.uint8)
     if arguments.suite == "v1":
         prompts = (
             _dataset_prompts(arguments.dataset_samples, vision.image_size)
@@ -302,7 +302,7 @@ def main() -> int:
         if len(ids) + arguments.max_new >= SEQ:
             ids = ids[: SEQ - arguments.max_new - 1]
         images = (
-            prompt["image"][None, None].astype(np.float32)
+            prompt["image"][None, None]
             if prompt["image"] is not None
             else blank
         )
