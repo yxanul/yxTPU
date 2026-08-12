@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -767,6 +768,14 @@ def run(
                     f"init_from_run {config.experiment.init_from_run!r} has no checkpoint"
                 )
             state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
+            # Rebind the construction-time local so the ORIGINAL optimizer
+            # module - now holding the restored foreign optimizer state -
+            # drops its last reference and frees. Leaving it alive kept
+            # ~4.2 GB of dead fp32 state resident and the first train step
+            # failed allocation (RESOURCE_EXHAUSTED at 1B on v4).
+            optimizer = state.optimizer
+            del optimizer
+            gc.collect()
             if jax.process_index() == 0:
                 print(
                     f"warm-start: weights from {config.experiment.init_from_run} "
