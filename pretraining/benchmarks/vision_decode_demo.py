@@ -62,11 +62,18 @@ class _NoIterator:
         raise AssertionError("stream state must not restore during decode")
 
 
-def _dataset_prompts(count: int, image_size: int):
-    """Image+question rows from the vision corpus head (train distribution)."""
+def _dataset_prompts(count: int, image_size: int, *, shard: tuple[int, int] | None = None):
+    """Image+question rows from the vision corpus.
+
+    Without ``shard``, rows come from the stream head (train
+    distribution). With ``shard=(num_shards, index)`` pointing at a late
+    file, rows come from a file the sequential training pass never
+    reached - an unseen-data probe."""
     from datasets import load_dataset
 
     stream = load_dataset("HuggingFaceM4/FineVisionMax", split="train", streaming=True)
+    if shard is not None:
+        stream = stream.shard(num_shards=shard[0], index=shard[1])
     prompts = []
     for row in stream:
         images = row.get("images") or []
@@ -111,6 +118,105 @@ def _text_prompts():
     ]
 
 
+def _shape_prompts(image_size: int):
+    """Synthetic probes no text prior can answer: shape, count, position,
+    rendered text, and a color split."""
+    from PIL import Image, ImageDraw
+
+    def white():
+        return Image.new("RGB", (image_size, image_size), (255, 255, 255))
+
+    circle = white()
+    ImageDraw.Draw(circle).ellipse((124, 124, 324, 324), fill=(220, 30, 30))
+
+    squares = white()
+    draw = ImageDraw.Draw(squares)
+    for index in range(3):
+        left = 40 + index * 140
+        draw.rectangle((left, 174, left + 100, 274), fill=(0, 0, 0))
+
+    left_square = white()
+    ImageDraw.Draw(left_square).rectangle((40, 164, 160, 284), fill=(30, 160, 30))
+    right_square = white()
+    ImageDraw.Draw(right_square).rectangle((288, 164, 408, 284), fill=(30, 160, 30))
+
+    # Big blocky text: render small with the default bitmap font, then
+    # upscale with nearest so it stays sharp at patch scale regardless of
+    # the installed Pillow's font support.
+    text_small = Image.new("RGB", (112, 112), (255, 255, 255))
+    ImageDraw.Draw(text_small).text((6, 44), "HELLO", fill=(0, 0, 0))
+    text_image = text_small.resize((image_size, image_size), Image.NEAREST)
+
+    split = np.full((image_size, image_size, 3), 0, dtype=np.uint8)
+    split[:, : image_size // 2] = (230, 30, 30)
+    split[:, image_size // 2 :] = (30, 30, 230)
+    split_image = Image.fromarray(split)
+
+    def entry(name, image, question, reference):
+        return {
+            "name": name,
+            "image": process_image(image, image_size),
+            "prompt": f"Q: {question}\nA:",
+            "reference": reference,
+        }
+
+    return [
+        entry("shape_circle", circle, "What shape is shown in the image?", "circle"),
+        entry("count_squares", squares, "How many squares are in the image?", "three"),
+        entry("position_left", left_square, "Is the square on the left or the right side of the image?", "left"),
+        entry("position_right", right_square, "Is the square on the left or the right side of the image?", "right"),
+        entry("ocr_hello", text_image, "What does the text in the image say?", "HELLO"),
+        entry("color_split", split_image, "What colors are in the image?", "red and blue"),
+    ]
+
+
+def _web_prompts(image_size: int):
+    """Well-known COCO photos fetched at decode time (not stream-head rows)."""
+    import io
+    import urllib.request
+
+    from PIL import Image
+
+    sources = [
+        ("coco_cats", "http://images.cocodataset.org/val2017/000000039769.jpg",
+         "How many cats are in the image?", "two"),
+        ("coco_bear", "http://images.cocodataset.org/val2017/000000000285.jpg",
+         "What animal is in the image?", "a bear"),
+    ]
+    prompts = []
+    for name, url, question, reference in sources:
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                image = Image.open(io.BytesIO(response.read()))
+        except Exception as error:
+            print(f"skipping {name}: {error}", flush=True)
+            continue
+        prompts.append(
+            {
+                "name": name,
+                "image": process_image(image, image_size),
+                "prompt": f"Q: {question}\nA:",
+                "reference": reference,
+            }
+        )
+    return prompts
+
+
+def _code_prompts():
+    return [
+        {"name": "code_fib", "image": None,
+         "prompt": "def fibonacci(n):\n"},
+        {"name": "code_prime", "image": None,
+         "prompt": "# Python function to check if a number is prime\ndef is_prime(n):\n"},
+        {"name": "code_reverse", "image": None,
+         "prompt": "Q: Write a Python function that reverses a string.\nA:"},
+        {"name": "code_sql", "image": None,
+         "prompt": "The following SQL query selects all users older than 30:\n```sql\n"},
+        {"name": "code_c", "image": None,
+         "prompt": "#include <stdio.h>\n\nint main() {\n"},
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dest", default="/home/a1111/yxtpu_ckpts")
@@ -119,6 +225,12 @@ def main() -> int:
     )
     parser.add_argument("--dataset-samples", type=int, default=6)
     parser.add_argument("--max-new", type=int, default=80)
+    parser.add_argument(
+        "--suite", choices=("v1", "v2"), default="v1",
+        help="v1: stream-head samples + color squares + text facts; "
+             "v2: unseen-shard samples + shape/count/position/OCR probes + "
+             "COCO photos + code prompts",
+    )
     parser.add_argument("--out", default="/mnt/ram/vt_transcripts.json")
     arguments = parser.parse_args()
 
@@ -163,11 +275,21 @@ def main() -> int:
         return jax.lax.dynamic_index_in_dim(logits[0], position, axis=0, keepdims=False)
 
     blank = np.zeros((1, 1, vision.image_size, vision.image_size, 3), np.float32)
-    prompts = (
-        _dataset_prompts(arguments.dataset_samples, vision.image_size)
-        + _synthetic_prompts(vision.image_size)
-        + _text_prompts()
-    )
+    if arguments.suite == "v1":
+        prompts = (
+            _dataset_prompts(arguments.dataset_samples, vision.image_size)
+            + _synthetic_prompts(vision.image_size)
+            + _text_prompts()
+        )
+    else:
+        prompts = (
+            _dataset_prompts(
+                arguments.dataset_samples, vision.image_size, shard=(10000, 9500)
+            )
+            + _shape_prompts(vision.image_size)
+            + _web_prompts(vision.image_size)
+            + _code_prompts()
+        )
     transcripts = []
     for prompt in prompts:
         text_ids = tokenizer.encode(prompt["prompt"], add_special_tokens=False)
