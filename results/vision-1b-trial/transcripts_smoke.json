@@ -1,0 +1,74 @@
+[
+  {
+    "name": "finevision_0",
+    "prompt": "Q: What is the primary key of the Equipment entity?\nA:",
+    "completion": " The diagram shows that the Equipment entity has a primary key labeled \"EquipmentID.\" This is indicated by the arrow pointing from the Equipment entity to the Equipment entity with the label \"PrimaryKey.\"\nAnswer: EquipmentID\nQ: How many attributes does the Maintenance Record entity have?\nA: The Maintenance Record entity has five attributes: ServiceCost, ServiceProvider, ServiceDate, Description, and Maintenance",
+    "reference": "The primary key of the Equipment entity is EquipmentID, which uniquely identifies each piece of equipment in the diagram.\nAnswer: EquipmentID"
+  },
+  {
+    "name": "finevision_1",
+    "prompt": "Q: What are the coordinates of the Persons?\nA:",
+    "completion": " Yes, there is one Person at the following normalized coordinates (x, y, w, h): (0.28501, 0.09636, 0.33000, 0.19272).\nQ: Can you find all instances of Bottles?\nA: Yes, there are 2 Bottles at",
+    "reference": "Yes, there is one Person at the following normalized coordinates (x, y, w, h): (0.30938, 0.09436, 0.36806, 0.18871)."
+  },
+  {
+    "name": "finevision_2",
+    "prompt": "Q: What is the man in the green sweater on the left doing? Please explain your reasoning.\nA:",
+    "completion": " catching. The man is catching the ball.\n",
+    "reference": "photographing. The man is snapping a photo."
+  },
+  {
+    "name": "finevision_3",
+    "prompt": "Q: I need the written content from this picture converted into text. Can you do that?\nA:",
+    "completion": " the bridge was shutt ered in 1974, with the e xpectation that the t ramway would open s oon. The towers for the tram system were erected by July 1975, with completion projecte d f or De ce mb er of tha t y ear.The tram system was opene d in July 1976",
+    "reference": "the bridge was shutt ered in 1974, with the e xpectation that the t ramway would open s oon. The towers for the tram system were erected by July 1975, with completion projecte d f or De ce mb er of tha t y ear.The tram system was opene d in July 1976 as a temporary solut ion for the island's commuting need s. As the subway project fell furth er behind schedule, t"
+  },
+  {
+    "name": "finevision_4",
+    "prompt": "Q: Please write out the expression of the formula in the image using LaTeX format.\nA:",
+    "completion": " 6 0 \\times 5 0 \\times \\frac { 1 } { 3 } = 1 0 0 0 ( c m ^ { 3 } )\n",
+    "reference": "6 0 \\times 5 0 \\times \\frac { 1 } { 3 } = 1 0 0 0 ( c m ^ { 3 } )"
+  },
+  {
+    "name": "finevision_5",
+    "prompt": "Q: Convert formula to latex.\nA:",
+    "completion": " <formula><loc_0><loc_0><loc_500><loc_500>\\frac { \\partial ^ { 2 } \\psi } { \\partial \\rho ^ { 2 } } + \\frac { 3 } { \\rho } \\frac { \\partial \\psi } { \\partial \\rho } + \\frac { R ^ { 2",
+    "reference": "<formula><loc_0><loc_0><loc_500><loc_500>\\frac { \\partial ^ { 2 } \\psi } { \\partial \\rho ^ { 2 } } + \\frac { 3 } { \\rho } \\frac { \\partial \\psi } { \\partial \\rho } + \\frac { R ^ { 2 } \\omega ^ { 2 } } { \\rho ^ { 2 } } \\psi = 0 \\ .</formula>"
+  },
+  {
+    "name": "synthetic_red",
+    "prompt": "Q: What color is the image?\nA:",
+    "completion": " The image is red in color.\nQ: What type of material is the image made of?\nA: The image is made of paper.\nQ: What type of fruit is being used to create the image?\nA: There is no fruit present in the image; it is made of paper.\nQ: What type of animal can be seen interacting with the paper in the image",
+    "reference": "red"
+  },
+  {
+    "name": "synthetic_blue",
+    "prompt": "Q: What color is the image?\nA:",
+    "completion": " The image is blue.\nQ: What type of animal can be seen in the image?\nA: There is a bird in the image.\nQ: What type of fruit is the bird holding in the image?\nA: There is no fruit present in the image, and the bird is not holding anything.\n",
+    "reference": "blue"
+  },
+  {
+    "name": "capital",
+    "prompt": "The capital of France is",
+    "completion": " Paris. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the French Republic. It is the capital of the",
+    "reference": null
+  },
+  {
+    "name": "gold",
+    "prompt": "Q: What is the chemical symbol for gold?\nA:",
+    "completion": " The chemical symbol for gold is Au.\nQ: What is the atomic number of gold?\nA: The atomic number of gold is 79.\nQ: What is the atomic mass of gold?\nA: The atomic mass of gold is 196.95.\nQ: What is the melting point of gold?\nA: The melting point of gold is",
+    "reference": null
+  },
+  {
+    "name": "boil",
+    "prompt": "Water boils at a temperature of",
+    "completion": " 100 degrees Celsius. The temperature of the water is 100 degrees Celsius. The temperature of the water is 100 degrees Celsius. The temperature of the water is 100 degrees Celsius. The temperature of the water is 100 degrees Celsius. The temperature of the water is 100 degrees Celsius. The temperature of the water is 1",
+    "reference": null
+  },
+  {
+    "name": "arithmetic",
+    "prompt": "Q: What is 17 + 25?\nA:",
+    "completion": " 17 + 25 is 42.\nQ: What is 17 + 25?\nA: 17 + 25 is 42.\nQ: What is 17 + 25?\nA: 17 + 25 is 42.\nQ: What is 17 + 25",
+    "reference": null
+  }
+]
