@@ -38,6 +38,7 @@ modality on device.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -244,7 +245,11 @@ class MixedVisionTextIterator:
                 stream = stream.shuffle(seed=seed, buffer_size=shuffle_buffer)
             return iter(stream)
 
-        self._vision = open_stream(vision_dataset, shuffle_seed)
+        self._vision = {
+            "name": "vision",
+            "open": lambda: open_stream(vision_dataset, shuffle_seed),
+        }
+        self._vision["stream"] = self._vision["open"]()
         self._text_sources = []
         for offset, source in enumerate(text_sources):
             entry = dict(source)
@@ -259,9 +264,12 @@ class MixedVisionTextIterator:
             # and source files never reach the tokenizer whole (data_wait
             # protection).
             entry["char_cap"] = 8 * entry["row_tokens"]
-            entry["stream"] = open_stream(
-                entry["dataset"], shuffle_seed + 1 + offset, entry.get("subset")
+            entry["open"] = (
+                lambda dataset=entry["dataset"],
+                seed=shuffle_seed + 1 + offset,
+                subset=entry.get("subset"): open_stream(dataset, seed, subset)
             )
+            entry["stream"] = entry["open"]()
             entry["queue"] = []
             entry["loss_tokens"] = 0
             self._text_sources.append(entry)
@@ -280,11 +288,48 @@ class MixedVisionTextIterator:
         self.loss_tokens_vision = 0
         self.loss_tokens_text = 0
 
+    def _draw(self, holder):
+        """One row from a stream, reopening it on ANY failure.
+
+        Multi-day streaming dies in varied ways - hung reads (fixed with
+        HTTP timeouts), 'client has been closed' after a retry aborts the
+        shared HTTP client, transient parquet errors, shard exhaustion.
+        Every one becomes a reopen-and-continue with backoff: the stream
+        restarts from its shard head with a fresh client, the same
+        semantics a weights-only resume already has. Only six consecutive
+        failures on one stream raise."""
+        failures = 0
+        while True:
+            try:
+                return next(holder["stream"])
+            except StopIteration:
+                print(f"stream {holder['name']}: exhausted, reopening", flush=True)
+                holder["stream"] = holder["open"]()
+            except Exception as error:
+                failures += 1
+                print(
+                    f"stream {holder['name']}: draw failed "
+                    f"({type(error).__name__}: {str(error)[:120]}), "
+                    f"reopen {failures}/6",
+                    flush=True,
+                )
+                if failures >= 6:
+                    raise
+                time.sleep(min(2.0**failures, 30.0))
+                try:
+                    holder["stream"] = holder["open"]()
+                except Exception as reopen_error:
+                    print(
+                        f"stream {holder['name']}: reopen failed "
+                        f"({type(reopen_error).__name__})",
+                        flush=True,
+                    )
+
     def _next_vision_row(self):
         spec = self.spec
         text_cap = spec.sequence_length - spec.visual_tokens - 1
         while True:
-            row = next(self._vision)
+            row = self._draw(self._vision)
             images = row.get("images") or []
             turns = row.get("texts") or []
             if len(images) != 1 or not turns:
@@ -341,7 +386,7 @@ class MixedVisionTextIterator:
         giant repositories cannot stall the producer."""
         if source["format"] == "plain":
             while True:
-                row = next(source["stream"])
+                row = self._draw(source)
                 text = (row.get(source["field"]) or "").strip()
                 if text:
                     return text
@@ -349,7 +394,7 @@ class MixedVisionTextIterator:
         while True:
             if source["queue"]:
                 return source["queue"].pop()
-            row = next(source["stream"])
+            row = self._draw(source)
             contents = []
             for file in row.get("files") or []:
                 if file.get("is_vendor"):

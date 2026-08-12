@@ -516,3 +516,29 @@ def test_text_source_config_validates():
     assert source.field == "text" and source.row_tokens is None
     with pytest.raises(Exception):
         TextSourceConfig(name="bad", dataset="x", weight=0.0)
+
+
+def test_draw_reopens_stream_on_failure_and_exhaustion():
+    from yxtpu_pretrain.runtime.vision_data import MixedVisionTextIterator
+
+    packer = object.__new__(MixedVisionTextIterator)
+    reopens = []
+
+    def flaky_then_good():
+        reopens.append(1)
+        if len(reopens) == 1:
+            def dying():
+                yield {"text": "first"}
+                raise RuntimeError("Cannot send a request, as the client has been closed.")
+            return dying()
+        return iter([{"text": "recovered"}, {"text": "again"}])
+
+    holder = {"name": "test", "open": flaky_then_good}
+    holder["stream"] = holder["open"]()
+    assert packer._draw(holder)["text"] == "first"
+    # The client-death exception triggers a reopen and the draw succeeds.
+    assert packer._draw(holder)["text"] == "recovered"
+    assert packer._draw(holder)["text"] == "again"
+    # Exhaustion (StopIteration) also reopens rather than raising.
+    assert packer._draw(holder)["text"] == "recovered"
+    assert len(reopens) == 3
