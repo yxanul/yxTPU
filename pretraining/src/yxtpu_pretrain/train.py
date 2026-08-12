@@ -1009,7 +1009,15 @@ def run(
                 and tokens_seen >= config.experiment.token_budget
             ):
                 break
-        if checkpoint_io.enabled:
+        # Skip the final force-save when the last completed step coincided
+        # with an interval save: orbax refuses to overwrite an existing step
+        # (observed at the vision-1b-trial's step 48,000, a multiple of the
+        # 4,000-step interval - the run crashed in its exit path after an
+        # otherwise clean finish).
+        final_interval = config.experiment.checkpoint.save_interval
+        if checkpoint_io.enabled and (
+            not final_interval or completed_steps % final_interval != 0
+        ):
             checkpoint_io.save(
                 state,
                 data_iterator,
