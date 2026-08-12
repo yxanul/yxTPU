@@ -9,6 +9,10 @@
 # uniform row_tokens they approximate loss-token shares - verify
 # against data/<name>_loss_token_share and retune there. Target mix
 # (loss tokens): vision ~0.35, climbmix ~0.40, stack ~0.17, math ~0.08.
+# Weights are LENGTH-CORRECTED from a 48-sequence live measurement
+# (2026-08-12): stack files average ~500 tokens vs ~660 climbmix and
+# ~1024 math, so equal-share weights over-draw math and starve stack;
+# at .595/.328/.077 the measured shares land on target.
 # NOTE: Nemotron-CC-Math is GATED - the HF account behind the workers'
 # token must have accepted its license or every producer fails at
 # stream open.
@@ -70,17 +74,17 @@ model_overrides:
     text_datasets:
       - name: climbmix
         dataset: karpathy/climbmix-400b-shuffle
-        weight: 0.615
+        weight: 0.595
         field: text
         format: plain
       - name: stack
         dataset: HuggingFaceCode/stack-v3-train
-        weight: 0.262
+        weight: 0.328
         format: repo
       - name: math
         dataset: nvidia/Nemotron-CC-Math-v1
         subset: 4plus_MIND
-        weight: 0.123
+        weight: 0.077
         field: text
         format: plain
   attention:
