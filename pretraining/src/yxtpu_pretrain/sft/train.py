@@ -338,8 +338,39 @@ def main() -> int:
                              "teacher_top1_is_label", "student_top1_is_label"):
                 if gold_key in host:
                     record[gold_key] = float(host[gold_key])
+            # Optimizer/stability diagnostics the step already computes:
+            # the vit/lm gradient split, the QK-clip state, and the
+            # attention logit maxima - previously dropped on the floor.
+            if "vit_grad_norm" in host:
+                record["vit_grad_norm"] = float(host["vit_grad_norm"])
+                record["lm_grad_norm"] = math.sqrt(
+                    max(record["grad_norm"] ** 2 - record["vit_grad_norm"] ** 2, 0.0)
+                )
+            if "max_logits" in host:
+                record["attn_max_logit"] = float(host["max_logits"].max())
+            if "muonclip_max_logit" in host:
+                record["qk_max_logit"] = float(host["muonclip_max_logit"].max())
+                record["qk_min_scale"] = float(host["muonclip_min_scale"].min())
+                record["qk_clipped_heads"] = int(host["muonclip_clipped_heads"].sum())
             if step % 25 == 0 or step == 1:
                 record["data"] = dict(getattr(iterator, "stats", {}))
+                # Parameter-drift probes: the re-inited chat rows training
+                # up, and the (imageless) vision tower drifting only under
+                # decoupled weight decay.
+                chat_rows = jax.device_get(
+                    state.model.token_embedding.embedding[...][49120:49152]
+                )
+                record["chat_row_rms"] = float(
+                    ((chat_rows.astype("float32") ** 2).mean()) ** 0.5
+                )
+                if getattr(state.model, "vision_tower", None) is not None:
+                    total = 0.0
+                    for _, variable in nnx.to_flat_state(
+                        nnx.state(state.model.vision_tower, nnx.Param)
+                    ):
+                        value = jax.device_get(variable.value)
+                        total += float((value.astype("float32") ** 2).sum())
+                    record["vit_param_norm"] = total ** 0.5
             metrics_writer.write(record)
             if is_primary:
                 print(json.dumps(record, sort_keys=True), flush=True)
@@ -351,7 +382,14 @@ def main() -> int:
                 },
                 "optimizer": {
                     "grad_norm": record["grad_norm"],
-                    "learning_rate": record["learning_rate"]},
+                    "learning_rate": record["learning_rate"],
+                    **{key: record[key] for key in (
+                        "vit_grad_norm", "lm_grad_norm", "qk_max_logit",
+                        "qk_min_scale", "qk_clipped_heads") if key in record}},
+                "stability": {
+                    **{key: record[key] for key in (
+                        "attn_max_logit", "chat_row_rms", "vit_param_norm")
+                       if key in record}},
                 "perf": {
                     "step_ms": record["step_ms"],
                     "data_wait_ms": data_wait_ms,
