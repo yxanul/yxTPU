@@ -183,3 +183,33 @@ def test_end_token_stops_a_row(fixture):
         )
     assert bool(done[0])
     assert int(samples[0, 2]) == first
+
+
+def test_step_decode_matches_full_forward_with_output_gate():
+    """G1-gated attention must decode identically to the training forward."""
+    config = _tiny_config()
+    config.model.attention.output_gate = True
+    mesh = create_mesh(config.hardware, allow_device_mismatch=True)
+    rules = make_leaf_config(config).logical_axis_rules
+    with logical_mesh_context(mesh, rules):
+        model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(1))
+    assert model.cycles.layer_3.mixer.gate_proj is not None
+
+    batch, length = 2, 12
+    tokens = jax.random.randint(
+        jax.random.key(5), (batch, length), 1, config.model.vocab_size
+    )
+    reference = _reference_logits(model, mesh, rules, tokens)
+
+    cycles = split_cycles(model)
+    cache = init_cache(model, batch, max_length=length)
+    stepped = []
+    with logical_mesh_context(mesh, rules):
+        for position in range(length):
+            logits, cache = model_step(model, cycles, tokens[:, position], cache)
+            stepped.append(np.asarray(logits))
+    stepped = np.stack(stepped, axis=1)
+
+    scale = np.abs(reference).max()
+    assert np.abs(stepped - reference).max() / scale < 2.0e-4
+    assert np.array_equal(stepped.argmax(-1), reference.argmax(-1))

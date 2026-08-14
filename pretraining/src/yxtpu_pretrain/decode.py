@@ -205,6 +205,13 @@ def gqa_step(mixer, hidden, key_cache, value_cache, position):
         precision=jax.lax.Precision.DEFAULT,
     )
     attended = attended.reshape(batch, 1, mixer.num_query_heads, mixer.head_dim)
+    if mixer.gate_proj is not None:
+        # G1 head-specific sigmoid output gate, exactly as the training
+        # forward applies it: fp32 sigmoid of gate_proj on the same
+        # normalized hidden state that feeds QKV, gating the per-head SDPA
+        # output BEFORE the output projection.
+        gate = jax.nn.sigmoid(mixer.gate_proj(hidden).astype(jnp.float32))
+        attended = (attended.astype(jnp.float32) * gate).astype(mixer.dtype)
     return mixer.out_proj(attended.astype(mixer.dtype)), key_cache, value_cache
 
 
