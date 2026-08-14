@@ -38,6 +38,12 @@ manifest's system prompt; HF-repo draws hash differently).
 (The 308M GOLD's 16/42 was on the v1 42-prompt set — not directly
 comparable; panel transcripts: `panel_sft.md`, `panel_gold.md`.)
 
+Decode probe: T0.2/pen1.3 on the GOLD checkpoint scores 17/32
+(32/32 stops) vs 24/32 at the standard T0.3/pen1.1 — heavier
+penalties trade correctness for termination, exactly as the 308M
+decode sweep found. T0.3/pen1.1 stays the operating point; the
+constraint-following gap is data, not decode.
+
 ## Reading
 
 - GOLD **doubles** the panel score over plain SFT (12 → 24) and fixes
