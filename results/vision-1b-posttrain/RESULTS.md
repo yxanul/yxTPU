@@ -68,3 +68,20 @@ constraint-following gap is data, not decode.
   FileNotFoundError while one blocks silently in the barrier — the
   AGENTS.md split-death pattern; internal-VPC HTTP copy takes ~10 s per
   host).
+
+## GOLD2 (GOLD on the SFT2 base) - and the final ladder
+
+| checkpoint | IFEval mean | panel | stops |
+| --- | --- | --- | --- |
+| SFT1 | 35.0 | 12/32 | 0/32 |
+| GOLD1 | 40.8 | 24/32 | 31/32 |
+| SFT2 | **55.3** | 23/32 | 32/32 |
+| GOLD2 | 48.8 | **27/32** | 32/32 |
+
+GOLD2 (distill 0.647->0.360, IFEval 40.3/43.8/54.0/57.0): best answer
+quality of the project (panel 27/32) at a -6.5 IFEval cost vs SFT2 -
+the store is only one-third IF and the teacher's discursive style
+partially overwrites SFT2's strict-format obedience. SFT2 = obedience
+champion, GOLD2 = quality champion; both above every 308M checkpoint
+on their axis. A third round's obvious lever: an IF-denser store or
+GOLD with ce_weight > 0 anchored on the SFT2 mix.
