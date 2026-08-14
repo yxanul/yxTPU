@@ -213,3 +213,34 @@ def test_step_decode_matches_full_forward_with_output_gate():
     scale = np.abs(reference).max()
     assert np.abs(stepped - reference).max() / scale < 2.0e-4
     assert np.array_equal(stepped.argmax(-1), reference.argmax(-1))
+
+
+def test_step_decode_matches_full_forward_standard_residuals_with_gate():
+    """The 1B production shape: standard residuals + G1 gate."""
+    config = _tiny_config()
+    config.model.residual_policy = "standard"
+    config.model.attention.output_gate = True
+    mesh = create_mesh(config.hardware, allow_device_mismatch=True)
+    rules = make_leaf_config(config).logical_axis_rules
+    with logical_mesh_context(mesh, rules):
+        model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(2))
+    assert model.final_read is None  # standard residuals: no depth buffer
+
+    batch, length = 2, 12
+    tokens = jax.random.randint(
+        jax.random.key(7), (batch, length), 1, config.model.vocab_size
+    )
+    reference = _reference_logits(model, mesh, rules, tokens)
+
+    cycles = split_cycles(model)
+    cache = init_cache(model, batch, max_length=length)
+    stepped = []
+    with logical_mesh_context(mesh, rules):
+        for position in range(length):
+            logits, cache = model_step(model, cycles, tokens[:, position], cache)
+            stepped.append(np.asarray(logits))
+    stepped = np.stack(stepped, axis=1)
+
+    scale = np.abs(reference).max()
+    assert np.abs(stepped - reference).max() / scale < 2.0e-4
+    assert np.array_equal(stepped.argmax(-1), reference.argmax(-1))

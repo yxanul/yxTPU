@@ -280,15 +280,42 @@ def cycle_step(cycle, hidden_buffer, block_index, cache, cursors, position):
     return hidden_buffer, cache
 
 
+def standard_cycle_step(cycle, hidden, cache, cursors, position):
+    """One cycle over a single token under standard residuals.
+
+    Mirrors ``HybridLayer.__call__``'s plain pre-norm flow: the residual
+    stream threads through every layer with no depth buffer."""
+    layers = [getattr(cycle, f"layer_{i}") for i in range(cycle.cycle_length)]
+    for layer in layers:
+        normalized = layer.input_norm(hidden)
+        if layer.kind == "kda":
+            slot = cursors["kda"]
+            mixed, state, conv = kda_step(
+                layer.mixer, normalized,
+                cache["kda_state"][slot], cache["kda_conv"][slot],
+            )
+            cache["kda_state"][slot] = state
+            cache["kda_conv"][slot] = conv
+            cursors["kda"] += 1
+        else:
+            slot = cursors["gqa"]
+            mixed, keys, values = gqa_step(
+                layer.mixer, normalized,
+                cache["gqa_key"][slot], cache["gqa_value"][slot], position,
+            )
+            cache["gqa_key"][slot] = keys
+            cache["gqa_value"][slot] = values
+            cursors["gqa"] += 1
+        hidden = hidden + mixed
+        hidden = hidden + layer.mlp(
+            layer.post_mixer_norm(hidden), deterministic=True
+        )
+    return hidden, cache
+
+
 def model_step(model, cycles, token, cache):
     """Logits for one token per row, with the cache advanced in place."""
     hidden = model.token_embedding(token[:, None], model_mode=MODEL_MODE_TRAIN)
-    if model.final_read is None:
-        raise NotImplementedError("incremental decode requires block_attnres")
-    num_cycles = model.config.model.num_cycles
-    buffer = jnp.concatenate(
-        (hidden[None], jnp.zeros((num_cycles, *hidden.shape), hidden.dtype)), axis=0
-    )
     # Copy the per-layer lists so the caller's cache is never mutated.
     cache = {
         key: list(value) if isinstance(value, list) else value
@@ -296,11 +323,25 @@ def model_step(model, cycles, token, cache):
     }
     position = cache["position"]
     cursors = {"kda": 0, "gqa": 0}
-    for index, cycle in enumerate(cycles):
-        buffer, cache = cycle_step(cycle, buffer, index, cache, cursors, position)
-    hidden = model.final_read(
-        buffer, num_cycles, jnp.zeros_like(hidden), include_partial=False
-    )
+    if model.final_read is None:
+        # Standard residuals: the stream threads straight through.
+        for cycle in cycles:
+            hidden, cache = standard_cycle_step(
+                cycle, hidden, cache, cursors, position
+            )
+    else:
+        num_cycles = model.config.model.num_cycles
+        buffer = jnp.concatenate(
+            (hidden[None], jnp.zeros((num_cycles, *hidden.shape), hidden.dtype)),
+            axis=0,
+        )
+        for index, cycle in enumerate(cycles):
+            buffer, cache = cycle_step(
+                cycle, buffer, index, cache, cursors, position
+            )
+        hidden = model.final_read(
+            buffer, num_cycles, jnp.zeros_like(hidden), include_partial=False
+        )
     hidden = model.final_norm(hidden)
     kernel = model.output_projection_kernel(hidden.dtype)
     logits = (hidden[:, 0] @ kernel).astype(jnp.float32)
