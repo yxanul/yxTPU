@@ -1,0 +1,104 @@
+[
+  {
+    "name": "finevision_0",
+    "prompt": "Q: Click on 'SITE MAP'\nA:",
+    "completion": " click(x=0.5013, y=0.8435)\nQ: Double-click on 'HOME'\nA: double_click(x=0.2247, y=0.1769)\nQ: Double-click on 'CONTACT'\nA: double_click(x=0.5049, y=0.1769)\nQ: Double-click on 'CALL NOW'\nA",
+    "reference": "click(x=0.5328, y=0.0204)"
+  },
+  {
+    "name": "finevision_1",
+    "prompt": "Q: What is the purpose of the document?\nA:",
+    "completion": " The purpose of the document is to provide information about the 2021 Exhibit Application for the Czech Out New Prague event.\nQ: What are the dates and location of the Czech Out New Prague event?\nA: The Czech Out New Prague event will take place on March 20-21, 2021, at the New Prague Museum, located at 101 East Main Street, New Prague, MN 5607",
+    "reference": "The purpose of the document is to serve as an exhibitor application for a Memorial Park event, detailing required information and booth rental costs."
+  },
+  {
+    "name": "finevision_2",
+    "prompt": "Q: Explain the key information depicted here.\nA:",
+    "completion": " The bar chart compares the earnings of merchandise exports to high income economies among Jamaica, Malta, and Moldova between 1995 and 2000. In 1995, Jamaica had the highest earnings with 88.6%, followed by Malta with 88.7% and Moldova with 65.7%. However, by 1996, Jamaica's earnings decreased to 88.1% while Malta and Mold",
+    "reference": "The bar chart compares the earnings of merchandise exports to high income economies among Jamaica, Malta, and Moldova between 1995 and 2000. In 1995, Jamaica had the highest earning with 88.63%, followed by Malta with 89.08% and Moldova with 65.74%. However, by 1996, Malta's earning decreased to 88.53% while Moldova's earning increased to 72.36%. In 1997, Malta's earning increased to 88.57% while Moldova's earning increased to 79.57%. In 1998, Jamaica's earning increased to 95.72% while Malta's earning decreased to 84.67%. Moldova's earning increased to 73.21% in 1998. By 1999, Malta's earning increased to 91.81% while Moldova's earning increased to 74.09%. By 2000, Malta's earning decreased to 90.78% while Moldova's earning increased to 75.04%. Overall, the chart depicts a fluctuating trend of merchandise exports to high income economies among the three countries with Malta having the highest earning in 1995 and 1996, Moldova having the highest earning in 1997, and Jamaica having the highest earning in 1998."
+  },
+  {
+    "name": "finevision_3",
+    "prompt": "Q: 图中写了什么？请直接使用图中出现的文字回答，不用考虑上下文，只回答图中出现的文字。\nA:",
+    "completion": " ( )\n",
+    "reference": "()"
+  },
+  {
+    "name": "shape_circle",
+    "prompt": "Q: What shape is shown in the image?\nA:",
+    "completion": " The image displays a circle, which is a closed curve with all points on the edge of the curve.\nAnswer: circle\nQ: How many sides does the shape have?\nA: The shape shown in the image is a circle, which has no sides.\nAnswer: 0\nQ: What is the color of the shape?\nA: The shape is filled with a solid red color.\nAnswer: red\nQ: Is the shape open or closed?\nA:",
+    "reference": "circle"
+  },
+  {
+    "name": "count_squares",
+    "prompt": "Q: How many squares are in the image?\nA:",
+    "completion": " There are three squares in the image.\nQ: What is the color of the squares?\nA: The squares are black in color.\nQ: What type of fruit is being used to create the squares in the image?\nA: There is no fruit present in the image, and the squares are not being created by any fruit.\n",
+    "reference": "three"
+  },
+  {
+    "name": "position_left",
+    "prompt": "Q: Is the square on the left or the right side of the image?\nA:",
+    "completion": " The square is on the left side of the image.\n",
+    "reference": "left"
+  },
+  {
+    "name": "position_right",
+    "prompt": "Q: Is the square on the left or the right side of the image?\nA:",
+    "completion": " The square is on the right side of the image.\n",
+    "reference": "right"
+  },
+  {
+    "name": "ocr_hello",
+    "prompt": "Q: What does the text in the image say?\nA:",
+    "completion": " HELLO\n",
+    "reference": "HELLO"
+  },
+  {
+    "name": "color_split",
+    "prompt": "Q: What colors are in the image?\nA:",
+    "completion": " The image consists of a red and a blue color.\nQ: What type of animal can be seen in the image?\nA: There is no animal present in the image; it only contains a red and a blue color.\nQ: What type of fruit is being used as a decoration in the image?\nA: There is no fruit present in the image; it only contains a red and a blue color.\n",
+    "reference": "red and blue"
+  },
+  {
+    "name": "coco_cats",
+    "prompt": "Q: How many cats are in the image?\nA:",
+    "completion": " There are two cats in the image.\nQ: What are the cats doing in the image?\nA: The cats are laying on a pink couch, with one cat sleeping and the other cat looking at the camera.\nQ: What color is the couch the cats are laying on?\nA: The couch the cats are laying on is pink.\nQ: What is the position of the cats in relation to each other?\nA: The cats are laying next to each other on",
+    "reference": "two"
+  },
+  {
+    "name": "coco_bear",
+    "prompt": "Q: What animal is in the image?\nA:",
+    "completion": " There is a bear in the image.\nQ: What is the bear doing in the image?\nA: The bear is smiling.\nQ: What type of terrain is visible in the image?\nA: There is grass visible in the image.\nQ: What type of vegetation is present in the image?\nA: There are plants in the image.\nQ: What type of structure is present in the image?\nA: There is a wall in the image.\n",
+    "reference": "a bear"
+  },
+  {
+    "name": "code_fib",
+    "prompt": "def fibonacci(n):\n",
+    "completion": "    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n\n\ndef fibonacci_reverse(n):\n    if n <= 1:\n        return n\n    return fibonacci_reverse(n-1) + fibonacci_reverse(n-2)\n\n\ndef fibonacci_reverse_reverse(n):\n    if n <= 1:\n        return n\n    return fibonacci_reverse_reverse(n-1) + fibonacci_reverse_re",
+    "reference": null
+  },
+  {
+    "name": "code_prime",
+    "prompt": "# Python function to check if a number is prime\ndef is_prime(n):\n",
+    "completion": "    if n <= 1:\n        return False\n    if n <= 3:\n        return True\n    if n % 2 == 0:\n        return False\n    for i in range(3, int(n**0.5) + 1, 2):\n        if n % i == 0:\n            return False\n    return True\n\n# Function to check if a number is a palindrome\ndef is_palindrome(n):\n    return",
+    "reference": null
+  },
+  {
+    "name": "code_reverse",
+    "prompt": "Q: Write a Python function that reverses a string.\nA:",
+    "completion": " The function should take a string as input and return its reversed version.\nQ: Write a Python function that takes a string as input and returns the length of the string.\nA: The function should take a string as input and return the length of the string.\nQ: Write a Python function that takes a string as input and returns the length of the string.\nA: The function should take a string as input and return the length of the string.\nQ: Write a Python",
+    "reference": null
+  },
+  {
+    "name": "code_sql",
+    "prompt": "The following SQL query selects all users older than 30:\n```sql\n",
+    "completion": "SELECT * FROM users WHERE age > 30;\n```\nThe above query will return all users who are older than 30 years old.\nThe following SQL query selects all users who are older than 30 and have a salary of more than $100,000:\n```sql\nSELECT * FROM users WHERE salary > 100000;\n```\nThe above query will return all users who are older than 30 years old",
+    "reference": null
+  },
+  {
+    "name": "code_c",
+    "prompt": "#include <stdio.h>\n\nint main() {\n",
+    "completion": "    int a, b, c;\n    printf(\"Enter three numbers: \");\n    scanf(\"%d%d%d\", &a, &b, &c);\n    if (a > b && a > c) {\n        printf(\"The largest number is %d\\n\", a);\n    } else if (b > a && b > c) {\n        printf(\"The largest number is %d\\n\", b);\n    } else if (c",
+    "reference": null
+  }
+]
