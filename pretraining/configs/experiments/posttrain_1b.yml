@@ -1,0 +1,53 @@
+# Post-training profile for the 1B multimodal checkpoints: reproduces
+# their exact parameter tree (standard residuals, G1 output gate, vision
+# tower present - orbax/pickle restores require exact tree match; the
+# superbpe_50b profile's block_attnres override silently builds the wrong
+# model). The tower rides along untouched during text-only post-training
+# (images=None short-circuits the splice). Schedules come from launch
+# overrides, as with every SFT/GOLD run.
+name: posttrain_1b
+steps: 2000
+token_budget: null
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: false
+checkpoint:
+  enabled: true
+  destination: /home/a1111/yxtpu_ckpts
+  save_interval: 19073
+  async_save: false
+  keep: 6
+  resume: true
+  allow_weights_only_resume: true
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: posttrain-1b
+  tags: [v4-64, sft, 1b, vision-base]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 250
+harness_eval:
+  enabled: false
+  interval: 4768
+  tasks:
+    - hellaswag
+  batch_size_per_device: 1
+  num_fewshot: 0
+  limit: null
+  use_cache: true
+model_overrides:
+  residual_policy: standard
+  attention:
+    output_gate: true
+  vision:
+    enabled: true
+data_overrides:
+  sequence_length: 2048
+  per_device_batch_size: 4

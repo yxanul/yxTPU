@@ -78,12 +78,14 @@ def main() -> int:
     parser.add_argument("--no-chat-template", action="store_true")
     parser.add_argument("--sequence-length", type=int, default=4096)
     parser.add_argument("--output", default="/tmp/generative_eval.json")
+    parser.add_argument("--experiment", default="superbpe_50b")
+    parser.add_argument("--set", action="append", dest="overrides", default=[])
     arguments = parser.parse_args()
 
     tasks = [task.strip() for task in arguments.tasks.split(",") if task.strip()]
     config = load_config(
         model=arguments.model, optimizer="muonclip", data=arguments.data,
-        hardware="v4-64", experiment="superbpe_50b",
+        hardware="v4-64", experiment=arguments.experiment,
         overrides=[
             "experiment.token_budget=null",
             "experiment.wandb.enabled=false",
@@ -91,7 +93,7 @@ def main() -> int:
             f"data.sequence_length={arguments.sequence_length}",
             f"experiment.checkpoint.destination={arguments.init_destination}",
             f"experiment.harness_eval.batch_size_per_device={arguments.batch_per_device}",
-        ],
+        ] + list(arguments.overrides or []),
     )
     mesh = create_mesh(config.hardware, allow_device_mismatch=True)
     rules = make_leaf_config(config).logical_axis_rules

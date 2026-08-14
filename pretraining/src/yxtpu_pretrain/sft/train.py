@@ -71,6 +71,11 @@ def main() -> int:
     parser.add_argument("--model", default="kda_hybrid_128k")
     parser.add_argument("--data", default="climbmix_superbpe")
     parser.add_argument(
+        "--experiment", default="superbpe_50b",
+        help="experiment profile; its model_overrides must reproduce the "
+             "init checkpoint's parameter tree exactly (posttrain_1b for "
+             "the 1B: standard residuals + output gate + vision tower)")
+    parser.add_argument(
         "--mixture", default=None,
         help="interleave configs of --dataset by record probability, "
              "e.g. 'IF:0.28,Math:0.43,Knowledge:0.18,Code:0.11'")
@@ -119,7 +124,7 @@ def main() -> int:
     ]
     config = load_config(
         model=args.model, optimizer="muonclip", data=args.data,
-        hardware="v4-64", experiment="superbpe_50b",
+        hardware="v4-64", experiment=args.experiment,
         overrides=base_overrides + list(args.overrides or []),
     )
     mesh = create_mesh(config.hardware,

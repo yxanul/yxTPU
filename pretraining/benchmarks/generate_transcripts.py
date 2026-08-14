@@ -184,12 +184,14 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20260729)
     parser.add_argument("--json-output", default="/tmp/transcripts.json")
     parser.add_argument("--markdown-output", default="/tmp/transcripts.md")
+    parser.add_argument("--experiment", default="superbpe_50b")
+    parser.add_argument("--set", action="append", dest="overrides", default=[])
     arguments = parser.parse_args()
 
     window = 8192
     config = load_config(
         model=arguments.model, optimizer="muonclip", data=arguments.data,
-        hardware="v4-64", experiment="superbpe_50b",
+        hardware="v4-64", experiment=arguments.experiment,
         overrides=[
             f"data.sequence_length={window}",
             "experiment.wandb.enabled=false",
@@ -198,7 +200,7 @@ def main() -> int:
             "experiment.acknowledge_no_checkpoint=true",
             "experiment.harness_eval.enabled=false",
             "experiment.diagnostics.enabled=false",
-        ],
+        ] + list(arguments.overrides or []),
     )
     mesh = create_mesh(config.hardware, allow_device_mismatch=True)
     rules = make_leaf_config(config).logical_axis_rules

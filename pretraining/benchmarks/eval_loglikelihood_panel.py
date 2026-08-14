@@ -63,6 +63,8 @@ def main() -> int:
     parser.add_argument("--limit", type=float, default=None)
     parser.add_argument("--batch-per-device", type=int, default=1)
     parser.add_argument("--output", default="/tmp/loglik_panel.json")
+    parser.add_argument("--experiment", default="superbpe_50b")
+    parser.add_argument("--set", action="append", dest="overrides", default=[])
     arguments = parser.parse_args()
 
     groups: dict[int, list[str]] = {}
@@ -73,14 +75,14 @@ def main() -> int:
     run_name = arguments.init_run or f"{arguments.model}-muonclip-superbpe_50b"
     config = load_config(
         model=arguments.model, optimizer="muonclip", data=arguments.data,
-        hardware="v4-64", experiment="superbpe_50b",
+        hardware="v4-64", experiment=arguments.experiment,
         overrides=[
             "experiment.token_budget=null",
             "experiment.wandb.enabled=false",
             "experiment.diagnostics.enabled=false",
             f"experiment.checkpoint.destination={arguments.init_destination}",
             f"experiment.harness_eval.batch_size_per_device={arguments.batch_per_device}",
-        ],
+        ] + list(arguments.overrides or []),
     )
     mesh = create_mesh(config.hardware, allow_device_mismatch=True)
     rules = make_leaf_config(config).logical_axis_rules
