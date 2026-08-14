@@ -28,6 +28,14 @@ manifest's system prompt; HF-repo draws hash differently).
 | instruction loose | 50.2 | 59.1 | 43.6 | 48.7 |
 | **mean** | 40.4 | **51.0** | 35.0 | **40.8** |
 
+SFT2 (4-dataset mix: IF + Knowledge + AMD-SFT-Mix_3.5M + MathCode:1M,
+1 epoch, 5,200 steps @4096, LR 8.5e-5, full new diagnostics): IFEval
+47.0 / 50.5 / 60.2 / 63.4, **mean 55.3** - the project best, above the
+308M mix300k GOLD (51.0), with panel 23/32 at 32/32 clean stops and
+markedly concise answers (panel generates in 3.9 s vs 21.6 s). Final
+train loss 0.508. The instruction-density hypothesis is confirmed:
+mix + LR were jointly worth +20.3 IFEval mean over SFT1.
+
 ## Qualitative panel (v2 set, 32 prompts, scored)
 
 | checkpoint | correct | im_end stops | code section |
