@@ -22,11 +22,11 @@ manifest's system prompt; HF-repo draws hash differently).
 
 | metric | 308M gen-2 | 308M +mix300k | 1B SFT | 1B GOLD |
 | --- | --- | --- | --- | --- |
-| prompt strict | 30.9 | 42.9 | (pending) | 32.9 |
-| prompt loose | 35.1 | 45.5 | (pending) | 36.4 |
-| instruction strict | 45.4 | 56.4 | (pending) | 45.3 |
-| instruction loose | 50.2 | 59.1 | (pending) | 48.7 |
-| **mean** | 40.4 | **51.0** | (pending) | **40.8** |
+| prompt strict | 30.9 | 42.9 | 26.6 | 32.9 |
+| prompt loose | 35.1 | 45.5 | 29.8 | 36.4 |
+| instruction strict | 45.4 | 56.4 | 40.0 | 45.3 |
+| instruction loose | 50.2 | 59.1 | 43.6 | 48.7 |
+| **mean** | 40.4 | **51.0** | 35.0 | **40.8** |
 
 ## Qualitative panel (v2 set, 32 prompts, scored)
 
