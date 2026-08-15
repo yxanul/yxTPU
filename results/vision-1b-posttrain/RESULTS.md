@@ -85,3 +85,18 @@ partially overwrites SFT2's strict-format obedience. SFT2 = obedience
 champion, GOLD2 = quality champion; both above every 308M checkpoint
 on their axis. A third round's obvious lever: an IF-denser store or
 GOLD with ce_weight > 0 anchored on the SFT2 mix.
+
+## Post-trained gsm8k and hand-graded probes (2026-08-15)
+
+gsm8k (5-shot, full set, chat template): SFT2 3.3, GOLD2 **4.6** -
+project best (base cont30b 3.18; 308M@367B 1.1).
+
+Ten fresh reasoning/code/math prompts, hand-graded (probe_sft2.json,
+probe_gold2.json): 9/10 substantively correct on BOTH checkpoints -
+systems of equations solved and verified, canonical hash-map two_sum
+with docstring, correct top-3 SQL (SFT2 used the exact given schema;
+GOLD2 invented column names), xs[-1] bug fix, Rayleigh scattering.
+Shared failure: haiku form (both ignore 5-7-5). Shared pathology: on
+generous token budgets the model re-answers in a loop after the
+correct final answer (the panel's short budgets mask this); a
+presence-penalty or answer-once SFT signal is the obvious next lever.
