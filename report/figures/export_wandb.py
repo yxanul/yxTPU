@@ -26,12 +26,12 @@ import argparse
 import csv
 from pathlib import Path
 
-RUNS = ("60sndjih", "oiggd5fp")
+RUNS = ("60sndjih", "oiggd5fp", "26iwptzi", "z1afba9u", "kwgug4u6", "inzcfemi")
 PROJECT = "davidfranco2300-other/yxtpu-pretrain"
 
 WANTED_SUBSTRINGS = (
     "loss", "learning_rate", "step_ms", "tokens", "grad_norm",
-    "max_logit", "tokens_per_second", "data_wait",
+    "max_logit", "tokens_per_second", "data_wait", "embed_rms", "_share", "vision",
 )
 
 

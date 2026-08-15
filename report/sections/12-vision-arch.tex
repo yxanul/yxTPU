@@ -1,0 +1,50 @@
+\section{A 1B multimodal architecture}
+\label{sec:vision-arch}
+
+Part II scales the Part I recipe to a $\sim$0.98B-parameter model and
+adds native vision. The backbone keeps the depth-first hybrid cycle
+\([\mathrm{KDA},\mathrm{KDA},\mathrm{KDA},\mathrm{GQA}]\) with
+\(d_{\mathrm{model}}{=}1536\), 32 layers (8 cycles), SwiGLU MLPs of
+width 4096, 12 KDA heads of dimension 128, GQA \(12{:}3\), and the
+yx49k tied embedding. Two deliberate departures from Part I:
+
+\paragraph{Standard residuals.} The depth-attention residual policy of
+Part I moves a \([\,\text{depth},B,T,d\,]\) buffer through both scan
+directions; at this width and sequence length 4096 that buffer costs a
+measured 736\,ms of a 2{,}309\,ms step (its copies alone are half of
+that). Plain pre-norm residuals recover $+47\%$ throughput, and with
+two further measured levers (unfused MLP, parameter scan on axis 0)
+the operating point reaches 342k tokens/s on 32 TPU\,v4 chips at
+23.9\% parameter-FLOP utilization --- above the tuned Part~I campaign.
+
+\paragraph{A head-specific sigmoid output gate.} Part I's campaign
+telemetry recorded a permanent collapse of the first cycle's attention
+logits (all heads pinned at exactly zero from step $\sim$35k onward).
+Each GQA layer here therefore gates its per-head SDPA output
+elementwise by \(\sigma(W_g x)\) \emph{before} the output projection,
+with \(x\) the same normalized hidden state that feeds QKV. The bet is
+validated in Section~\ref{sec:vision-campaigns}: cycle-0 heads remain
+active through and far beyond the horizon at which the ungated model
+collapsed.
+
+\paragraph{The vision tower.} Vision is trained from scratch, jointly,
+under the next-token objective alone --- no contrastive stage, no
+pretrained encoder. A ViT-S-class tower (12 bidirectional pre-norm
+blocks, width 384, 6 heads, MLP 1536; RMSNorm, bias-free) embeds
+\(448^2\) images as \(28^2\) patches of size 16; a \(2{\times}2\)
+space-to-depth fold and a two-layer projector map them to 196 visual
+tokens in the language embedding space. Images enter the token stream
+as runs of a reserved placeholder id whose embeddings are replaced by
+the tower's output; the loss never lands on placeholder positions. The
+tower's matrices join the Muon partition; its patch embedding and
+learned 2D positions join the AdamW side, mirroring the Part~I routing
+philosophy.
+
+\paragraph{Packing.} Mixed batches pack whole rows (an image row: 196
+placeholders + its dialogue; a text row: one truncated document) into
+4096-token sequences with per-row segment ids and restarting
+positions. Segment masking confines attention and loss to each row;
+the KDA recurrent state is not reset at row boundaries --- it only
+decays, with the per-token log-decay bounded by the safe gate, a
+carryover the 50B-token Part~I SFT already tolerated and which two
+campaigns here confirm benign.

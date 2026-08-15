@@ -17,8 +17,8 @@
 \newcommand{\E}{\mathbb{E}}
 \newcommand{\R}{\mathbb{R}}
 
-\title{\textbf{yx49k-L20: A 308M Hybrid Gated-Delta-Attention Language
-Model Trained on 367B Tokens on TPU v4}}
+\title{\textbf{yx49k: Hybrid Gated-Delta-Attention Language Models on
+TPU v4 --- a 308M Text Program and a 1B Multimodal Program}}
 \author{David-Franco Buga (Yxanul)\\
 \small\texttt{github.com/yxanul} $\cdot$ \texttt{huggingface.co/Yxanul}}
 \date{August 2026}
@@ -51,9 +51,20 @@ measured attribution of what remains: capability favors our base;
 decode-time discipline favors the references' deeper post-training; and
 the failure signature identifies on-policy distillation as the indicated
 next stage.
+Part II scales the recipe to a 0.98B-parameter model with a
+from-scratch vision tower trained jointly under the next-token
+objective across two campaigns totalling 55B tokens of a calibrated
+image/text/code/mathematics mixture. At a fraction of the text budget
+the multimodal model matches or exceeds the 308M program's language
+benchmarks, grounds vision on held-out data, and --- sharing the same
+tokenizer --- accepts the full post-training stack unchanged,
+surpassing every Part~I checkpoint on instruction following and answer
+quality within a single day of post-training.
 \end{abstract}
 
 \tableofcontents
+
+\part{A 308M Text Program}
 
 \input{sections/01-intro}
 \input{sections/02-architecture}
@@ -66,6 +77,13 @@ next stage.
 \input{sections/09-posttraining}
 \input{sections/10-calibration}
 \input{sections/11-discussion}
+
+\part{A 1B Multimodal Program}
+
+\input{sections/12-vision-arch}
+\input{sections/13-vision-data}
+\input{sections/14-vision-campaigns}
+\input{sections/15-vision-results}
 
 \appendix
 \input{sections/appendix}

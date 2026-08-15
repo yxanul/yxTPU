@@ -100,6 +100,25 @@ all measured under this repo's own harness: capability ours, decode
 discipline theirs, next stage on-policy distillation.
 Full narrative: [`post_training/GOLD.md`](post_training/GOLD.md).
 
+## The 1B multimodal program
+
+Part II of the report: the same recipe scaled to a 0.98B hybrid with a
+from-scratch ViT-S vision tower trained jointly under the next-token
+objective - no contrastive stage, no pretrained encoder. Two campaigns
+(25B + 30B tokens) on a calibrated image/text/code/math streaming mix
+at 342-348k tok/s on the same v4-64:
+
+| result | value |
+| --- | --- |
+| language anchors at 25B tokens | beats the 337M@50B baseline on all ten |
+| GSM8K (5-shot) after the code/math mix | 1.21% -> 3.18% (308M@367B: 1.1%) |
+| vision probes | counting, left/right, OCR, chart values, UI clicks on unseen shards |
+| post-training (same tokenizer, same GOLD stores, one day) | IFEval mean 55.3 (SFT-2) / panel 27/32 (GOLD-2) - past every 308M checkpoint |
+
+Full ledger: `results/vision-1b-trial/`, `results/vision-1b-cont30b/`,
+`results/vision-1b-posttrain/RESULTS.md`, and Part II of
+[`report/main.pdf`](report/main.pdf).
+
 ## Repository layout
 
 - `pretraining/`: the standalone trainer (model, kernels, optimizers,

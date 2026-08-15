@@ -1,0 +1,61 @@
+\section{Streaming a measured multimodal mixture}
+\label{sec:vision-data}
+
+Both campaigns stream everything: no corpus is materialized on disk.
+Each of the 8 hosts holds one producer thread whose sources are sharded
+at the \emph{file} level (a row-modulo shard would download every
+shard's rows and discard $7/8$ of them). The composition is controlled
+where it matters --- in supervised (loss) tokens, not in rows --- and
+every knob has a live instrument.
+
+\paragraph{Composition by calibration.} A row-level Bernoulli chooses
+vision versus text; a weighted draw chooses the text source. Row
+weights are not the supervision mix: an image row contributes mostly
+loss-free placeholder positions, and source documents differ in length.
+Weights are therefore solved from a decomposed calibration --- measured
+mean supervised tokens per row per source --- and verified against the
+live per-source loss-token shares. The continuation's realized mix held
+constant to three decimals across 57{,}220 steps:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+source & target share & realized share \\
+\midrule
+vision dialogue (FineVision-class) & 0.35 & 0.359 \\
+web text (ClimbMix) & 0.40 & 0.404 \\
+source code (Stack-class, one file per row) & 0.17 & 0.158 \\
+mathematics (CC-derived, quality-filtered) & 0.08 & 0.079 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Code rows carry file \emph{content only} --- no paths or repository
+metadata enter the token stream; the packer's per-row segments are the
+file boundaries.
+
+\paragraph{Budget-aware fill.} The first measured pathology was
+packing waste: when a drawn image row exceeded a sequence's 4-image
+budget, the packer ended the sequence early, and padding still costs
+full compute --- a measured \(\mathrm{pad}=0.279\) at the initial
+setting. Ending a pack now triggers a text-only fill of the remaining
+capacity (stashed rows open later sequences; nothing is dropped or
+duplicated), taking padding to \(0.04\)--\(0.06\).
+
+\paragraph{Bytes are the bottleneck, twice.} Shipping image pixels as
+fp32 cost 154\,MB per host per step, and the host-side global-array
+assembly ran at a median 1{,}802\,ms against a 1{,}504\,ms device step
+--- the dominant throughput loss of the first campaign (75.7\% of 8.3
+wall-hours of excess). Pixels now travel as uint8 and normalize on
+device (the same \(a/255\cdot2-1\) mapping, verified end-to-end
+through the tower); assembly drops under the device window and the
+sustained rate recovers to the 348k tokens/s floor.
+
+\paragraph{Self-healing streams.} A multi-day streaming run loses HTTP
+clients in varied ways --- hung reads, closed-client errors after retry
+aborts, transient object-store failures --- and on a synchronous
+8-host slice any one host's stall idles all 32 chips. Every stream
+draw therefore reopens its stream with a fresh client on any
+exception, with bounded backoff; a dead client costs one host seconds
+instead of the fleet an hour. After this change the second campaign
+ran 49{,}220 steps without a single stream incident.
