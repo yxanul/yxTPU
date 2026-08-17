@@ -448,10 +448,32 @@ def _causal_conv_silu(
   ``match_xla_rounding`` reproduces the XLA path's bf16 roundings (bf16
   weights, bf16 conv output, bf16 activation) so the fold is a
   rounding-class match of the layer it replaces."""
+  conv = _causal_conv(raw, previous, weight, has_previous, conv_width=conv_width,
+                      match_xla_rounding=match_xla_rounding)
+  act = conv * jax.nn.sigmoid(conv)
+  if match_xla_rounding:
+    act = act.astype(jnp.bfloat16).astype(jnp.float32)
+  return conv, act
+
+
+def _causal_conv(
+    raw: jax.Array,
+    previous: jax.Array,
+    weight: jax.Array,
+    has_previous,
+    *,
+    conv_width: int,
+    match_xla_rounding: bool = True,
+) -> jax.Array:
+  """The conv output of one chunk (fp32; bf16-rounded when matching XLA).
+
+  VMEM-lean: the padded chunk stays in the raw dtype (bf16) and each tap
+  slice is cast on the fly, so the only fp32 slabs alive are the running
+  sum and one term."""
   chunk = raw.shape[1]
   halo = previous.shape[1]
   previous = jnp.where(has_previous, previous, jnp.zeros_like(previous))
-  padded = jnp.concatenate((previous, raw), axis=1).astype(jnp.float32)
+  padded = jnp.concatenate((previous, raw), axis=1)
   weight = weight.astype(jnp.float32)
   if match_xla_rounding:
     weight = weight.astype(jnp.bfloat16).astype(jnp.float32)
@@ -460,25 +482,29 @@ def _causal_conv_silu(
     # y[t] = sum_k w[k] x[t - (width - 1) + k]; row t of the chunk sits at
     # padded row halo + t.
     start = halo - (conv_width - 1) + tap
-    term = padded[:, start : start + chunk, :] * weight[tap][:, None, :]
+    term = padded[:, start : start + chunk, :].astype(jnp.float32) * weight[tap][:, None, :]
     conv = term if conv is None else conv + term
   if match_xla_rounding:
     conv = conv.astype(jnp.bfloat16).astype(jnp.float32)
-  act = conv * jax.nn.sigmoid(conv)
-  if match_xla_rounding:
-    act = act.astype(jnp.bfloat16).astype(jnp.float32)
-  return conv, act
+  return conv
 
 
 def _fold_inputs(query_ref, key_ref, value_ref, prev_refs, weight_refs, has_previous, *, conv_width):
-  """Activated (q, k, v) and their SiLU' factors for the fold kernels."""
+  """Activated (q, k, v) for the fold kernels (fp32 values in VMEM)."""
   outs = []
   for raw_ref, prev_ref, weight_ref in zip((query_ref, key_ref, value_ref), prev_refs, weight_refs):
-    conv, act = _causal_conv_silu(
+    _, act = _causal_conv_silu(
         raw_ref[0], prev_ref[0], weight_ref[...], has_previous, conv_width=conv_width
     )
-    outs.append((act, _silu_grad(conv)))
+    outs.append(act)
   return outs
+
+
+def _fold_scale(raw_ref, prev_ref, weight_ref, has_previous, *, conv_width):
+  """SiLU'(conv) for one input, recomputed from the refs where it is used
+  (stage B's write sites) instead of being kept live across the body."""
+  conv = _causal_conv(raw_ref[0], prev_ref[0], weight_ref[...], has_previous, conv_width=conv_width)
+  return _silu_grad(conv)
 
 
 def _l2_normalize(values: jax.Array, *, scale: float = 1.0) -> jax.Array:
@@ -1260,7 +1286,7 @@ def _kda_fused_forward_kernel_fold(
   """Forward with the causal conv + SiLU folded: Q/K/V refs hold RAW
   projections; the halo refs the 16 rows before this chunk."""
   chunk_index = pl.program_id(chunk_axis)
-  (query, _), (key, _), (value, _) = _fold_inputs(
+  query, key, value = _fold_inputs(
       query_ref, key_ref, value_ref,
       (query_prev_ref, key_prev_ref, value_prev_ref),
       (query_weight_ref, key_weight_ref, value_weight_ref),
@@ -1742,7 +1768,7 @@ def _kda_backward_stage_a_kernel_fold(
   """Stage A over RAW Q/K/V refs: recomputes conv + SiLU per chunk."""
   reverse_chunk_index = pl.program_id(chunk_axis)
   chunk_index = num_chunks - 1 - reverse_chunk_index
-  (query, _), (key, _), (value, _) = _fold_inputs(
+  query, key, value = _fold_inputs(
       query_ref, key_ref, value_ref,
       (query_prev_ref, key_prev_ref, value_prev_ref),
       (query_weight_ref, key_weight_ref, value_weight_ref),
@@ -2058,20 +2084,32 @@ def _kda_backward_stage_b_kernel_fold(
   cotangents with respect to the CONV OUTPUT (SiLU' folded in), which
   ``_kda_conv_silu_vjp`` turns into raw-input cotangents."""
   chunk_index = pl.program_id(chunk_axis)
-  (query, query_scale), (key, key_scale), (value, value_scale) = _fold_inputs(
+  query, key, value = _fold_inputs(
       query_ref, key_ref, value_ref,
       (query_prev_ref, key_prev_ref, value_prev_ref),
       (query_weight_ref, key_weight_ref, value_weight_ref),
       chunk_index > 0,
       conv_width=conv_width,
   )
+  # SiLU' factors are recomputed at the write sites (thunks) so nothing
+  # extra stays live in VMEM across the pairwise VJP body.
+  scales = tuple(
+      functools.partial(
+          _fold_scale, raw_ref, prev_ref, weight_ref, chunk_index > 0, conv_width=conv_width
+      )
+      for raw_ref, prev_ref, weight_ref in (
+          (query_ref, query_prev_ref, query_weight_ref),
+          (key_ref, key_prev_ref, key_weight_ref),
+          (value_ref, value_prev_ref, value_weight_ref),
+      )
+  )
   if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G") == "act":
-    query_scale = key_scale = value_scale = 1.0  # debug: emit d(act) unscaled
+    scales = None  # debug: emit d(act) unscaled
   _kda_backward_stage_b_body(
       query,
       key,
       value,
-      (query_scale, key_scale, value_scale),
+      scales,
       beta_ref,
       query_partial_ref,
       key_partial_ref,
@@ -2119,7 +2157,7 @@ def _kda_backward_stage_b_body(
     inputs_mode: str,
 ):
   if cotangent_scales is None:
-    cotangent_scales = (1.0, 1.0, 1.0)
+    cotangent_scales = (lambda: 1.0, lambda: 1.0, lambda: 1.0)
   query_scale, key_scale, value_scale = cotangent_scales
   beta = beta_ref[0][..., 0].astype(jnp.float32)
   streams, chunk, _ = query_input.shape
@@ -2220,9 +2258,9 @@ def _kda_backward_stage_b_body(
   )
 
   if "no_epilogue" in flags:
-    query_cotangent_ref[0] = (query_cotangent * query_scale).astype(query_cotangent_ref.dtype)
-    key_cotangent_ref[0] = (key_cotangent * key_scale).astype(key_cotangent_ref.dtype)
-    value_cotangent_ref[0] = (value_beta_cotangent_ref[0] * value_scale).astype(
+    query_cotangent_ref[0] = (query_cotangent * query_scale()).astype(query_cotangent_ref.dtype)
+    key_cotangent_ref[0] = (key_cotangent * key_scale()).astype(key_cotangent_ref.dtype)
+    value_cotangent_ref[0] = (value_beta_cotangent_ref[0] * value_scale()).astype(
         value_cotangent_ref.dtype
     )
     log_decay_cotangent_ref[0] = cumulative_decay_cotangent
@@ -2251,9 +2289,9 @@ def _kda_backward_stage_b_body(
   else:
     query_cotangent = query_normalized_cotangent
 
-  query_cotangent_ref[0] = (query_cotangent * query_scale).astype(query_cotangent_ref.dtype)
-  key_cotangent_ref[0] = (key_cotangent * key_scale).astype(key_cotangent_ref.dtype)
-  value_cotangent_ref[0] = (value_cotangent * value_scale).astype(value_cotangent_ref.dtype)
+  query_cotangent_ref[0] = (query_cotangent * query_scale()).astype(query_cotangent_ref.dtype)
+  key_cotangent_ref[0] = (key_cotangent * key_scale()).astype(key_cotangent_ref.dtype)
+  value_cotangent_ref[0] = (value_cotangent * value_scale()).astype(value_cotangent_ref.dtype)
   log_decay_cotangent_ref[0] = log_decay_cotangent
   beta_cotangent_ref[0, ..., 0] = beta_cotangent
 
@@ -2290,7 +2328,7 @@ def _kda_conv_silu_vjp_kernel(
   ).astype(jnp.float32)
   raw = raw_ref[0]
   previous = jnp.where(chunk_index > 0, raw_prev_ref[0], jnp.zeros_like(raw_prev_ref[0]))
-  padded = jnp.concatenate((previous, raw), axis=1).astype(jnp.float32)
+  padded = jnp.concatenate((previous, raw), axis=1)
   weight = weight_ref[...].astype(jnp.float32)
   if match_xla_rounding:
     weight = weight.astype(jnp.bfloat16).astype(jnp.float32)
@@ -2313,7 +2351,7 @@ def _kda_conv_silu_vjp_kernel(
   weight_cotangent = jnp.zeros((streams, conv_width, raw.shape[2]), jnp.float32)
   for tap in range(conv_width):
     start = halo - (conv_width - 1) + tap
-    reduced = jnp.sum(g * padded[:, start : start + chunk, :], axis=1)  # [S, D]
+    reduced = jnp.sum(g * padded[:, start : start + chunk, :].astype(jnp.float32), axis=1)
     weight_cotangent = weight_cotangent + jnp.where(
         tap_index == tap, reduced[:, None, :], 0.0
     )
