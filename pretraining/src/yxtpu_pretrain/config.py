@@ -40,7 +40,12 @@ class KDAConfig(StrictModel):
     # order; measured 4.2% SLOWER at 273M on v6e in 2026-07, re-measured
     # at 1B/8k on v4 in 2026-08). Ignored on the folded (v5e/v6e) kernel
     # path, which owns the convolution.
-    conv_impl: Literal["xla", "shifted"] = "xla"
+    # "fused" (v4 only) folds conv + SiLU into the fused Pallas kernel
+    # (pallas_kda_fused_v4_conv): the kernels read the RAW projection with a
+    # 16-row halo, the activation never touches HBM, and the backward emits
+    # raw-input cotangents plus the depthwise weight gradient from a small
+    # VJP kernel. Falls back to "xla" wherever the v4 kernel is not used.
+    conv_impl: Literal["xla", "shifted", "fused"] = "xla"
     # Merge in_proj_qkv, decay_down, beta_proj, and output_gate_down into one
     # [embed, 3HD + rank + heads + rank] GEMM that reads hidden_states once.
     # Initialization is distribution-identical (fan_in-only initializer, all

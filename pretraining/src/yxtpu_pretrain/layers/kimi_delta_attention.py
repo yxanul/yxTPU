@@ -1368,6 +1368,10 @@ class KimiDeltaAttention(nnx.Module):
         use_fused_kernel and self.config.use_qk_norm_in_gdn and _local_tpu_is_v4()
     )
     use_fused_kernel = use_fused_kernel and not use_v4_fused_kernel
+    # v4 conv fold: raw Q/K/V into the kernel, conv + SiLU inside it.
+    use_v4_conv_fold = (
+        use_v4_fused_kernel and getattr(self.config, "kda_conv_impl", "xla") == "fused"
+    )
     if self.in_proj_mixer is not None:
       qkv_width = 3 * self.num_heads * self.head_dim
       rank = self.gate_rank
@@ -1390,6 +1394,10 @@ class KimiDeltaAttention(nnx.Module):
       # mixer path no longer does).
       raw_qkv = qkv.transpose(0, 1, 3, 2, 4)
       query = key = value = None
+    elif use_v4_conv_fold:
+      # Head-major [B, T, H, 3, D] projection: the raw per-head Q/K/V slices
+      # go straight to the kernel, which owns the conv and the SiLU.
+      query, key, value = (qkv[..., i, :] for i in range(3))
     else:
       qkv = qkv.reshape(batch, sequence_length, -1)
       if _USE_SHIFTED_QKV_CONV or getattr(self.config, "kda_conv_impl", "xla") == "shifted":
@@ -1482,6 +1490,41 @@ class KimiDeltaAttention(nnx.Module):
 
       output, _ = sharded_fused_kda(raw_qkv, conv_weight, log_decay, beta, initial_state)
     else:
+
+      if use_v4_conv_fold:
+        from yxtpu_pretrain.kernels.kda_fused_pallas_v4 import (
+            pallas_kda_fused_v4_conv,
+        )
+
+        width = self.config.gdn_conv_kernel_dim
+        # Flax depthwise kernel [width, 1, H*3*D] in the projection's (H, 3, D)
+        # channel order -> [width, H, 3, D].
+        conv_weight = self.conv1d.kernel.value.reshape(
+            width, self.num_heads, 3, self.head_dim
+        )
+        conv_fold_spec = logical_to_mesh_axes(
+            (None, KV_HEAD, None, None),
+            mesh=self.mesh,
+            rules=self.config.logical_axis_rules,
+        )
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(qkv_spec, qkv_spec, qkv_spec, conv_fold_spec, qkv_spec, beta_spec, state_spec),
+            out_specs=(qkv_spec, state_spec),
+            check_vma=False,
+        )
+        def sharded_kda_conv(q, k, v, w, g, b, state):
+          return pallas_kda_fused_v4_conv(q, k, v, w, g, b, state)
+
+        output, _ = sharded_kda_conv(
+            query, key, value, conv_weight, log_decay, beta, initial_state
+        )
+        output_gate = self.output_gate_up(gate_hidden)
+        output = self.output_norm(output) * jax.nn.sigmoid(output_gate.astype(jnp.float32))
+        output = self.out_proj(output.astype(self.config.dtype))
+        return output, None
 
       @functools.partial(
           jax.shard_map,
