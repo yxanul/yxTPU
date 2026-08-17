@@ -165,6 +165,18 @@ def main() -> int:
       print("  (debug: comparing stage B conv-output cotangents against autodiff)")
     values = [(ref_out, cand_out), (ref_state, cand_state)] + list(zip(ref_grads, cand_grads))
     print(f"seed {seed}:")
+    if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G"):
+      r = np.asarray(ref_grads[0], np.float64).ravel(); c = np.asarray(cand_grads[0], np.float64).ravel()
+      mask = np.abs(r) > 1e-3
+      ratio = c[mask] / r[mask]
+      print(f"  debug d_raw_q: corr {np.corrcoef(c, r)[0,1]:.4f}  ratio median {np.median(ratio):.4f} "
+            f"p10 {np.percentile(ratio,10):.4f} p90 {np.percentile(ratio,90):.4f}  |c| {np.abs(c).mean():.3e} |r| {np.abs(r).mean():.3e}")
+      # per-position-in-chunk correlation: is it a shift?
+      T = ref_grads[0].shape[1]
+      rr = np.asarray(ref_grads[0], np.float64)[0, :, 0, :]; cc = np.asarray(cand_grads[0], np.float64)[0, :, 0, :]
+      for shift in (-3, -2, -1, 0, 1, 2, 3):
+        a = cc[max(0, shift): T + min(0, shift)]; b = rr[max(0, -shift): T - max(0, shift)]
+        print(f"    shift {shift:+d}: corr {np.corrcoef(a.ravel(), b.ravel())[0,1]:.4f}")
     for name, (r, c) in zip(names, values):
       rel = _rel_l2(c, r)
       worst[name] = max(worst[name], rel)
