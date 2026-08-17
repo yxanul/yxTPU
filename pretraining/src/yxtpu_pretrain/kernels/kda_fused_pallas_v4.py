@@ -1407,141 +1407,9 @@ def _kda_fused_backward_kernel(
   cotangent in reverse order."""
   reverse_chunk_index = pl.program_id(chunk_axis)
   chunk_index = num_chunks - 1 - reverse_chunk_index
-  _kda_backward_stage_a_body(
-      query_ref[0],
-      key_ref[0],
-      value_ref[0].astype(jnp.float32),
-      log_decay_ref,
-      beta_ref,
-      initial_state_ref,
-      previous_state_after_ref,
-      output_cotangent_ref,
-      final_state_cotangent_ref,
-      query_partial_ref,
-      key_partial_ref,
-      key_beta_partial_ref,
-      value_beta_cotangent_ref,
-      decay_partial_ref,
-      state_before_cotangent_ref,
-      system_cotangent_ref,
-      intra_cotangent_ref,
-      final_decay_cotangent_ref,
-      state_cotangent_scratch_ref,
-      chunk_index=chunk_index,
-      reverse_chunk_index=reverse_chunk_index,
-      chunk_size=chunk_size,
-      key_dim=key_dim,
-      value_dim=value_dim,
-      use_qk_norm=use_qk_norm,
-      extras_mode=extras_mode,
-  )
-
-
-def _kda_backward_stage_a_kernel_fold(
-    query_ref,
-    key_ref,
-    value_ref,
-    log_decay_ref,
-    beta_ref,
-    initial_state_ref,
-    previous_state_after_ref,
-    output_cotangent_ref,
-    final_state_cotangent_ref,
-    query_prev_ref,
-    key_prev_ref,
-    value_prev_ref,
-    query_weight_ref,
-    key_weight_ref,
-    value_weight_ref,
-    query_partial_ref,
-    key_partial_ref,
-    key_beta_partial_ref,
-    value_beta_cotangent_ref,
-    decay_partial_ref,
-    state_before_cotangent_ref,
-    system_cotangent_ref,
-    intra_cotangent_ref,
-    final_decay_cotangent_ref,
-    state_cotangent_scratch_ref,
-    *,
-    chunk_size: int,
-    key_dim: int,
-    value_dim: int,
-    num_chunks: int,
-    use_qk_norm: bool,
-    conv_width: int,
-    chunk_axis: int = 2,
-    extras_mode: str = "real",
-):
-  """Stage A over RAW Q/K/V refs: recomputes conv + SiLU per chunk."""
-  reverse_chunk_index = pl.program_id(chunk_axis)
-  chunk_index = num_chunks - 1 - reverse_chunk_index
-  (query, _), (key, _), (value, _) = _fold_inputs(
-      query_ref, key_ref, value_ref,
-      (query_prev_ref, key_prev_ref, value_prev_ref),
-      (query_weight_ref, key_weight_ref, value_weight_ref),
-      chunk_index > 0,
-      conv_width=conv_width,
-  )
-  _kda_backward_stage_a_body(
-      query,
-      key,
-      value,
-      log_decay_ref,
-      beta_ref,
-      initial_state_ref,
-      previous_state_after_ref,
-      output_cotangent_ref,
-      final_state_cotangent_ref,
-      query_partial_ref,
-      key_partial_ref,
-      key_beta_partial_ref,
-      value_beta_cotangent_ref,
-      decay_partial_ref,
-      state_before_cotangent_ref,
-      system_cotangent_ref,
-      intra_cotangent_ref,
-      final_decay_cotangent_ref,
-      state_cotangent_scratch_ref,
-      chunk_index=chunk_index,
-      reverse_chunk_index=reverse_chunk_index,
-      chunk_size=chunk_size,
-      key_dim=key_dim,
-      value_dim=value_dim,
-      use_qk_norm=use_qk_norm,
-      extras_mode=extras_mode,
-  )
-
-
-def _kda_backward_stage_a_body(
-    query_input,
-    key_input,
-    value,
-    log_decay_ref,
-    beta_ref,
-    initial_state_ref,
-    previous_state_after_ref,
-    output_cotangent_ref,
-    final_state_cotangent_ref,
-    query_partial_ref,
-    key_partial_ref,
-    key_beta_partial_ref,
-    value_beta_cotangent_ref,
-    decay_partial_ref,
-    state_before_cotangent_ref,
-    system_cotangent_ref,
-    intra_cotangent_ref,
-    final_decay_cotangent_ref,
-    state_cotangent_scratch_ref,
-    *,
-    chunk_index,
-    reverse_chunk_index,
-    chunk_size: int,
-    key_dim: int,
-    value_dim: int,
-    use_qk_norm: bool,
-    extras_mode: str,
-):
+  query_input = query_ref[0]
+  key_input = key_ref[0]
+  value = value_ref[0].astype(jnp.float32)
   log_decay = log_decay_ref[0].astype(jnp.float32)
   beta = beta_ref[0][..., 0].astype(jnp.float32)
   output_cotangent = output_cotangent_ref[0].astype(jnp.float32)
@@ -1759,9 +1627,9 @@ def _kda_backward_stage_a_body(
   else:
     query_cotangent = query_normalized_cotangent
 
-  query_cotangent_ref[0] = (query_cotangent * query_scale).astype(query_cotangent_ref.dtype)
-  key_cotangent_ref[0] = (key_cotangent * key_scale).astype(key_cotangent_ref.dtype)
-  value_cotangent_ref[0] = (value_cotangent * value_scale).astype(value_cotangent_ref.dtype)
+  query_cotangent_ref[0] = query_cotangent.astype(query_cotangent_ref.dtype)
+  key_cotangent_ref[0] = key_cotangent.astype(key_cotangent_ref.dtype)
+  value_cotangent_ref[0] = value_cotangent.astype(value_cotangent_ref.dtype)
   log_decay_cotangent_ref[0] = log_decay_cotangent
   beta_cotangent_ref[0, ..., 0] = beta_cotangent
 
@@ -1805,9 +1673,141 @@ def _kda_backward_stage_a_kernel(
   """
   reverse_chunk_index = pl.program_id(chunk_axis)
   chunk_index = num_chunks - 1 - reverse_chunk_index
-  query_input = query_ref[0]
-  key_input = key_ref[0]
-  value = value_ref[0].astype(jnp.float32)
+  _kda_backward_stage_a_body(
+      query_ref[0],
+      key_ref[0],
+      value_ref[0].astype(jnp.float32),
+      log_decay_ref,
+      beta_ref,
+      initial_state_ref,
+      previous_state_after_ref,
+      output_cotangent_ref,
+      final_state_cotangent_ref,
+      query_partial_ref,
+      key_partial_ref,
+      key_beta_partial_ref,
+      value_beta_cotangent_ref,
+      decay_partial_ref,
+      state_before_cotangent_ref,
+      system_cotangent_ref,
+      intra_cotangent_ref,
+      final_decay_cotangent_ref,
+      state_cotangent_scratch_ref,
+      chunk_index=chunk_index,
+      reverse_chunk_index=reverse_chunk_index,
+      chunk_size=chunk_size,
+      key_dim=key_dim,
+      value_dim=value_dim,
+      use_qk_norm=use_qk_norm,
+      extras_mode=extras_mode,
+  )
+
+
+def _kda_backward_stage_a_kernel_fold(
+    query_ref,
+    key_ref,
+    value_ref,
+    log_decay_ref,
+    beta_ref,
+    initial_state_ref,
+    previous_state_after_ref,
+    output_cotangent_ref,
+    final_state_cotangent_ref,
+    query_prev_ref,
+    key_prev_ref,
+    value_prev_ref,
+    query_weight_ref,
+    key_weight_ref,
+    value_weight_ref,
+    query_partial_ref,
+    key_partial_ref,
+    key_beta_partial_ref,
+    value_beta_cotangent_ref,
+    decay_partial_ref,
+    state_before_cotangent_ref,
+    system_cotangent_ref,
+    intra_cotangent_ref,
+    final_decay_cotangent_ref,
+    state_cotangent_scratch_ref,
+    *,
+    chunk_size: int,
+    key_dim: int,
+    value_dim: int,
+    num_chunks: int,
+    use_qk_norm: bool,
+    conv_width: int,
+    chunk_axis: int = 2,
+    extras_mode: str = "real",
+):
+  """Stage A over RAW Q/K/V refs: recomputes conv + SiLU per chunk."""
+  reverse_chunk_index = pl.program_id(chunk_axis)
+  chunk_index = num_chunks - 1 - reverse_chunk_index
+  (query, _), (key, _), (value, _) = _fold_inputs(
+      query_ref, key_ref, value_ref,
+      (query_prev_ref, key_prev_ref, value_prev_ref),
+      (query_weight_ref, key_weight_ref, value_weight_ref),
+      chunk_index > 0,
+      conv_width=conv_width,
+  )
+  _kda_backward_stage_a_body(
+      query,
+      key,
+      value,
+      log_decay_ref,
+      beta_ref,
+      initial_state_ref,
+      previous_state_after_ref,
+      output_cotangent_ref,
+      final_state_cotangent_ref,
+      query_partial_ref,
+      key_partial_ref,
+      key_beta_partial_ref,
+      value_beta_cotangent_ref,
+      decay_partial_ref,
+      state_before_cotangent_ref,
+      system_cotangent_ref,
+      intra_cotangent_ref,
+      final_decay_cotangent_ref,
+      state_cotangent_scratch_ref,
+      chunk_index=chunk_index,
+      reverse_chunk_index=reverse_chunk_index,
+      chunk_size=chunk_size,
+      key_dim=key_dim,
+      value_dim=value_dim,
+      use_qk_norm=use_qk_norm,
+      extras_mode=extras_mode,
+  )
+
+
+def _kda_backward_stage_a_body(
+    query_input,
+    key_input,
+    value,
+    log_decay_ref,
+    beta_ref,
+    initial_state_ref,
+    previous_state_after_ref,
+    output_cotangent_ref,
+    final_state_cotangent_ref,
+    query_partial_ref,
+    key_partial_ref,
+    key_beta_partial_ref,
+    value_beta_cotangent_ref,
+    decay_partial_ref,
+    state_before_cotangent_ref,
+    system_cotangent_ref,
+    intra_cotangent_ref,
+    final_decay_cotangent_ref,
+    state_cotangent_scratch_ref,
+    *,
+    chunk_index,
+    reverse_chunk_index,
+    chunk_size: int,
+    key_dim: int,
+    value_dim: int,
+    use_qk_norm: bool,
+    extras_mode: str,
+):
   log_decay = log_decay_ref[0].astype(jnp.float32)
   beta = beta_ref[0][..., 0].astype(jnp.float32)
   output_cotangent = output_cotangent_ref[0].astype(jnp.float32)
