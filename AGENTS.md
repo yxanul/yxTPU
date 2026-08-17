@@ -188,7 +188,14 @@ State is dynamic; verify it before relying on this section.
   the mix moved (vision .386 / climbmix .355 / stack .196 / math .062)
   - recalibrate with `yx-pretrain calibrate-mix` before a campaign.
   scripts/fleet.sh is the control-plane helper (parallel per-worker ssh,
-  keepalives, hard cap; verify idle with `procs`).
+  keepalives, hard cap; verify idle with `procs`). 8k profile (4 traced
+  steps, benchmarks/summarize_xplane_step.py on xprof's converter -
+  modern xprof has no xplane_pb2): duty 96.2%; dense GEMMs 44% (8% of
+  it MLP remat recompute), KDA kernels 17%, KDA XLA glue ~17% (depthwise
+  conv 6.0% HBM-bound + casts 6.4% + pads/reshapes 4.2% - the biggest
+  device lever left: fold conv/casts into the v4 kernel), splash 8.4%,
+  collectives 3.7%, loss head 2.6%. MFU (model FLOPs) 25.7% at 4k /
+  24.2% at 8k; parameter-only convention 24.5% / 22.1%.
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array

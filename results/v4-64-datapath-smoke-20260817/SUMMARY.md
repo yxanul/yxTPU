@@ -157,3 +157,49 @@ Telemetry on the mixed 8k batch: cycle-0 maxima joint 67.1 = visual
 - `pretraining/scripts/fleet.sh`: parallel per-worker gcloud ssh with
   keepalives and a hard cap; status/run/launch/tail/procs/kill-orphans/
   health.
+
+## 8k profile (steps 24-27 of a 36-step run, primary host, `profile_8k_step.json`)
+
+Traced steps ran at 1,713 ms (steady state 1,662; ~3% profiler overhead).
+Device duty cycle 96.2% (65 ms/step idle inside the module: dispatch
+edges and kernel bubbles); host path invisible (data_wait 0, h2d 3 ms).
+xprof MXU utilization 21.8% (it cannot count Pallas FLOPs). Device
+self-time by component (`benchmarks/summarize_xplane_step.py`):
+
+| component | % device | ms/step |
+| --- | ---: | ---: |
+| dense GEMMs: bwd + others | 19.7 | 324 |
+| dense GEMMs: fwd (checkpointed) | 16.5 | 272 |
+| dense GEMMs: rematted fwd recompute (MLP, `save_dot_except_mlp`) | 7.9 | 131 |
+| KDA fused kernels (fwd inverse x6 = 3 fwd + 3 recompute; stage A x3; stage B x3) | 17.3 | 285 |
+| KDA XLA glue: depthwise conv (HBM-bound, 141 GFLOP/s) | 6.0 | 98 |
+| KDA/other glue: casts (`[2,8192,4608]` bf16 <-> f32) | 6.4 | 106 |
+| pads / reshapes / copies (`[2,8,1025,4608]` chunk pads, `[2,8192,12,3,128]` reshapes) | 4.2 | 70 |
+| GQA splash attention (fwd 2x, dkv) at 88-106 TFLOP/s | 8.4 | 138 |
+| elementwise (norms, gates, softmax, adds) | 4.8 | 79 |
+| collectives (gradient all-reduce, synchronous on v4) | 3.7 | 60 |
+| loss head GEMMs (chunked CE) | 2.6 | 43 |
+| norm einsums, ViT (~1.5% inside the GEMM rows), misc | ~2.5 | ~40 |
+
+Reading: 44% is dense GEMMs (of which 8% is remat recompute the memory
+budget forces), 17% is the KDA kernels themselves, and **~16-17% is
+XLA glue around the pre-fold v4 KDA kernel** (depthwise conv 6.0%,
+casts 6.4%, pads/reshapes 4.2%) - the largest single lever left on the
+device: the folded kernel (conv + casts inside the kernel, as on
+v5e/v6e) or a cheaper conv formulation is worth ~150-250 ms/step
+(9-15%). Splash is 8.4% at 8k (4.7% of the FLOPs at 33-39% of peak);
+collectives 3.7% cannot overlap on v4; the KDA forward recompute (4%)
+is the price of `remat_save_kda_residuals: false` at 99.3% HBM.
+
+MFU (model FLOPs, backbone 916.5M params x 6 x 524,288 tokens + tied
+logits head over all positions + causal-halved attention + KDA chunk
+math + ViT over 16 image slots/device; v4 peak 275 TFLOP/s x 32):
+
+| | 4k | 8k |
+| --- | ---: | ---: |
+| model FLOPs per step | 3.39 PFLOP | 3.55 PFLOP |
+| of which attention | 4.7% | 8.9% |
+| step | 1,497 ms | 1,662 ms |
+| **MFU (model FLOPs)** | **25.7%** | **24.2%** |
+| parameter-only 6N x tokens (the report's convention) | 24.5% | 22.1% |
+| xprof MXU utilization (Pallas FLOPs uncounted) | - | 21.8% |

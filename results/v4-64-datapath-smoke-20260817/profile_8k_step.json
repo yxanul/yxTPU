@@ -1,0 +1,385 @@
+{
+ "device_duty_cycle": "96.2%",
+ "xprof_mxu_flops_utilization_percent": 21.8,
+ "note": "xprof cannot count FLOPs of Pallas custom calls (KDA/splash), so its MXU utilization undercounts; use the model-FLOP MFU for the headline.",
+ "step_ms_assumed": 1713.0,
+ "device_busy_ms": 1647.9,
+ "by_component": {
+  "dense GEMMs: bwd/other": {
+   "percent_of_device_time": 19.67,
+   "ms_per_step": 324.2
+  },
+  "KDA fused kernels (pallas)": {
+   "percent_of_device_time": 17.29,
+   "ms_per_step": 284.9
+  },
+  "dense GEMMs: fwd (checkpoint)": {
+   "percent_of_device_time": 16.48,
+   "ms_per_step": 271.5
+  },
+  "GQA splash attention (pallas)": {
+   "percent_of_device_time": 8.36,
+   "ms_per_step": 137.8
+  },
+  "dense GEMMs: rematted fwd recompute": {
+   "percent_of_device_time": 7.92,
+   "ms_per_step": 130.5
+  },
+  "casts (convert_element_type)": {
+   "percent_of_device_time": 6.41,
+   "ms_per_step": 105.6
+  },
+  "KDA depthwise conv (XLA)": {
+   "percent_of_device_time": 5.97,
+   "ms_per_step": 98.4
+  },
+  "elementwise (norms, gates, softmax, adds)": {
+   "percent_of_device_time": 4.79,
+   "ms_per_step": 78.9
+  },
+  "pads / reshapes / copies": {
+   "percent_of_device_time": 4.23,
+   "ms_per_step": 69.7
+  },
+  "collectives": {
+   "percent_of_device_time": 3.66,
+   "ms_per_step": 60.2
+  },
+  "loss head GEMMs (chunked CE)": {
+   "percent_of_device_time": 2.59,
+   "ms_per_step": 42.7
+  },
+  "einsum ...k,k->...k": {
+   "percent_of_device_time": 1.07,
+   "ms_per_step": 17.6
+  },
+  "other convolution fusions": {
+   "percent_of_device_time": 1.01,
+   "ms_per_step": 16.6
+  },
+  "other: custom fusion": {
+   "percent_of_device_time": 0.29,
+   "ms_per_step": 4.8
+  },
+  "other: broadcast": {
+   "percent_of_device_time": 0.22,
+   "ms_per_step": 3.6
+  },
+  "other: async-done": {
+   "percent_of_device_time": 0.02,
+   "ms_per_step": 0.3
+  },
+  "other: async-start": {
+   "percent_of_device_time": 0.01,
+   "ms_per_step": 0.1
+  },
+  "other: dynamic-update-slice": {
+   "percent_of_device_time": 0.01,
+   "ms_per_step": 0.1
+  },
+  "other: while": {
+   "percent_of_device_time": 0.01,
+   "ms_per_step": 0.1
+  },
+  "other: sort": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "other: custom-call": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "other: dynamic-slice": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "other: iota": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "reductions": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "other: reduce-window": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "other: pad": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  }
+ },
+ "top_ops": [
+  {
+   "percent": 3.6,
+   "category": "custom-call",
+   "op": "splash_mha_dkv_segmented_no_residuals.1",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 87698,
+   "scope": "attention))/splash_mha_dkv_segmented_no_residuals/splash_mha_dkv_segmented_no_residuals/pallas_call:"
+  },
+  {
+   "percent": 1.9,
+   "category": "custom-call",
+   "op": "splash_mha_fwd_segmented_residuals.2",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 106404,
+   "scope": "plash_attention))/splash_mha_fwd_segmented_residuals/splash_mha_fwd_segmented_residuals/pallas_call:"
+  },
+  {
+   "percent": 1.9,
+   "category": "custom-call",
+   "op": "splash_mha_fwd_segmented_residuals.3",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 106418,
+   "scope": "plash_attention))/splash_mha_fwd_segmented_residuals/splash_mha_fwd_segmented_residuals/pallas_call:"
+  },
+  {
+   "percent": 1.81,
+   "category": "custom-call",
+   "op": "kda_backward_stage_a.1",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "call/checkpoint/shard_map/jit(_pallas_kda_fused_v4_backward_split)/kda_backward_stage_a/pallas_call:"
+  },
+  {
+   "percent": 1.81,
+   "category": "custom-call",
+   "op": "kda_backward_stage_a.3",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "call/checkpoint/shard_map/jit(_pallas_kda_fused_v4_backward_split)/kda_backward_stage_a/pallas_call:"
+  },
+  {
+   "percent": 1.81,
+   "category": "custom-call",
+   "op": "kda_backward_stage_a.2",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "call/checkpoint/shard_map/jit(_pallas_kda_fused_v4_backward_split)/kda_backward_stage_a/pallas_call:"
+  },
+  {
+   "percent": 1.51,
+   "category": "all-reduce",
+   "op": "all-reduce.197",
+   "bound_by": "HBM",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 10,
+   "scope": "while/body/closed_call/checkpoint/...k,k->...k/dot_general:"
+  },
+  {
+   "percent": 1.32,
+   "category": "custom-call",
+   "op": "kda_fused_forward_inverse_full_s8.2",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "mputation/shard_map/jit(_pallas_kda_fused_v4_forward)/kda_fused_forward_inverse_full_s8/pallas_call:"
+  },
+  {
+   "percent": 1.32,
+   "category": "custom-call",
+   "op": "kda_fused_forward_inverse_full_s8.5",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "osed_call/shard_map/jit(_pallas_kda_fused_v4_forward)/kda_fused_forward_inverse_full_s8/pallas_call:"
+  },
+  {
+   "percent": 1.32,
+   "category": "custom-call",
+   "op": "kda_fused_forward_inverse_full_s8.3",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "mputation/shard_map/jit(_pallas_kda_fused_v4_forward)/kda_fused_forward_inverse_full_s8/pallas_call:"
+  },
+  {
+   "percent": 1.32,
+   "category": "custom-call",
+   "op": "kda_fused_forward_inverse_full_s8.4",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "mputation/shard_map/jit(_pallas_kda_fused_v4_forward)/kda_fused_forward_inverse_full_s8/pallas_call:"
+  },
+  {
+   "percent": 1.32,
+   "category": "custom-call",
+   "op": "kda_fused_forward_inverse_full_s8.7",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "osed_call/shard_map/jit(_pallas_kda_fused_v4_forward)/kda_fused_forward_inverse_full_s8/pallas_call:"
+  },
+  {
+   "percent": 1.32,
+   "category": "custom-call",
+   "op": "kda_fused_forward_inverse_full_s8.6",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "osed_call/shard_map/jit(_pallas_kda_fused_v4_forward)/kda_fused_forward_inverse_full_s8/pallas_call:"
+  },
+  {
+   "percent": 1.28,
+   "category": "all-reduce",
+   "op": "all-reduce.199",
+   "bound_by": "HBM",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 10,
+   "scope": "while/body/closed_call/checkpoint/dot_general:"
+  },
+  {
+   "percent": 1.23,
+   "category": "convolution fusion",
+   "op": "bitcast_add_fusion.222",
+   "bound_by": "HBM",
+   "occurrences": 1024.0,
+   "model_flop_rate_gflops": 62032,
+   "scope": "while/body/closed_call/bth,btv->hv/dot_general:"
+  },
+  {
+   "percent": 1.05,
+   "category": "custom-call",
+   "op": "kda_backward_stage_b.2",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "call/checkpoint/shard_map/jit(_pallas_kda_fused_v4_backward_split)/kda_backward_stage_b/pallas_call:"
+  },
+  {
+   "percent": 1.05,
+   "category": "custom-call",
+   "op": "kda_backward_stage_b.3",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "call/checkpoint/shard_map/jit(_pallas_kda_fused_v4_backward_split)/kda_backward_stage_b/pallas_call:"
+  },
+  {
+   "percent": 1.05,
+   "category": "custom-call",
+   "op": "kda_backward_stage_b.1",
+   "bound_by": "Unknown",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 0,
+   "scope": "call/checkpoint/shard_map/jit(_pallas_kda_fused_v4_backward_split)/kda_backward_stage_b/pallas_call:"
+  },
+  {
+   "percent": 1.05,
+   "category": "convolution fusion",
+   "op": "fusion.12548",
+   "bound_by": "HBM",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 141,
+   "scope": "while/body/closed_call/checkpoint/conv_general_dilated:"
+  },
+  {
+   "percent": 1.05,
+   "category": "convolution fusion",
+   "op": "fusion.12556",
+   "bound_by": "HBM",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 141,
+   "scope": "while/body/closed_call/checkpoint/conv_general_dilated:"
+  },
+  {
+   "percent": 1.05,
+   "category": "convolution fusion",
+   "op": "fusion.12564",
+   "bound_by": "HBM",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 141,
+   "scope": "while/body/closed_call/checkpoint/conv_general_dilated:"
+  },
+  {
+   "percent": 0.77,
+   "category": "reduce",
+   "op": "reduce_sum.3639",
+   "bound_by": "HBM",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 120,
+   "scope": "while/body/closed_call/checkpoint/shard_map/vmap(jit(_splash_attention))/reduce_sum:"
+  },
+  {
+   "percent": 0.72,
+   "category": "convolution fusion",
+   "op": "fusion.12588",
+   "bound_by": "Compute",
+   "occurrences": 1024.0,
+   "model_flop_rate_gflops": 105027,
+   "scope": "while/body/closed_call/btv,hv->bth/dot_general:"
+  },
+  {
+   "percent": 0.64,
+   "category": "convolution fusion",
+   "op": "fusion.12585",
+   "bound_by": "Compute",
+   "occurrences": 1024.0,
+   "model_flop_rate_gflops": 117477,
+   "scope": "while/body/closed_call/bth,hv->btv/dot_general:"
+  },
+  {
+   "percent": 0.64,
+   "category": "convolution fusion",
+   "op": "fusion.12503",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 78791,
+   "scope": "while/body/closed_call/checkpoint/rematted_computation/dot_general:"
+  },
+  {
+   "percent": 0.58,
+   "category": "convolution fusion",
+   "op": "fusion.12713",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 86666,
+   "scope": "while/body/closed_call/dot_general:"
+  },
+  {
+   "percent": 0.53,
+   "category": "convolution fusion",
+   "op": "fusion.12494",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 95842,
+   "scope": "while/body/closed_call/checkpoint/rematted_computation/dot_general:"
+  },
+  {
+   "percent": 0.53,
+   "category": "convolution fusion",
+   "op": "fusion.12470",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 95843,
+   "scope": "while/body/closed_call/checkpoint/rematted_computation/dot_general:"
+  },
+  {
+   "percent": 0.53,
+   "category": "convolution fusion",
+   "op": "fusion.12446",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 95846,
+   "scope": "while/body/closed_call/checkpoint/rematted_computation/dot_general:"
+  },
+  {
+   "percent": 0.52,
+   "category": "convolution fusion",
+   "op": "fusion.12671",
+   "bound_by": "Compute",
+   "occurrences": 256.0,
+   "model_flop_rate_gflops": 96671,
+   "scope": "while/body/closed_call/dot_general:"
+  }
+ ]
+}
