@@ -54,7 +54,7 @@ def test_chunked_conv_silu_matches_the_layer_path_bitwise():
   for c in range(NC):
     raw = x[:, c * C : (c + 1) * C]
     prev = x[:, max(c * C - _CONV_HALO_ROWS, 0) : c * C] if c > 0 else jnp.zeros((S, _CONV_HALO_ROWS, D), x.dtype)
-    conv, act = _causal_conv_silu(raw, prev, w, c > 0, conv_width=W)
+    conv, act = _causal_conv_silu(raw, prev, jnp.transpose(w, (1, 0, 2)), c > 0, conv_width=W)
     np.testing.assert_array_equal(np.asarray(conv), np.asarray(conv_ref[:, c * C : (c + 1) * C]))
     np.testing.assert_array_equal(
         np.asarray(act.astype(jnp.bfloat16)), np.asarray(act_ref[:, c * C : (c + 1) * C])

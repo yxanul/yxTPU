@@ -444,7 +444,7 @@ def _causal_conv_silu(
 
   ``raw`` is ``[S, C, D]`` (bf16), ``previous`` the ``[S, HALO, D]`` rows
   just before the chunk (masked to zero when ``has_previous`` is false),
-  ``weight`` ``[width, S, D]`` fp32. Returns ``(conv, act)`` in fp32.
+  ``weight`` ``[S, width, D]`` fp32. Returns ``(conv, act)`` in fp32.
   ``match_xla_rounding`` reproduces the XLA path's bf16 roundings (bf16
   weights, bf16 conv output, bf16 activation) so the fold is a
   rounding-class match of the layer it replaces."""
@@ -482,7 +482,7 @@ def _causal_conv(
     # y[t] = sum_k w[k] x[t - (width - 1) + k]; row t of the chunk sits at
     # padded row halo + t.
     start = halo - (conv_width - 1) + tap
-    term = padded[:, start : start + chunk, :].astype(jnp.float32) * weight[tap][:, None, :]
+    term = padded[:, start : start + chunk, :].astype(jnp.float32) * weight[:, tap][:, None, :]
     conv = term if conv is None else conv + term
   if match_xla_rounding:
     conv = conv.astype(jnp.bfloat16).astype(jnp.float32)
@@ -2336,7 +2336,7 @@ def _kda_conv_silu_vjp_kernel(
   raw_cotangent = None
   for tap in range(conv_width):
     start = (conv_width - 1) - tap
-    term = g_ext[:, start : start + chunk, :] * weight[tap][:, None, :]
+    term = g_ext[:, start : start + chunk, :] * weight[:, tap][:, None, :]
     raw_cotangent = term if raw_cotangent is None else raw_cotangent + term
   raw_cotangent_ref[0] = raw_cotangent.astype(raw_cotangent_ref.dtype)
 
@@ -2359,10 +2359,14 @@ def _kda_conv_silu_vjp_kernel(
 
 
 def _stream_conv_weights(conv_weight: jax.Array, batch: int) -> tuple[jax.Array, jax.Array, jax.Array]:
-  """[width, H, 3, D] -> three [width, B*H, D] fp32 (stream = b*H + h)."""
+  """[width, H, 3, D] -> three [B*H, width, D] fp32 (stream = b*H + h).
+
+  Streams lead so a per-program block is ``[spp, width, D]``: its
+  second-minor dim is the full ``width``, which keeps the block legal for
+  any streams-per-program (a ``[width, spp, D]`` block needs spp % 8 == 0)."""
   conv_weight = conv_weight.astype(jnp.float32)
   return tuple(
-      jnp.tile(conv_weight[:, :, i, :], (1, batch, 1)) for i in range(3)
+      jnp.tile(conv_weight[:, :, i, :], (1, batch, 1)).transpose(1, 0, 2) for i in range(3)
   )
 
 
@@ -2520,8 +2524,8 @@ def _pallas_kda_fused_v4_forward(
         index_map=lambda bg, hg, ci: (bg, hg, jnp.maximum(halo_blocks * ci - 1, 0), 0),
     )
     weight_spec = pl.BlockSpec(
-        block_shape=(conv_width, streams_per_program, key_dim),
-        index_map=lambda bg, hg, ci: (0, hg, 0),
+        block_shape=(streams_per_program, conv_width, key_dim),
+        index_map=lambda bg, hg, ci: (hg, 0, 0),
     )
     weights = _stream_conv_weights(conv_weight, batch)
     inputs += [query_t, key_t, value_t, *weights]
@@ -2930,8 +2934,8 @@ def _pallas_kda_fused_v4_backward_split(
 
   def weight_spec_for(spp):
     return pl.BlockSpec(
-        block_shape=((conv_weight.shape[0] if fold else 1), spp, key_dim),
-        index_map=lambda bg, hg, ci: (0, hg, 0),
+        block_shape=(spp, (conv_weight.shape[0] if fold else 1), key_dim),
+        index_map=lambda bg, hg, ci: (hg, 0, 0),
     )
 
   weight_spec = weight_spec_for(streams_per_program)
