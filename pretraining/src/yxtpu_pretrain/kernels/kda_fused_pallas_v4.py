@@ -2522,10 +2522,12 @@ def _pallas_kda_fused_v4_forward(
     prev_spec = pl.BlockSpec(
         block_shape=(1, streams_per_program, _CONV_HALO_ROWS, key_dim),
         index_map=lambda bg, hg, ci: (bg, hg, jnp.maximum(halo_blocks * ci - 1, 0), 0),
+        pipeline_mode=pl.Buffered(1),
     )
     weight_spec = pl.BlockSpec(
         block_shape=(streams_per_program, conv_width, key_dim),
         index_map=lambda bg, hg, ci: (hg, 0, 0),
+        pipeline_mode=pl.Buffered(1),
     )
     weights = _stream_conv_weights(conv_weight, batch)
     inputs += [query_t, key_t, value_t, *weights]
@@ -2909,6 +2911,9 @@ def _pallas_kda_fused_v4_backward_split(
   fold_inputs = ()
   halo_blocks = chunk_size // _CONV_HALO_ROWS
 
+  # The halo and weight windows are tiny and re-fetched every step; single
+  # buffering them keeps the fold's stage A inside v4's 16 MB VMEM at the
+  # production 8 streams per program.
   def prev_spec(reverse, spp=None):
     spp = spp or streams_per_program
     return pl.BlockSpec(
@@ -2919,6 +2924,7 @@ def _pallas_kda_fused_v4_backward_split(
             jnp.maximum(halo_blocks * ((num_chunks - 1 - ci) if reverse else ci) - 1, 0),
             0,
         ),
+        pipeline_mode=pl.Buffered(1),
     )
 
   def next_spec():
@@ -2930,12 +2936,14 @@ def _pallas_kda_fused_v4_backward_split(
             jnp.minimum(halo_blocks * (ci + 1), halo_blocks * num_chunks - 1),
             0,
         ),
+        pipeline_mode=pl.Buffered(1),
     )
 
   def weight_spec_for(spp):
     return pl.BlockSpec(
         block_shape=(spp, (conv_weight.shape[0] if fold else 1), key_dim),
         index_map=lambda bg, hg, ci: (hg, 0, 0),
+        pipeline_mode=pl.Buffered(1),
     )
 
   weight_spec = weight_spec_for(streams_per_program)
@@ -2949,7 +2957,9 @@ def _pallas_kda_fused_v4_backward_split(
   # kernel; at 8 streams per program its register spills overflow the 16 MB
   # VMEM by ~170 KB, so it runs at 4 (its outputs are per-stream, any
   # grouping is valid; stage B and the VJP kernel keep 8).
-  spp_a = math.gcd(streams, 4) if fold else streams_per_program
+  spp_a = streams_per_program
+  if fold and os.environ.get("YXTPU_KDA_FOLD_STAGE_A_STREAMS"):
+    spp_a = math.gcd(streams, int(os.environ["YXTPU_KDA_FOLD_STAGE_A_STREAMS"]))
   stream_groups_a = streams // spp_a
 
   if fold:
