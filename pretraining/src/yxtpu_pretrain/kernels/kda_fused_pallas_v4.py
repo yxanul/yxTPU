@@ -2802,9 +2802,10 @@ def _pallas_kda_fused_v4_backward_split(
   streams_per_program = math.gcd(streams, streams_per_program)
   stream_groups = streams // streams_per_program
 
-  def chunk_spec(channels, reverse):
+  def chunk_spec(channels, reverse, spp=None):
+    spp = spp or streams_per_program
     return pl.BlockSpec(
-        block_shape=(1, streams_per_program, chunk_size, channels),
+        block_shape=(1, spp, chunk_size, channels),
         index_map=lambda bg, hg, ci: (
             bg,
             hg,
@@ -2813,9 +2814,10 @@ def _pallas_kda_fused_v4_backward_split(
         ),
     )
 
-  def square_spec(reverse):
+  def square_spec(reverse, spp=None):
+    spp = spp or streams_per_program
     return pl.BlockSpec(
-        block_shape=(1, streams_per_program, 1, chunk_size, chunk_size),
+        block_shape=(1, spp, 1, chunk_size, chunk_size),
         index_map=lambda bg, hg, ci: (
             bg,
             hg,
@@ -2825,13 +2827,14 @@ def _pallas_kda_fused_v4_backward_split(
         ),
     )
 
-  def row_spec(channels, reverse):
+  def row_spec(channels, reverse, spp=None):
     # The trailing axis order is load-bearing on v4: channels must stay on
     # the lane (minor) dimension. A [.., channels, 1] block would demand a
     # minor-dimension relayout, which lowers to the unsupported sublane
     # gather in both the producing and consuming kernels.
+    spp = spp or streams_per_program
     return pl.BlockSpec(
-        block_shape=(1, streams_per_program, 1, 1, channels),
+        block_shape=(1, spp, 1, 1, channels),
         index_map=lambda bg, hg, ci: (
             bg,
             hg,
@@ -2841,28 +2844,37 @@ def _pallas_kda_fused_v4_backward_split(
         ),
     )
 
-  state_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, key_dim, value_dim),
-      index_map=lambda bg, hg, ci: (bg, hg, 0, 0),
-  )
-  previous_state_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, 1, key_dim, value_dim),
-      index_map=lambda bg, hg, ci: (
-          bg,
-          hg,
-          jnp.maximum(num_chunks - 2 - ci, 0),
-          0,
-          0,
-      ),
-  )
+  def state_spec_for(spp):
+    return pl.BlockSpec(
+        block_shape=(1, spp, key_dim, value_dim),
+        index_map=lambda bg, hg, ci: (bg, hg, 0, 0),
+    )
+
+  def previous_state_spec_for(spp):
+    return pl.BlockSpec(
+        block_shape=(1, spp, 1, key_dim, value_dim),
+        index_map=lambda bg, hg, ci: (
+            bg,
+            hg,
+            jnp.maximum(num_chunks - 2 - ci, 0),
+            0,
+            0,
+        ),
+    )
+
+  state_spec = state_spec_for(streams_per_program)
+  previous_state_spec = previous_state_spec_for(streams_per_program)
   # Only the chunk-0 slot (the initial-state cotangent) is ever consumed, so
   # the export is a single revisited block: the kernel overwrites it every
   # reverse step and Mosaic flushes once per stream group with the last
   # write, which is chunk 0.
-  state_before_cotangent_spec = pl.BlockSpec(
-      block_shape=(1, streams_per_program, 1, key_dim, value_dim),
-      index_map=lambda bg, hg, ci: (bg, hg, 0, 0, 0),
-  )
+  def state_before_cotangent_spec_for(spp):
+    return pl.BlockSpec(
+        block_shape=(1, spp, 1, key_dim, value_dim),
+        index_map=lambda bg, hg, ci: (bg, hg, 0, 0, 0),
+    )
+
+  state_before_cotangent_spec = state_before_cotangent_spec_for(streams_per_program)
 
   stream_shape = (1, streams, sequence_length)
   query_t = query.transpose(0, 2, 1, 3).reshape(*stream_shape, key_dim)
@@ -2893,9 +2905,10 @@ def _pallas_kda_fused_v4_backward_split(
   fold_inputs = ()
   halo_blocks = chunk_size // _CONV_HALO_ROWS
 
-  def prev_spec(reverse):
+  def prev_spec(reverse, spp=None):
+    spp = spp or streams_per_program
     return pl.BlockSpec(
-        block_shape=(1, streams_per_program, _CONV_HALO_ROWS, key_dim),
+        block_shape=(1, spp, _CONV_HALO_ROWS, key_dim),
         index_map=lambda bg, hg, ci: (
             bg,
             hg,
@@ -2915,15 +2928,25 @@ def _pallas_kda_fused_v4_backward_split(
         ),
     )
 
-  weight_spec = pl.BlockSpec(
-      block_shape=((conv_weight.shape[0] if fold else 1), streams_per_program, key_dim),
-      index_map=lambda bg, hg, ci: (0, hg, 0),
-  )
+  def weight_spec_for(spp):
+    return pl.BlockSpec(
+        block_shape=((conv_weight.shape[0] if fold else 1), spp, key_dim),
+        index_map=lambda bg, hg, ci: (0, hg, 0),
+    )
 
-  def fold_specs(reverse):
+  weight_spec = weight_spec_for(streams_per_program)
+
+  def fold_specs(reverse, spp=None):
     if not fold:
       return ()
-    return (prev_spec(reverse),) * 3 + (weight_spec,) * 3
+    return (prev_spec(reverse, spp),) * 3 + (weight_spec_for(spp or streams_per_program),) * 3
+
+  # The fold's stage A carries the conv recompute on top of the largest v4
+  # kernel; at 8 streams per program its register spills overflow the 16 MB
+  # VMEM by ~170 KB, so it runs at 4 (its outputs are per-stream, any
+  # grouping is valid; stage B and the VJP kernel keep 8).
+  spp_a = math.gcd(streams, 4) if fold else streams_per_program
+  stream_groups_a = streams // spp_a
 
   if fold:
     conv_width = conv_weight.shape[0]
@@ -2960,32 +2983,32 @@ def _pallas_kda_fused_v4_backward_split(
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=0,
-          grid=(1, stream_groups, num_chunks),
+          grid=(1, stream_groups_a, num_chunks),
           in_specs=(
-              chunk_spec(key_dim, True),
-              chunk_spec(key_dim, True),
-              chunk_spec(value_dim, True),
-              chunk_spec(key_dim, True),
-              chunk_spec(1, True),
-              state_spec,
-              previous_state_spec,
-              chunk_spec(value_dim, True),
-              state_spec,
-              *fold_specs(True),
+              chunk_spec(key_dim, True, spp_a),
+              chunk_spec(key_dim, True, spp_a),
+              chunk_spec(value_dim, True, spp_a),
+              chunk_spec(key_dim, True, spp_a),
+              chunk_spec(1, True, spp_a),
+              state_spec_for(spp_a),
+              previous_state_spec_for(spp_a),
+              chunk_spec(value_dim, True, spp_a),
+              state_spec_for(spp_a),
+              *fold_specs(True, spp_a),
           ),
           out_specs=(
-              chunk_spec(key_dim, True),
-              chunk_spec(key_dim, True),
-              chunk_spec(key_dim, True),
-              chunk_spec(value_dim, True),
-              chunk_spec(key_dim, True),
-              state_before_cotangent_spec,
-              square_spec(True),
-              square_spec(True),
-              row_spec(key_dim, True),
+              chunk_spec(key_dim, True, spp_a),
+              chunk_spec(key_dim, True, spp_a),
+              chunk_spec(key_dim, True, spp_a),
+              chunk_spec(value_dim, True, spp_a),
+              chunk_spec(key_dim, True, spp_a),
+              state_before_cotangent_spec_for(spp_a),
+              square_spec(True, spp_a),
+              square_spec(True, spp_a),
+              row_spec(key_dim, True, spp_a),
           ),
           scratch_shapes=(
-              pltpu.VMEM((streams_per_program, key_dim, value_dim), jnp.float32),
+              pltpu.VMEM((spp_a, key_dim, value_dim), jnp.float32),
           ),
       ),
       out_shape=(
