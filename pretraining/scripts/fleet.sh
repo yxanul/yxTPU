@@ -38,7 +38,10 @@ _one() {  # _one <worker> <cmd> - hard wall-clock cap without GNU timeout (macOS
     ( sleep "$SSH_TIMEOUT"; kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null; pkill -TERM -P "$pid" 2>/dev/null ) 2>/dev/null & wd=$!
     wait "$pid" 2>/dev/null; rc=$?
     kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
-    [ $rc -ge 128 ] && echo "!! worker $w: TIMEOUT after ${SSH_TIMEOUT}s (host wedged or unreachable)"
+    if [ $rc -ge 128 ]; then
+      if [ "${FLEET_EXPECT_HANG:-0}" = 1 ]; then echo "(session cut after ${SSH_TIMEOUT}s - expected for a detached launch; verify with 'procs')"
+      else echo "!! worker $w: TIMEOUT after ${SSH_TIMEOUT}s (host wedged or unreachable)"; fi
+    fi
     exit 0 ) 
   printf '%s\n' "$out" | grep -v '^SSH:\|Using ssh\|^$' | sed "s/^/[w$w] /"
 }
@@ -58,7 +61,9 @@ case "${1:-}" in
   run)
     _all "$2" ;;
   launch)
-    name="$2"; cmd="$3"
+    # gcloud's ssh keeps the channel open while the detached child lives, so
+    # the session is cut by the cap once "launched" has been printed.
+    name="$2"; cmd="$3"; export FLEET_EXPECT_HANG=1; SSH_TIMEOUT="${FLEET_LAUNCH_TIMEOUT:-25}"
     _all "cd ~/yxTPU/pretraining && export PATH=\$HOME/.local/bin:\$PATH && rm -f /tmp/libtpu_lockfile && PYTHONUNBUFFERED=1 setsid nohup bash -c '$cmd' > ~/fleet-$name.log 2>&1 < /dev/null & disown; sleep 1; echo launched pid=\$! log=~/fleet-$name.log" ;;
   tail)
     name="$2"; n="${3:-3}"
