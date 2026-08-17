@@ -1,0 +1,75 @@
+# Data-path smoke at the 30B continuation's operating point (seq 4096,
+# PDB 4, 524,288 tokens/step) with the 2026-08 producer/loop changes:
+# async numpy host->device batches, per-source fetch threads, producer
+# PROCESSES, deep prefetch, host-patchified pixels, plus the measurement
+# fixes (rows holdout packing, train_fixed diagnostics, per-modality
+# attention maxima, pre-norm residual probe). Warm-starts from the
+# continuation's final checkpoint so the concat-vs-rows holdout gap is
+# measured on the trained model; the LR is tiny (launch override) so
+# the smoke does not move it. Gates against the continuation's history
+# (inzcfemi): p10 step 1,499.7 ms / mean 1,985 ms; regime shares
+# A(h2d>100 ms, dw<5)=60%, B(dw>5)=28%; queue depth 0 on 40% of steps.
+name: vision_1b_smoke_4k
+steps: 400
+token_budget: null
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: true
+prefetch_batches: 48
+host_stats_interval: 50
+init_from_run: kda_hybrid_1b_yx49k-muonclip-vision_1b_cont30b
+init_from_destination: /home/a1111/yxtpu_ckpts
+checkpoint:
+  enabled: false
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: vision-1b-datapath-smoke
+  tags: [v4-64, vision, 1b, smoke, datapath]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 100
+  batch: train_fixed
+harness_eval:
+  enabled: false
+model_overrides:
+  vision:
+    enabled: true
+    dataset_name: HuggingFaceM4/FineVisionMax
+    max_images_per_sequence: 4
+    max_images_per_row: 1
+    p_text: 0.45
+    producer_processes: 4
+    row_buffer: 512
+    host_patchify: true
+    text_datasets:
+      - name: climbmix
+        dataset: karpathy/climbmix-400b-shuffle
+        weight: 0.641
+        field: text
+        format: plain
+      - name: stack
+        dataset: HuggingFaceCode/stack-v3-train
+        weight: 0.276
+        format: repo
+      - name: math
+        dataset: nvidia/Nemotron-CC-Math-v1
+        subset: 4plus_MIND
+        weight: 0.084
+        field: text
+        format: plain
+  attention:
+    output_gate: true
+data_overrides:
+  sequence_length: 4096
+  per_device_batch_size: 4
+  eval_interval: 100
+  eval_steps: 8
+  eval_packings: [concat, rows]
+  eval_row_tokens: 1024

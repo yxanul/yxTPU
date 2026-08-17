@@ -1713,6 +1713,11 @@ class AttentionOp(nnx.Module):
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
     if record_max_logits:
+      # yxTPU: a caller that sets keep_max_logits_query_axis receives the
+      # kernel's per-query running maxima (batch, heads, q_len) and does its
+      # own reductions (joint for QK-clip, split by query modality).
+      if getattr(self, "keep_max_logits_query_axis", False):
+        return x, max_logits
       # Max over sequence length (dim 2 of max_logits)
       # max_logits from kernel is (batch, heads, q_len)
       # output needs to be (batch, heads)

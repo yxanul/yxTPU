@@ -159,9 +159,39 @@ class VisionConfig(StrictModel):
     # ``data``'s corpus at weight 1. Non-empty REPLACES it - list the
     # pretraining corpus explicitly alongside the extra sources.
     text_datasets: tuple[TextSourceConfig, ...] = ()
-    # Keep at 1: fsspec's cached HTTP filesystem is not thread-safe, and one
-    # producer per host sustains 1B-scale step times.
+    # Producer threads of the in-process pool (each owns its own HF
+    # streams). One producer per host did NOT sustain the 1B-scale step
+    # time on the 30B continuation (queue empty on 40% of steps): prefer
+    # ``producer_processes`` below for production and keep threads for
+    # single-host smokes and tests.
     producer_threads: int = 1
+    # Producer PROCESSES (spawn context, no JAX in the children): 0 keeps
+    # the in-process thread pool; N > 0 runs N packers per host, each with
+    # its own stream shard and per-source fetch threads, shipping whole
+    # process batches to the trainer over a multiprocessing queue. Removes
+    # GIL coupling between packing and the training loop and scales image
+    # decode across the host's cores. Batch composition is nondeterministic
+    # across runs (like producer_threads > 1); every row is still seen once
+    # per epoch per shard.
+    producer_processes: int = 0
+    # Prepared rows buffered PER SOURCE STREAM ahead of the packer by that
+    # source's fetch thread (draw -> filter -> decode/tokenize). A shard
+    # boundary or slow row on one stream then stalls only that stream's
+    # thread, not the packer, and image decode overlaps packing. 0 disables
+    # the fetch threads (inline draws, the pre-2026-08 behavior).
+    row_buffer: int = 512
+    # Rows may carry up to this many images (FineVision rows with more are
+    # skipped, rows with fewer are kept). 1 reproduces the single-image
+    # filter of the trial/continuation campaigns; larger values admit the
+    # multi-image rows (~20% of FineVisionMax) that the 8k sequence is for.
+    # Bounded by max_images_per_sequence.
+    max_images_per_row: int = 1
+    # Ship pixels pre-patchified as [images, grid^2, patch^2*3] uint8 (a
+    # host-side reshape) instead of [images, H, W, 3]: lane-dense on device
+    # (9.6 vs 11.0 MB per device at 4x4x448^2), ~3x less transfer latency,
+    # and the tower's on-device patchify becomes a no-op. The tower accepts
+    # both layouts; decode/SFT paths keep shipping raw pixels.
+    host_patchify: bool = False
     # Stream framing ids for the packed contract (yx49k: pad doubles as eos).
     pad_token_id: int = 49119
     eos_token_id: int = 49119
@@ -195,6 +225,14 @@ class VisionConfig(StrictModel):
             raise ValueError("vision.p_text must be in [0, 1]")
         if self.producer_threads < 1:
             raise ValueError("vision.producer_threads must be positive")
+        if self.producer_processes < 0:
+            raise ValueError("vision.producer_processes must be non-negative")
+        if self.row_buffer < 0:
+            raise ValueError("vision.row_buffer must be non-negative")
+        if not 1 <= self.max_images_per_row <= self.max_images_per_sequence:
+            raise ValueError(
+                "vision.max_images_per_row must lie in [1, max_images_per_sequence]"
+            )
         return self
 
 
@@ -416,6 +454,22 @@ class DataConfig(StrictModel):
     # sources it stops re-scanning roughly 1/validation_fraction documents per
     # evaluation batch after the first pass.
     eval_fixed_batches: bool = True
+    # How the held-out text is packed for evaluation. "concat" is the
+    # historical format: documents concatenated into full sequence_length
+    # windows, one segment, every position labeled - what Part I's holdout
+    # numbers are. "rows" is the training packer's contract for the mixed
+    # vision+text campaigns: whole documents (truncated at
+    # eval_row_tokens) as separate segments with restarting positions and
+    # masked boundaries. The first entry is logged as
+    # eval/train_holdout_loss; further entries as
+    # eval/train_holdout_loss_<packing>. Listing both measures the
+    # format gap directly (measured 0.3-0.4 nats on the 1B multimodal
+    # campaigns, where the anneal moved the two in opposite directions).
+    eval_packings: tuple[Literal["concat", "rows"], ...] = ("concat",)
+    # Per-document truncation for the "rows" packing; None keeps whole
+    # documents up to the sequence length. Match vision.text_row_tokens to
+    # reproduce the training rows exactly.
+    eval_row_tokens: int | None = None
     dataset_name: str | None = None
     dataset_path: str | None = None
     tokenizer: str | None = None
@@ -446,6 +500,12 @@ class DataConfig(StrictModel):
             raise ValueError("prefetch_batches must be non-negative")
         if self.shuffle_buffer_size < 1 or self.tokenize_batch_size < 1:
             raise ValueError("shuffle and tokenize batch sizes must be positive")
+        if not self.eval_packings:
+            raise ValueError("eval_packings must list at least one packing")
+        if len(set(self.eval_packings)) != len(self.eval_packings):
+            raise ValueError("eval_packings must not repeat a packing")
+        if self.eval_row_tokens is not None and self.eval_row_tokens < 8:
+            raise ValueError("eval_row_tokens must be at least 8")
         return self
 
 
@@ -517,6 +577,13 @@ class WandbConfig(StrictModel):
 class DiagnosticsConfig(StrictModel):
     enabled: bool = False
     interval: int = 0
+    # Which batch the diagnostics pass runs on. "holdout" is the last
+    # evaluation batch of the first eval packing (text-only, historical).
+    # "train_fixed" caches the first TRAINING host batch and reuses it at
+    # every interval: the trained distribution (mixed modality, training
+    # packing), so attention maxima and gradient norms are comparable with
+    # the train step's own telemetry across time.
+    batch: Literal["holdout", "train_fixed"] = "holdout"
 
     @model_validator(mode="after")
     def validate_interval(self) -> DiagnosticsConfig:
@@ -564,6 +631,13 @@ class ExperimentConfig(StrictModel):
     # background thread necessarily runs the iterator ahead of the last
     # trained step.
     prefetch_batches: int = 1
+    # Every this many steps, all-gather each host's [prefetch queue depth,
+    # data_wait_ms, host_to_device_ms, step_ms] and log the fleet minimum
+    # queue depth and maximum waits with the responsible host index. On a
+    # synchronous slice any host's stall stalls every chip; this shows
+    # WHICH host instead of leaving the primary's zero-local-wait slow
+    # steps to be inferred. One tiny collective per interval; 0 disables.
+    host_stats_interval: int = 100
     # Warm-start: when set and no own checkpoint exists, restore WEIGHTS
     # from this other run's latest checkpoint (same model tree required)
     # and train from step 0 with a fresh optimizer and schedule - the
@@ -597,6 +671,8 @@ class ExperimentConfig(StrictModel):
             raise ValueError("token_budget must be positive")
         if self.prefetch_batches < 1:
             raise ValueError("prefetch_batches must be at least 1")
+        if self.host_stats_interval < 0:
+            raise ValueError("host_stats_interval must be non-negative")
         if (
             self.prefetch_batches > 1
             and self.checkpoint.enabled
@@ -651,11 +727,13 @@ class ResolvedConfig(StrictModel):
         if self.data.streaming and self.data.eval_interval and not self.data.validation_fraction:
             raise ValueError("streaming validation requires a nonzero validation_fraction")
         diagnostics = self.experiment.diagnostics
-        if diagnostics.enabled:
+        if diagnostics.enabled and diagnostics.batch == "holdout":
             if not self.data.eval_interval:
-                raise ValueError("diagnostics require validation batches")
+                raise ValueError("diagnostics on the holdout batch require validation batches")
             if diagnostics.interval % self.data.eval_interval:
                 raise ValueError("diagnostics interval must be a multiple of data.eval_interval")
+        if "rows" in self.data.eval_packings and not self.data.streaming:
+            raise ValueError("the rows eval packing is implemented for streaming text data")
         if self.experiment.token_budget is not None:
             tokens_available = (
                 self.experiment.steps

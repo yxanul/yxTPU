@@ -12,6 +12,10 @@ from maxtext.layers.linears import DenseGeneral
 from yxtpu_pretrain.config import AttentionConfig
 from yxtpu_pretrain.layers.roles import ParamRole, declare_dense_kernel
 
+# Sentinel for "no query position of this modality in the batch" in the
+# per-modality maxima; the host maps it to NaN before logging.
+ABSENT_LOGIT = -1.0e30
+
 
 class NoPEGQA(nnx.Module):
     """NoPE GQA with one fused QKV projection and Tokamax Splash on TPU."""
@@ -138,10 +142,19 @@ class NoPEGQA(nnx.Module):
             self.attention_op.max_logits = nnx.Intermediate(
                 jnp.zeros((1, self.num_query_heads), dtype=jnp.float32)
             )
+            # Ask the vendored op for the kernel's per-query running maxima
+            # [batch, heads, q_len] instead of the batch-reduced [batch, heads];
+            # this layer reduces them jointly (QK-clip) and per modality.
+            self.attention_op.keep_max_logits_query_axis = True
         else:
             self.attention_op = None
         self.max_logits = nnx.Intermediate(
             jnp.zeros((1, self.num_query_heads), dtype=jnp.float32)
+        )
+        # [2, heads]: max logit over VISUAL query positions, then over TEXT
+        # query positions (ABSENT_LOGIT when the batch has none of a kind).
+        self.max_logits_by_modality = nnx.Intermediate(
+            jnp.full((2, self.num_query_heads), ABSENT_LOGIT, dtype=jnp.float32)
         )
 
     def _project(self, hidden_states):
@@ -155,7 +168,27 @@ class NoPEGQA(nnx.Module):
         query = query * jnp.asarray(self.head_dim**-0.5, dtype=query.dtype)
         return query, key, value
 
-    def _dot_attention(self, query, key, value, segment_ids, *, record_max_logits):
+    def _record_maxima(self, per_query, modality_mask) -> None:
+        """Reduces [batch, heads, q_len] maxima into the joint [1, heads]
+        (QK-clip's input) and the [2, heads] modality split."""
+        joint = jnp.max(per_query, axis=(0, 2)).reshape(1, self.num_query_heads)
+        self.max_logits.value = joint
+        if modality_mask is None:
+            split = jnp.full((2, self.num_query_heads), ABSENT_LOGIT, jnp.float32)
+        else:
+            visual = modality_mask[:, None, :]
+            absent = jnp.asarray(ABSENT_LOGIT, per_query.dtype)
+            split = jnp.stack(
+                [
+                    jnp.max(jnp.where(visual, per_query, absent), axis=(0, 2)),
+                    jnp.max(jnp.where(~visual, per_query, absent), axis=(0, 2)),
+                ]
+            ).astype(jnp.float32)
+        self.max_logits_by_modality.value = split
+
+    def _dot_attention(
+        self, query, key, value, segment_ids, *, record_max_logits, modality_mask=None
+    ):
         batch, query_length, _, _ = query.shape
         key_length = key.shape[1]
         grouped_query = query.reshape(
@@ -179,12 +212,15 @@ class NoPEGQA(nnx.Module):
             mask = mask & (same_segment & valid)[:, None, None, :, :]
         logits = jnp.where(mask, logits, jnp.asarray(-1.0e30, dtype=logits.dtype))
         if record_max_logits:
-            # Reduce over the batch axis as well so the recorded intermediate
-            # keeps the fixed [1, heads] shape it was initialized with. A
-            # batch-sized shape here persists on the model and is incompatible
-            # with a train step compiled without recording (see __call__).
-            maxima = jnp.max(logits, axis=(0, -2, -1)).reshape(1, self.num_query_heads)
-            self.max_logits.value = maxima
+            # Per-query maxima [batch, heads, q_len]; the shared reducer
+            # collapses batch and sequence so the recorded intermediates keep
+            # the fixed shapes they were initialized with (a batch-sized
+            # shape persisting on the model is incompatible with a train step
+            # compiled without recording, see __call__).
+            per_query = jnp.max(logits, axis=-1).reshape(
+                batch, self.num_query_heads, query_length
+            )
+            self._record_maxima(per_query, modality_mask)
         probabilities = jax.nn.softmax(logits, axis=-1).astype(value.dtype)
         output = jnp.einsum(
             "bkhts,bskd->btkhd",
@@ -204,6 +240,7 @@ class NoPEGQA(nnx.Module):
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
+        modality_mask=None,
     ):
         query, key, value = self._project(hidden_states)
         if self.rotary is not None:
@@ -222,6 +259,7 @@ class NoPEGQA(nnx.Module):
                 value,
                 decoder_segment_ids,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
         else:
             output = self.attention_op(
@@ -234,18 +272,19 @@ class NoPEGQA(nnx.Module):
                 record_max_logits=record_max_logits,
             )
             if record_max_logits:
-                # The AttentionOp records a batch-sized [batch, heads] maximum.
-                # Collapse the batch axis so both this intermediate and the
-                # AttentionOp's own intermediate return to the fixed [1, heads]
-                # shape the NNX graph was initialized and compiled with.
-                # Otherwise a diagnostics forward (record_max_logits=True) leaves
-                # batch-sized intermediates on the model that a subsequent
-                # record-free (e.g. adamw) train step cannot consume.
-                reduced = jnp.max(
-                    self.attention_op.max_logits.value, axis=0, keepdims=True
-                )
-                self.attention_op.max_logits.value = reduced
-                self.max_logits.value = reduced
+                # The AttentionOp records the kernel's per-query maxima
+                # [batch, heads, q_len] (keep_max_logits_query_axis). Reduce
+                # them here so both this layer's intermediates and the
+                # AttentionOp's own return to the fixed shapes the NNX graph
+                # was initialized and compiled with. Otherwise a diagnostics
+                # forward (record_max_logits=True) leaves batch-sized
+                # intermediates on the model that a subsequent record-free
+                # (e.g. adamw) train step cannot consume.
+                per_query = self.attention_op.max_logits.value
+                if per_query.ndim == 2:  # a vendored op without the flag
+                    per_query = per_query[:, :, None]
+                self._record_maxima(per_query, modality_mask)
+                self.attention_op.max_logits.value = self.max_logits.value
         if self.gate_proj is not None:
             # Sigmoid in fp32, consistent with the KDA output gate.
             gate = jax.nn.sigmoid(self.gate_proj(hidden_states).astype(jnp.float32))

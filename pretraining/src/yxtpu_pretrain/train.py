@@ -15,6 +15,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding, PartitionSpec
@@ -26,10 +27,13 @@ from yxtpu_pretrain.losses import (
     chunked_linear_cross_entropy,
     data_parallel_linear_cross_entropy,
 )
+from yxtpu_pretrain.layers.nope_gqa import ABSENT_LOGIT
 from yxtpu_pretrain.model import (
     HybridLanguageModel,
     attention_logit_intermediates,
+    attention_modality_logit_intermediates,
     count_parameters,
+    residual_probe_intermediates,
     vision_probe_intermediates,
 )
 from yxtpu_pretrain.optimizers import (
@@ -111,28 +115,25 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
             dtype=jnp.float32,
         )
     )
+    if record_max_logits and model.vision_tower is not None:
+        # [cycles, 2, heads]: attention maxima over visual / text query
+        # positions - the train-batch companion of the joint QK-clip maxima
+        # (a text-only diagnostics batch cannot show where the hot logits
+        # of a mixed batch live).
+        vision_aux["max_logits_by_modality"] = attention_modality_logit_intermediates(
+            model
+        )
     if "images" in batch and model.vision_probe is not None:
         probe = vision_probe_intermediates(model)
         vision_aux["visual_embed_rms"] = probe[0]
         vision_aux["text_embed_rms"] = probe[1]
         vision_aux["visual_embed_max_abs"] = probe[2]
-        # Final-hidden RMS split by position modality: the depth-integrated
-        # health of visual positions vs text positions after all cycles.
-        placeholder = (
-            batch["input_ids"] == model.config.model.vision.placeholder_token_id
-        )
-        nonpad = batch["segment_ids"] != 0
-        squares = jnp.mean(
-            jnp.square(jax.lax.stop_gradient(hidden_states).astype(jnp.float32)),
-            axis=-1,
-        )
-
-        def masked_rms(mask):
-            total = jnp.sum(jnp.where(mask, squares, 0.0))
-            return jnp.sqrt(total / jnp.maximum(jnp.sum(mask), 1))
-
-        vision_aux["hidden_visual_rms"] = masked_rms(placeholder & nonpad)
-        vision_aux["hidden_text_rms"] = masked_rms((~placeholder) & nonpad)
+        # Pre-final-norm residual RMS split by position modality: the
+        # depth-integrated scale of visual vs text positions after all
+        # cycles (post-norm both equal the norm's scale by construction).
+        residual = residual_probe_intermediates(model)
+        vision_aux["hidden_visual_rms"] = residual[0]
+        vision_aux["hidden_text_rms"] = residual[1]
     return loss, {"max_logits": logits_max, "tokens": token_count, **vision_aux}
 
 
@@ -211,6 +212,7 @@ def _make_train_step(config: ResolvedConfig, loss_fn=None):
         loss_sum = jnp.asarray(0.0, dtype=jnp.float32)
         token_sum = jnp.asarray(0.0, dtype=jnp.float32)
         extra_sums = {}
+        extra_max = {}
         # Per-head attention logit maxima are reduced over the batch inside the
         # mixer, so the accumulator carries a single [cycles, 1, heads] row and
         # takes the max across accumulation microbatches.
@@ -243,6 +245,11 @@ def _make_train_step(config: ResolvedConfig, loss_fn=None):
             max_logits = jnp.maximum(max_logits, auxiliary["max_logits"])
             for key, value in auxiliary.items():
                 if key in ("tokens", "max_logits"):
+                    continue
+                if key == "max_logits_by_modality":
+                    extra_max[key] = (
+                        value if key not in extra_max else jnp.maximum(extra_max[key], value)
+                    )
                     continue
                 extra_sums[key] = extra_sums.get(key, 0.0) + value
         gradients = jax.tree.map(lambda value: value / accumulate, accumulated_grads)
@@ -278,6 +285,11 @@ def _make_train_step(config: ResolvedConfig, loss_fn=None):
                     "muonclip_clipped_heads": clip_metrics.clipped_heads,
                 }
             )
+        if "max_logits_by_modality" in extra_max:
+            # [cycles, 2, heads] -> per-cycle max over heads, per modality.
+            split = jnp.max(extra_max["max_logits_by_modality"], axis=-1)
+            metrics["max_logit_visual"] = split[:, 0]
+            metrics["max_logit_text"] = split[:, 1]
         return metrics
 
     return train_step
@@ -365,7 +377,7 @@ def _make_diagnostics_step():
             has_aux=True,
         )(model)
         parameters = nnx.state(model, nnx.Param)
-        return {
+        result = {
             "loss": loss,
             "grad_norm": max_utils.l2norm_pytree(gradients),
             "grad_max_abs": _tree_max_abs(gradients),
@@ -376,6 +388,11 @@ def _make_diagnostics_step():
             "sampled_logits_max_abs": auxiliary["sampled_logits_max_abs"],
             "attention_max_logits": attention_logit_intermediates(model),
         }
+        if model.vision_tower is not None:
+            result["attention_max_logits_by_modality"] = (
+                attention_modality_logit_intermediates(model)
+            )
+        return result
 
     return diagnostics_step
 
@@ -383,12 +400,20 @@ def _make_diagnostics_step():
 def _host_diagnostics(metrics) -> dict[str, float]:
     host = jax.device_get(metrics)
     attention = host.pop("attention_max_logits")
+    by_modality = host.pop("attention_max_logits_by_modality", None)
     result = {key: float(value) for key, value in host.items()}
     for cycle in range(attention.shape[0]):
         for head in range(attention.shape[-1]):
             result[f"attention/cycle_{cycle}/head_{head}_max_logit"] = float(
                 attention[cycle, ..., head].max()
             )
+    if by_modality is not None:
+        # [cycles, 2, heads] -> per-cycle max over heads; absent -> omitted.
+        for cycle in range(by_modality.shape[0]):
+            for kind_index, kind in enumerate(("visual", "text")):
+                value = float(by_modality[cycle, kind_index].max())
+                if value > ABSENT_LOGIT / 2:
+                    result[f"attention/cycle_{cycle}/{kind}_max_logit"] = value
     result["finite"] = float(all(math.isfinite(value) for value in result.values()))
     return result
 
@@ -442,20 +467,26 @@ class _PrefetchedIterator:
 
 
 def _device_batch(batch, mesh):
-    if jax.process_count() > 1:
-        return {
-            key: multihost_utils.host_local_array_to_global_array(
-                jnp.asarray(value),
-                mesh,
-                PartitionSpec("data", None),
-            )
-            for key, value in batch.items()
-        }
+    """Host batch -> global data-sharded device batch, asynchronously.
+
+    Numpy in, one batched device_put per local device: the call returns
+    after enqueueing (~1 ms) and the DMA overlaps the step in flight. The
+    previous form (jnp.asarray first, then host_local_array_to_global_array)
+    staged the whole process batch on local device 0 and re-sliced it ON
+    DEVICE behind the running step; measured 2026-08-17 on the v4-64, that
+    blocked the host for the full remaining step (~1.5 s), so the
+    "prefetched" batch never overlapped compute - 60% of the 30B
+    continuation's steps paid it (h2d ~1.7 s vs 14 ms idle). Same arrays,
+    bitwise-identical batches; single- and multi-host alike."""
     sharding = NamedSharding(mesh, PartitionSpec("data", None))
     return {
-        key: jax.device_put(jnp.asarray(value), sharding)
+        key: jax.make_array_from_process_local_data(sharding, np.asarray(value))
         for key, value in batch.items()
     }
+
+
+def _absent_to_nan(values) -> list[float]:
+    return [float("nan") if value <= ABSENT_LOGIT / 2 else float(value) for value in values]
 
 
 def _data_pipeline_stats(iterator) -> dict[str, float]:
@@ -543,13 +574,12 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
     from yxtpu_pretrain.runtime.vision_data import (
         MixedVisionTextIterator,
         PooledMixedIterator,
+        ProcessPooledMixedIterator,
+        ProducerSpec,
         VisionBatchSpec,
     )
 
     vision = config.model.vision
-    tokenizer = load_fast_tokenizer(
-        config.data.tokenizer, padded_vocab_size=config.model.vocab_size
-    )
     spec = VisionBatchSpec(
         sequence_length=config.data.sequence_length,
         visual_tokens=vision.visual_tokens_per_image,
@@ -558,6 +588,8 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
         pad_id=vision.pad_token_id,
         eos_id=vision.eos_token_id,
         max_images=vision.max_images_per_sequence,
+        patch_size=vision.patch_size,
+        host_patchify=vision.host_patchify,
     )
     threads = max(1, vision.producer_threads)
     if vision.text_datasets:
@@ -587,9 +619,11 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
     else:
         text_sources = []
 
-    def make_source(thread_index: int) -> MixedVisionTextIterator:
-        return MixedVisionTextIterator(
-            tokenizer=tokenizer,
+    if vision.producer_processes > 0:
+        workers = vision.producer_processes
+        producer_spec = ProducerSpec(
+            tokenizer_name=config.data.tokenizer,
+            padded_vocab_size=config.model.vocab_size,
             spec=spec,
             batch_size=process_batch,
             vision_dataset=vision.dataset_name,
@@ -598,13 +632,42 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
             text_row_tokens=vision.text_row_tokens,
             min_visual_dependency=vision.min_visual_dependency,
             shuffle_seed=config.data.shuffle_seed,
-            shard_index=jax.process_index() * threads + thread_index,
-            shard_count=jax.process_count() * threads,
+            max_images_per_row=vision.max_images_per_row,
+            row_buffer=vision.row_buffer,
+        )
+        iterator = ProcessPooledMixedIterator(
+            producer_spec,
+            workers=workers,
+            shard_base=jax.process_index() * workers,
+            shard_count=jax.process_count() * workers,
+        )
+        producers = {"producer_processes": workers}
+    else:
+        tokenizer = load_fast_tokenizer(
+            config.data.tokenizer, padded_vocab_size=config.model.vocab_size
         )
 
-    iterator = PooledMixedIterator(
-        make_source, threads=threads, batch_size=process_batch
-    )
+        def make_source(thread_index: int) -> MixedVisionTextIterator:
+            return MixedVisionTextIterator(
+                tokenizer=tokenizer,
+                spec=spec,
+                batch_size=process_batch,
+                vision_dataset=vision.dataset_name,
+                text_sources=text_sources,
+                p_text=vision.p_text,
+                text_row_tokens=vision.text_row_tokens,
+                min_visual_dependency=vision.min_visual_dependency,
+                shuffle_seed=config.data.shuffle_seed,
+                shard_index=jax.process_index() * threads + thread_index,
+                shard_count=jax.process_count() * threads,
+                max_images_per_row=vision.max_images_per_row,
+                row_buffer=vision.row_buffer,
+            )
+
+        iterator = PooledMixedIterator(
+            make_source, threads=threads, batch_size=process_batch
+        )
+        producers = {"producer_threads": threads}
     iterator.metadata = {
         "pipeline": "mixed_vision_text",
         "vision_dataset": vision.dataset_name,
@@ -615,8 +678,11 @@ def _create_mixed_vision_iterator(config: ResolvedConfig, process_batch: int):
         "p_text": vision.p_text,
         "text_row_tokens": vision.text_row_tokens,
         "max_images_per_sequence": vision.max_images_per_sequence,
+        "max_images_per_row": vision.max_images_per_row,
         "min_visual_dependency": vision.min_visual_dependency,
-        "producer_threads": threads,
+        "row_buffer": vision.row_buffer,
+        "host_patchify": vision.host_patchify,
+        **producers,
     }
     return iterator
 
@@ -684,18 +750,27 @@ def run(
         data_iterator = _PrefetchedIterator(
             data_iterator, config.experiment.prefetch_batches - 1
         )
-    eval_iterator = (
-        create_data_iterator(
-            process_data.model_copy(update={"split": config.data.eval_split}),
-            global_batch_size=eval_process_batch,
-            vocab_size=config.model.vocab_size,
-            validation=config.data.streaming,
-            process_index=jax.process_index(),
-            process_count=jax.process_count(),
-        )
+    # One held-out iterator per eval packing (the first is the historical
+    # eval/train_holdout_loss; further packings log with a suffix). Under
+    # eval_fixed_batches each is materialized once at the first evaluation.
+    eval_iterators = (
+        {
+            packing: create_data_iterator(
+                process_data.model_copy(update={"split": config.data.eval_split}),
+                global_batch_size=eval_process_batch,
+                vocab_size=config.model.vocab_size,
+                validation=config.data.streaming,
+                process_index=jax.process_index(),
+                process_count=jax.process_count(),
+                packing=packing,
+                row_tokens=config.data.eval_row_tokens,
+            )
+            for packing in config.data.eval_packings
+        }
         if config.data.eval_interval
-        else None
+        else {}
     )
+    eval_iterator = next(iter(eval_iterators.values()), None)
     with logical_mesh_context(mesh, logical_axis_rules):
         model = HybridLanguageModel(config, mesh, rngs=nnx.Rngs(config.experiment.seed))
         transform, routes = build_optimizer(model, config.optimizer)
@@ -789,7 +864,13 @@ def run(
     # jax.set_mesh the host-local -> global expansion silently no-ops, so the
     # step would be compiled for the per-host shape and reject the global
     # batches the loop feeds it on multi-host slices.
-    first_batch = _device_batch(next(data_iterator), mesh)
+    first_host_batch = next(data_iterator)
+    first_batch = _device_batch(first_host_batch, mesh)
+    diagnostic_host_batch = (
+        first_host_batch
+        if config.experiment.diagnostics.batch == "train_fixed"
+        else None
+    )
     with logical_mesh_context(mesh, logical_axis_rules):
         compiled_train_step = train_step.lower(state, first_batch).compile()
         compiled_memory = _compiled_memory_summary(compiled_train_step)
@@ -818,8 +899,9 @@ def run(
     tokens_seen = 0
     completed_steps = start_step
     trace_active = False
-    cached_eval_batches: list | None = None
+    cached_eval_batches: dict[str, list] = {}
     previous_step_end: float | None = None
+    host_stats_interval = config.experiment.host_stats_interval
     try:
         # Prefetch the next batch between dispatching a step and blocking on
         # it, so the host fetch and host-to-device transfer (~70 ms/step of
@@ -929,6 +1011,13 @@ def run(
                     "min_scale": host_metrics["muonclip_min_scale"].tolist(),
                     "clipped_heads": host_metrics["muonclip_clipped_heads"].tolist(),
                 }
+                if "max_logit_visual" in host_metrics:
+                    record["muonclip"]["max_logit_visual"] = _absent_to_nan(
+                        host_metrics["max_logit_visual"]
+                    )
+                    record["muonclip"]["max_logit_text"] = _absent_to_nan(
+                        host_metrics["max_logit_text"]
+                    )
             vision_metrics = _vision_metrics(host_metrics)
             if vision_metrics is not None:
                 record["vision"] = vision_metrics
@@ -959,6 +1048,41 @@ def run(
                 }
                 if vision_metrics is not None:
                     log_groups["vision"] = vision_metrics
+                if "muonclip" in record:
+                    attention = {}
+                    for cycle, value in enumerate(record["muonclip"]["max_logit"]):
+                        attention[f"cycle_{cycle}_max_logit"] = value
+                    for kind in ("visual", "text"):
+                        for cycle, value in enumerate(
+                            record["muonclip"].get(f"max_logit_{kind}", ())
+                        ):
+                            if math.isfinite(value):
+                                attention[f"cycle_{cycle}_max_logit_{kind}"] = value
+                    log_groups["attention"] = attention
+                if host_stats_interval and step % host_stats_interval == 0:
+                    # Fleet view of the host path: any host's stall stalls
+                    # every chip, so log the worst host, not the primary's.
+                    local_stats = np.asarray(
+                        [
+                            float(log_groups["data"].get("prefetch_queue_depth", -1.0)),
+                            record["data_wait_ms"],
+                            record["host_to_device_ms"],
+                            record["step_ms"],
+                        ],
+                        dtype=np.float64,
+                    )
+                    fleet = np.asarray(multihost_utils.process_allgather(local_stats))
+                    if fleet.ndim == 1:
+                        fleet = fleet[None]
+                    log_groups["hosts"] = {
+                        "queue_depth_min": float(fleet[:, 0].min()),
+                        "queue_depth_min_host": int(fleet[:, 0].argmin()),
+                        "data_wait_ms_max": float(fleet[:, 1].max()),
+                        "data_wait_ms_max_host": int(fleet[:, 1].argmax()),
+                        "host_to_device_ms_max": float(fleet[:, 2].max()),
+                        "step_ms_max": float(fleet[:, 3].max()),
+                        "hosts_waiting": int((fleet[:, 1] > 5.0).sum()),
+                    }
                 tracker.log(
                     log_groups,
                     step=step,
@@ -969,47 +1093,57 @@ def run(
             if step > start_step + 5:
                 throughputs.append(throughput)
 
+            diagnostic_batch = None
             if eval_iterator is not None and step % config.data.eval_interval == 0:
-                if config.data.eval_fixed_batches:
-                    if cached_eval_batches is None:
-                        cached_eval_batches = [
-                            next(eval_iterator) for _ in range(config.data.eval_steps)
-                        ]
-                    eval_host_batches = cached_eval_batches
-                else:
-                    eval_host_batches = [
-                        next(eval_iterator) for _ in range(config.data.eval_steps)
-                    ]
-                eval_loss_sum = 0.0
-                eval_token_sum = 0.0
-                diagnostic_batch = None
-                for eval_host_batch in eval_host_batches:
-                    diagnostic_batch = _device_batch(eval_host_batch, mesh)
-                    with logical_mesh_context(mesh, logical_axis_rules):
-                        eval_metrics = eval_step(
-                            state.model,
-                            diagnostic_batch,
-                        )
-                    eval_host = jax.device_get(eval_metrics)
-                    eval_tokens = float(eval_host["tokens"])
-                    eval_loss_sum += float(eval_host["loss"]) * eval_tokens
-                    eval_token_sum += eval_tokens
-                evaluation_loss = eval_loss_sum / max(eval_token_sum, 1.0)
+                eval_group: dict[str, float] = {}
                 evaluation_record = {
                     "step": step,
-                    "evaluation_loss": evaluation_loss,
-                    "evaluation_tokens": int(eval_token_sum),
                     "evaluation_fixed_batches": bool(config.data.eval_fixed_batches),
                 }
+                for packing_index, (packing, packing_iterator) in enumerate(
+                    eval_iterators.items()
+                ):
+                    if config.data.eval_fixed_batches:
+                        if packing not in cached_eval_batches:
+                            cached_eval_batches[packing] = [
+                                next(packing_iterator)
+                                for _ in range(config.data.eval_steps)
+                            ]
+                        eval_host_batches = cached_eval_batches[packing]
+                    else:
+                        eval_host_batches = [
+                            next(packing_iterator) for _ in range(config.data.eval_steps)
+                        ]
+                    eval_loss_sum = 0.0
+                    eval_token_sum = 0.0
+                    for eval_host_batch in eval_host_batches:
+                        eval_batch = _device_batch(eval_host_batch, mesh)
+                        if packing_index == 0:
+                            diagnostic_batch = eval_batch
+                        with logical_mesh_context(mesh, logical_axis_rules):
+                            eval_metrics = eval_step(
+                                state.model,
+                                eval_batch,
+                            )
+                        eval_host = jax.device_get(eval_metrics)
+                        eval_tokens = float(eval_host["tokens"])
+                        eval_loss_sum += float(eval_host["loss"]) * eval_tokens
+                        eval_token_sum += eval_tokens
+                    evaluation_loss = eval_loss_sum / max(eval_token_sum, 1.0)
+                    suffix = "" if packing_index == 0 else f"_{packing}"
+                    evaluation_record[f"evaluation_loss{suffix}"] = evaluation_loss
+                    evaluation_record[f"evaluation_tokens{suffix}"] = int(eval_token_sum)
+                    evaluation_record[f"evaluation_packing{suffix}"] = packing
+                    eval_group[f"train_holdout_loss{suffix}"] = evaluation_loss
+                    eval_group[f"train_holdout_perplexity{suffix}"] = math.exp(
+                        min(evaluation_loss, 80.0)
+                    )
+                    eval_group[f"tokens{suffix}"] = int(eval_token_sum)
                 metrics_writer.write(evaluation_record)
                 emit(evaluation_record)
                 tracker.log(
                     {
-                        "eval": {
-                            "train_holdout_loss": evaluation_loss,
-                            "train_holdout_perplexity": math.exp(min(evaluation_loss, 80.0)),
-                            "tokens": int(eval_token_sum),
-                        },
+                        "eval": eval_group,
                         "performance": {
                             "device_peak_bytes_in_use": _memory_summary()[
                                 "peak_bytes_in_use"
@@ -1020,8 +1154,11 @@ def run(
                     tokens_seen=tokens_seen,
                 )
 
-                diagnostics = config.experiment.diagnostics
-                if diagnostics.enabled and step % diagnostics.interval == 0:
+            diagnostics = config.experiment.diagnostics
+            if diagnostics.enabled and step % diagnostics.interval == 0:
+                if diagnostic_host_batch is not None:
+                    diagnostic_batch = _device_batch(diagnostic_host_batch, mesh)
+                if diagnostic_batch is not None:
                     with logical_mesh_context(mesh, logical_axis_rules):
                         diagnostic_metrics = diagnostics_step(state.model, diagnostic_batch)
                         jax.block_until_ready(diagnostic_metrics)
@@ -1098,6 +1235,9 @@ def run(
         if trace_active:
             jax.profiler.stop_trace()
         checkpoint_io.close()
+        closer = getattr(data_iterator, "close", None)
+        if callable(closer):
+            closer()
 
     summary = {
         "steps": completed_steps - start_step,

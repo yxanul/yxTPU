@@ -92,6 +92,21 @@ def _profile(args: argparse.Namespace) -> int:
     return run(config, profile=True)
 
 
+def _calibrate_mix(args: argparse.Namespace) -> int:
+    config = _resolve(args)
+    from yxtpu_pretrain.runtime.calibrate import calibrate_mix, format_report, parse_targets
+
+    result = calibrate_mix(
+        config,
+        sequences=args.sequences,
+        targets=parse_targets(args.targets),
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    )
+    print(format_report(result))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="yx-pretrain")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -118,6 +133,22 @@ def build_parser() -> argparse.ArgumentParser:
     profile = subparsers.add_parser("profile", help="run with a JAX profiler capture")
     _add_profiles(profile)
     profile.set_defaults(handler=_profile)
+
+    calibrate = subparsers.add_parser(
+        "calibrate-mix",
+        help="run the packed vision+text producer and solve source weights "
+        "for target loss-token shares",
+    )
+    _add_profiles(calibrate)
+    calibrate.add_argument("--sequences", type=int, default=96)
+    calibrate.add_argument(
+        "--targets",
+        default=None,
+        help="target loss-token shares, e.g. vision=0.35,climbmix=0.40,stack=0.17,math=0.08",
+    )
+    calibrate.add_argument("--shard-index", type=int, default=0)
+    calibrate.add_argument("--shard-count", type=int, default=1)
+    calibrate.set_defaults(handler=_calibrate_mix)
     return parser
 
 

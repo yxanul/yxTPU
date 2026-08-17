@@ -1,0 +1,74 @@
+# The 8k prerequisites smoke: seq 8192 at PDB 2 (same 524,288 tokens/
+# step), whole-document text rows (row_tokens 4096 for every source),
+# multi-image rows (up to 4 per row), 8 image slots per sequence, and the
+# same producer/loop changes as vision_1b_smoke_4k. Measures the compile
+# memory (the 4k point sits at 99.3% of HBM) and the device step against
+# the 4k smoke; the source weights are NOT recalibrated for the longer
+# rows - read data/<name>_loss_token_share and rerun `yx-pretrain
+# calibrate-mix` before any campaign at this shape. Warm-starts from the
+# continuation's final checkpoint (same parameter tree) at a tiny LR.
+name: vision_1b_smoke_8k
+steps: 400
+token_budget: null
+gradient_accumulation_steps: 1
+run_dir: runs
+seed: 42
+log_interval: 1
+profile_steps: []
+benchmark: false
+acknowledge_no_checkpoint: true
+prefetch_batches: 48
+host_stats_interval: 50
+init_from_run: kda_hybrid_1b_yx49k-muonclip-vision_1b_cont30b
+init_from_destination: /home/a1111/yxtpu_ckpts
+checkpoint:
+  enabled: false
+wandb:
+  enabled: true
+  project: yxtpu-pretrain
+  entity: null
+  group: vision-1b-datapath-smoke
+  tags: [v4-64, vision, 1b, smoke, datapath, seq8192]
+  mode: online
+diagnostics:
+  enabled: true
+  interval: 100
+  batch: train_fixed
+harness_eval:
+  enabled: false
+model_overrides:
+  vision:
+    enabled: true
+    dataset_name: HuggingFaceM4/FineVisionMax
+    max_images_per_sequence: 8
+    max_images_per_row: 4
+    text_row_tokens: 4096
+    p_text: 0.45
+    producer_processes: 4
+    row_buffer: 512
+    host_patchify: true
+    text_datasets:
+      - name: climbmix
+        dataset: karpathy/climbmix-400b-shuffle
+        weight: 0.641
+        field: text
+        format: plain
+      - name: stack
+        dataset: HuggingFaceCode/stack-v3-train
+        weight: 0.276
+        format: repo
+      - name: math
+        dataset: nvidia/Nemotron-CC-Math-v1
+        subset: 4plus_MIND
+        weight: 0.084
+        field: text
+        format: plain
+  attention:
+    output_gate: true
+data_overrides:
+  sequence_length: 8192
+  per_device_batch_size: 2
+  eval_interval: 100
+  eval_steps: 8
+  eval_packings: [concat, rows]
+  eval_row_tokens: 4096

@@ -217,7 +217,14 @@ def _is_validation_record(text: str, *, fraction: float, seed: int) -> bool:
 
 
 class PackedTokenBatcher(Iterator[Batch]):
-    """Batches a text stream through one batched Rust-tokenizer call at a time."""
+    """Batches a text stream through one batched Rust-tokenizer call at a time.
+
+    ``packing`` selects the example contract: ``concat`` (documents
+    concatenated into full windows, one segment, every position labeled)
+    or ``rows`` (whole documents truncated at ``row_tokens`` as separate
+    segments with restarting positions and masked boundaries - the mixed
+    training packer's contract, so a held-out set packed this way scores
+    the model under its training format)."""
 
     def __init__(
         self,
@@ -228,13 +235,20 @@ class PackedTokenBatcher(Iterator[Batch]):
         global_batch_size: int,
         vocab_size: int,
         validation: bool,
+        packing: str = "concat",
+        row_tokens: int | None = None,
     ):
+        if packing not in ("concat", "rows"):
+            raise ValueError(f"unknown packing {packing!r}")
         self.records = iter(records)
         self.tokenizer = tokenizer
         self.config = config
         self.global_batch_size = global_batch_size
         self.vocab_size = vocab_size
         self.validation = validation
+        self.packing = packing
+        self.row_tokens = row_tokens or config.sequence_length
+        self._pending_row: np.ndarray | None = None
         self._chunks: list[np.ndarray] = []
         self._available = 0
         self.documents_seen = 0
@@ -283,6 +297,8 @@ class PackedTokenBatcher(Iterator[Batch]):
                 self._available += chunk.size
 
     def __next__(self) -> Batch:
+        if self.packing == "rows":
+            return self._next_rows_batch()
         required = self.global_batch_size * (self.config.sequence_length + 1)
         self._fill(required)
         joined = np.concatenate(self._chunks)
@@ -293,6 +309,53 @@ class PackedTokenBatcher(Iterator[Batch]):
         self.tokens_emitted += int(required)
         self.batches_emitted += 1
         return _packed_batch(selected, self.config.sequence_length)
+
+    def _next_document(self) -> np.ndarray:
+        """One tokenized document (eos-terminated), fetching as needed."""
+        while not self._chunks:
+            self._fill(1)
+        chunk = self._chunks.pop(0)
+        self._available -= int(chunk.size)
+        return chunk
+
+    def _next_row(self) -> np.ndarray:
+        """One training-format text row: >= 8 content tokens, truncated at
+        row_tokens with the eos re-appended - the mixed packer's
+        ``ids[:row_tokens] + [eos]``."""
+        eos = self.tokenizer.eos_token_id
+        while True:
+            document = self._next_document()
+            content = document[:-1] if document.size and document[-1] == eos else document
+            if content.size < 8:
+                continue
+            content = content[: self.row_tokens]
+            return np.concatenate([content, np.asarray([eos], dtype=np.int32)])
+
+    def _next_rows_batch(self) -> Batch:
+        from yxtpu_pretrain.runtime.vision_data import pack_text_rows
+
+        sequence_length = self.config.sequence_length
+        capacity = sequence_length + 1
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id
+        examples = []
+        for _ in range(self.global_batch_size):
+            rows, used = [], 0
+            while used < capacity - 8:
+                if self._pending_row is not None:
+                    row, self._pending_row = self._pending_row, None
+                else:
+                    row = self._next_row()
+                if used + row.size > capacity:
+                    self._pending_row = row
+                    break
+                rows.append(row.tolist())
+                used += row.size
+            examples.append(pack_text_rows(rows, sequence_length, pad_id))
+        self.tokens_emitted += self.global_batch_size * capacity
+        self.batches_emitted += 1
+        return _stack(examples)
 
     @property
     def stats(self) -> dict[str, int]:
@@ -317,6 +380,8 @@ class PackedTokenBatcher(Iterator[Batch]):
             "streaming": True,
             "validation_partition": self.validation,
             "validation_fraction": self.config.validation_fraction,
+            "packing": self.packing,
+            "row_tokens": self.row_tokens if self.packing == "rows" else None,
         }
 
     def get_state(self):
@@ -475,6 +540,8 @@ class StreamingHuggingFaceIterator(PackedTokenBatcher):
         validation: bool,
         process_index: int = 0,
         process_count: int = 1,
+        packing: str = "concat",
+        row_tokens: int | None = None,
     ):
         from datasets import load_dataset
 
@@ -517,6 +584,8 @@ class StreamingHuggingFaceIterator(PackedTokenBatcher):
             global_batch_size=global_batch_size,
             vocab_size=vocab_size,
             validation=validation,
+            packing=packing,
+            row_tokens=row_tokens,
         )
 
     @property
@@ -647,14 +716,19 @@ def create_data_iterator(
     validation: bool = False,
     process_index: int = 0,
     process_count: int = 1,
+    packing: str = "concat",
+    row_tokens: int | None = None,
 ):
     """Builds the process-local iterator.
 
     ``global_batch_size`` is the *process-local* batch a training step consumes
     from this iterator. On multi-host slices the streaming source shards the
     document stream disjointly by ``process_index``; the offline sources rely
-    on the caller's per-process seed offset instead.
+    on the caller's per-process seed offset instead. ``packing`` ("concat" |
+    "rows") is honored by the streaming source (see PackedTokenBatcher).
     """
+    if packing != "concat" and not (config.type == "huggingface" and config.streaming):
+        raise ValueError("the rows packing is implemented for streaming Hugging Face data")
     if config.type == "synthetic":
         source = SyntheticIterator(config, global_batch_size, vocab_size)
     elif config.type == "huggingface" and config.streaming:
@@ -665,6 +739,8 @@ def create_data_iterator(
             validation=validation,
             process_index=process_index,
             process_count=process_count,
+            packing=packing,
+            row_tokens=row_tokens,
         )
     elif config.type == "huggingface":
         source = HuggingFaceIterator(config, global_batch_size, vocab_size)

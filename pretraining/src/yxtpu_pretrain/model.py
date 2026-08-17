@@ -225,6 +225,7 @@ class HybridLayer(nnx.Module):
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
+        modality_mask=None,
     ):
         """One Block-AttnRes sub-layer pass: depth-read, mix, accumulate,
         depth-read, MLP, accumulate. Returns the updated intra-block sum.
@@ -255,6 +256,7 @@ class HybridLayer(nnx.Module):
                 decoder_segment_ids=decoder_segment_ids,
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
         partial_sum = partial_sum + nn.with_logical_constraint(
             mixed, ACTIVATION_LOGICAL_AXES
@@ -280,6 +282,7 @@ class HybridLayer(nnx.Module):
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
+        modality_mask=None,
     ):
         residual = hidden_states
         normalized = self.input_norm(hidden_states)
@@ -296,6 +299,7 @@ class HybridLayer(nnx.Module):
                 decoder_segment_ids=decoder_segment_ids,
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
         hidden_states = nn.with_logical_constraint(
             residual + mixed,
@@ -334,6 +338,7 @@ class HybridCycle(nnx.Module):
         decoder_segment_ids=None,
         decoder_positions=None,
         record_max_logits: bool = False,
+        modality_mask=None,
     ):
         if isinstance(carry, tuple):
             blocks_buffer, block_index = carry
@@ -376,6 +381,7 @@ class HybridCycle(nnx.Module):
                     decoder_segment_ids=decoder_segment_ids,
                     decoder_positions=decoder_positions,
                     record_max_logits=record_max_logits,
+                    modality_mask=modality_mask,
                 )
             blocks_buffer = jax.lax.dynamic_update_slice_in_dim(
                 blocks_buffer, partial_sum[None], block_index + 1, axis=0
@@ -388,6 +394,7 @@ class HybridCycle(nnx.Module):
                 decoder_segment_ids=decoder_segment_ids,
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
         return hidden_states
 
@@ -426,9 +433,16 @@ class HybridLanguageModel(nnx.Module):
             # drifting off the language embedding scale (the projector norm
             # constrains its input, not its output).
             self.vision_probe = nnx.Intermediate(jnp.zeros((3,), jnp.float32))
+            # Pre-final-norm residual RMS split by position modality
+            # [visual, text]: the depth-integrated scale of the two token
+            # kinds BEFORE the final RMSNorm (after it both equal the norm's
+            # scale by construction, which is what the earlier post-norm
+            # probe reported as lockstep).
+            self.residual_probe = nnx.Intermediate(jnp.zeros((2,), jnp.float32))
         else:
             self.vision_tower = None
             self.vision_probe = None
+            self.residual_probe = None
         self.cycles = nnx_scan.create_scanned_layers(
             lambda cycle_rngs: HybridCycle(
                 config=config,
@@ -488,6 +502,7 @@ class HybridLanguageModel(nnx.Module):
         decoder_segment_ids,
         decoder_positions,
         record_max_logits,
+        modality_mask=None,
     ):
         graphdef, params, state = nnx.split(self.cycles, nnx.Param, ...)
         scan_axis = self.config.model.param_scan_axis
@@ -508,6 +523,7 @@ class HybridLanguageModel(nnx.Module):
                 decoder_segment_ids=decoder_segment_ids,
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
             _, _, new_state = nnx.split(cycle, nnx.Param, ...)
             return output, new_state
@@ -546,6 +562,12 @@ class HybridLanguageModel(nnx.Module):
                 jnp.arange(token_ids.shape[1], dtype=jnp.int32), token_ids.shape
             )
         hidden_states = self.token_embedding(token_ids, model_mode=MODEL_MODE_TRAIN)
+        modality_mask = None
+        if self.vision_tower is not None:
+            # Visual positions (placeholder ids), whether or not this batch
+            # carries images: the attention layers split their logit maxima
+            # by it, so text-only batches record an "absent" visual maximum.
+            modality_mask = token_ids == self.config.model.vision.placeholder_token_id
         if self.vision_tower is not None and images is not None:
             visual = self.vision_tower(images)
             hidden_states = splice_visual_embeddings(
@@ -554,9 +576,8 @@ class HybridLanguageModel(nnx.Module):
                 visual,
                 self.config.model.vision.placeholder_token_id,
             )
-            placeholder_mask = token_ids == self.config.model.vision.placeholder_token_id
             self.vision_probe.value = jax.lax.stop_gradient(
-                _embedding_probe(hidden_states, placeholder_mask, decoder_segment_ids)
+                _embedding_probe(hidden_states, modality_mask, decoder_segment_ids)
             )
         hidden_states = nn.with_logical_constraint(hidden_states, ACTIVATION_LOGICAL_AXES)
         if self.final_read is not None:
@@ -578,6 +599,7 @@ class HybridLanguageModel(nnx.Module):
                 decoder_segment_ids=decoder_segment_ids,
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
             hidden_states = self.final_read(
                 blocks_buffer,
@@ -591,7 +613,11 @@ class HybridLanguageModel(nnx.Module):
                 decoder_segment_ids=decoder_segment_ids,
                 decoder_positions=decoder_positions,
                 record_max_logits=record_max_logits,
+                modality_mask=modality_mask,
             )
+        if self.residual_probe is not None:
+            probe = _embedding_probe(hidden_states, modality_mask, decoder_segment_ids)
+            self.residual_probe.value = jax.lax.stop_gradient(probe[:2])
         hidden_states = nn.with_logical_constraint(
             self.final_norm(hidden_states),
             ACTIVATION_LOGICAL_AXES,
@@ -647,12 +673,31 @@ def count_parameters(model: nnx.Module) -> int:
     return sum(int(value.size) for value in jax.tree.leaves(nnx.state(model, nnx.Param)))
 
 
+def _gqa_mixer(model: HybridLanguageModel):
+    """The scanned cycle's GQA mixer (the last GQA slot of the cycle)."""
+    cycle = model.config.model.cycle
+    index = max(i for i, kind in enumerate(cycle) if kind == "gqa")
+    return getattr(model.cycles, f"layer_{index}").mixer
+
+
 def attention_logit_intermediates(model: HybridLanguageModel):
     """Returns `[cycles,batch,query_heads]` maxima after a MuonClip forward."""
-    return model.cycles.layer_3.mixer.max_logits.value
+    return _gqa_mixer(model).max_logits.value
 
 
 def vision_probe_intermediates(model: HybridLanguageModel):
     """Returns `[visual_rms, text_rms, visual_max_abs]` from the last vision
     forward (zeros before the first image batch)."""
     return model.vision_probe.value
+
+
+def residual_probe_intermediates(model: HybridLanguageModel):
+    """Returns `[visual_rms, text_rms]` of the pre-final-norm residual from
+    the last forward (vision-enabled models only)."""
+    return model.residual_probe.value
+
+
+def attention_modality_logit_intermediates(model: HybridLanguageModel):
+    """[cycles, 2, heads] max attention logits split [visual, text] by query
+    position (ABSENT_LOGIT where a modality has no positions)."""
+    return _gqa_mixer(model).max_logits_by_modality.value

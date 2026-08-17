@@ -364,8 +364,10 @@ def _bare_packer(spec, next_row, next_text_row):
         "images_packed",
         "loss_tokens_vision",
         "loss_tokens_text",
+        "vision_row_tokens_total",
     ):
         setattr(packer, counter, 0)
+    packer._fetchers = {}
     packer._next_row = next_row
     packer._next_text_row = next_text_row
     return packer

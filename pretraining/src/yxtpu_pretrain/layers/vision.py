@@ -226,18 +226,23 @@ class VisionTower(nnx.Module):
         return tokens.reshape(rows, (grid // s) ** 2, s * s * dim)
 
     def __call__(self, images):
-        """[batch, images, H, W, 3] -> [batch, images * tokens, emb].
+        """[batch, images, H, W, 3] or pre-patchified [batch, images,
+        patches, patch^2*3] -> [batch, images * tokens, emb].
 
         Integer input is raw uint8 pixels (the pipeline's transfer format:
         4x less host->device traffic than fp32) and is normalized to
         [-1, 1] here on device - the same a/255*2-1 mapping the pipeline
         used to apply on the host, up to fp rounding that vanishes in the
-        bf16 cast. Float input is assumed already normalized."""
+        bf16 cast. Float input is assumed already normalized. Rank-4 input
+        is the host-patchified layout (vision.host_patchify): row-major
+        patches exactly as ``_patchify`` would produce them, so the patch
+        embedding is identical either way."""
         if jnp.issubdtype(images.dtype, jnp.integer):
             images = images.astype(jnp.float32) / 127.5 - 1.0
         batch, per_row = images.shape[0], images.shape[1]
         flat = images.reshape(batch * per_row, *images.shape[2:])
-        tokens = self.patch_embed(self._patchify(flat).astype(self.dtype))
+        patches = flat if flat.ndim == 3 else self._patchify(flat)
+        tokens = self.patch_embed(patches.astype(self.dtype))
         tokens = tokens + self.position_embedding.get_value().astype(tokens.dtype)
         for index in range(self.num_blocks):
             tokens = getattr(self, f"block_{index}")(tokens)

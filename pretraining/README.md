@@ -175,7 +175,28 @@ steps, so no host-side tree walk or W&B call enters the hot path. The
 per-step record additionally reports `data_wait_ms`, `host_to_device_ms`, and
 `wall_tokens_per_second`, and W&B carries a `data/*` namespace with the
 prefetch queue depth and streaming-packer counters; a queue depth pinned at
-zero means the run is input-bound rather than compute-bound.
+zero means the run is input-bound rather than compute-bound. Every
+`experiment.host_stats_interval` steps a `hosts/*` group all-gathers the
+same numbers from every process (fleet-minimum queue depth, maximum data
+wait and the responsible host index), because on a synchronous slice any
+host's stall stalls every chip. `host_to_device_ms` is the enqueue time of
+the asynchronous numpy -> device transfer (`_device_batch`), normally ~1 ms;
+the transfer itself overlaps the step in flight.
+
+For the packed vision+text pipeline (`model.vision.*`): each stream is
+drawn by its own fetch thread into a per-source prepared-row buffer
+(`row_buffer`), `producer_processes` runs N whole packers per host in
+spawned processes (no GIL coupling with the loop; image decode across
+cores), `max_images_per_row` admits multi-image rows, `host_patchify` ships
+pixels lane-dense, and `yx-pretrain calibrate-mix --targets ...` solves the
+source weights and `p_text` for target loss-token shares from a measured
+run of the packer. `data.eval_packings: [concat, rows]` scores the held-out
+text both in the historical concatenated-window format and under the
+training packer's per-document contract (`data.eval_row_tokens` truncates
+like `vision.text_row_tokens`); `experiment.diagnostics.batch: train_fixed`
+runs the diagnostics pass on a cached training batch, and the attention
+telemetry splits the per-cycle logit maxima by query modality
+(`attention/cycle_*_max_logit_{visual,text}`).
 
 ## Scaling past one host (v6e-16/32/64)
 

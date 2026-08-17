@@ -29,16 +29,28 @@ masking still confines every label to its own row.
 
 Loss falls only on real text predicted from within its own row: row
 boundaries, placeholder labels, and padding are masked. Images ride in a
-fixed ``[max_images, H, W, 3]`` slot per sequence, blank-padded; a
-sequence of pure text simply never gathers the tower's output.
-``vision_mask`` marks (on label positions, like ``loss_mask``) the
-tokens belonging to image-carrying rows, so the loss can be split by
+fixed ``[max_images, H, W, 3]`` slot per sequence (or
+``[max_images, grid^2, patch^2*3]`` when ``host_patchify`` is set),
+blank-padded; a sequence of pure text simply never gathers the tower's
+output. ``vision_mask`` marks (on label positions, like ``loss_mask``)
+the tokens belonging to image-carrying rows, so the loss can be split by
 modality on device.
+
+Producer topology (2026-08): each stream (the vision corpus and every
+text source) is drawn by its own fetch thread that prepares rows
+(filter, decode, resize, tokenize) into a bounded per-source buffer; the
+packer thread only pops. Any number of such packers run as producer
+PROCESSES per host (``ProcessPooledMixedIterator``), shipping whole
+process batches to the trainer - no GIL coupling with the training loop
+and image decode across the host's cores.
 """
 
 from __future__ import annotations
 
+import queue as queue_module
+import threading
 import time
+import traceback
 from dataclasses import dataclass
 
 import numpy as np
@@ -53,6 +65,43 @@ class VisionBatchSpec:
     pad_id: int
     eos_id: int
     max_images: int = 4
+    # Host-side patchify: images leave the packer as [grid^2, patch^2 * 3]
+    # uint8 patch rows (lane-dense on TPU) instead of [H, W, 3].
+    patch_size: int = 16
+    host_patchify: bool = False
+
+    @property
+    def patch_grid(self) -> int:
+        return self.image_size // self.patch_size
+
+    @property
+    def image_shape(self) -> tuple[int, ...]:
+        if self.host_patchify:
+            return (self.patch_grid**2, self.patch_size * self.patch_size * 3)
+        return (self.image_size, self.image_size, 3)
+
+
+def patchify_pixels(image: np.ndarray, patch_size: int) -> np.ndarray:
+    """[H, W, 3] -> [(H/p)*(W/p), p*p*3], row-major patches, any dtype.
+
+    Exactly the tower's ``_patchify`` (reshape/transpose/reshape), so the
+    on-device patch embedding sees identical rows either way."""
+    height, width, channels = image.shape
+    grid_h, grid_w = height // patch_size, width // patch_size
+    patches = image.reshape(grid_h, patch_size, grid_w, patch_size, channels)
+    patches = patches.transpose(0, 2, 1, 3, 4)
+    return np.ascontiguousarray(
+        patches.reshape(grid_h * grid_w, patch_size * patch_size * channels)
+    )
+
+
+def _row_images(image) -> list:
+    """Normalizes a row's image field to a list (None -> [], array -> [array])."""
+    if image is None:
+        return []
+    if isinstance(image, (list, tuple)):
+        return list(image)
+    return [image]
 
 
 def process_image(image, image_size: int) -> np.ndarray:
@@ -78,21 +127,28 @@ def render_texts(turns) -> str:
     return "".join(parts)
 
 
-def pack_rows(rows, spec: VisionBatchSpec):
+def pack_rows(rows, spec: VisionBatchSpec, *, with_images: bool = True):
     """Packs complete rows into one example with per-row segments.
 
-    ``rows`` is a list of ``(token_list, image_or_None)`` whose total
-    token count must not exceed ``sequence_length + 1`` and whose image
-    count must not exceed ``max_images``."""
+    ``rows`` is a list of ``(token_list, images)`` where ``images`` is
+    None, one array, or a list of arrays (multi-image rows: the k-th
+    placeholder run of a row takes the row's k-th image, in order). The
+    total token count must not exceed ``sequence_length + 1`` and the
+    image count must not exceed ``max_images``. ``with_images=False``
+    builds the text-only contract (no ``images``/``vision_mask`` keys) the
+    "rows" holdout packing uses."""
     flat, segments, positions, images = [], [], [], []
     has_image = np.zeros(len(rows) + 1, dtype=bool)
     for index, (tokens, image) in enumerate(rows, start=1):
         flat.extend(tokens)
         segments.extend([index] * len(tokens))
         positions.extend(range(len(tokens)))
-        if image is not None:
-            images.append(image)
+        row_images = _row_images(image)
+        if row_images:
+            images.extend(row_images)
             has_image[index] = True
+    if len(images) > spec.max_images:
+        raise ValueError("packed rows exceed the image budget")
     capacity = spec.sequence_length + 1
     if len(flat) > capacity:
         raise ValueError("packed rows exceed the sequence budget")
@@ -111,25 +167,46 @@ def pack_rows(rows, spec: VisionBatchSpec):
         & (segment_label > 0)
         & (labels != spec.placeholder_id)
     ).astype(np.float32)
-    vision_mask = has_image[segment_label].astype(np.float32)
-
-    # The block dtype follows the rows' images (uint8 in the production
-    # pipeline; float in unit tests exercising the tower's float path).
-    block_dtype = images[0].dtype if images else np.uint8
-    image_block = np.zeros(
-        (spec.max_images, spec.image_size, spec.image_size, 3), dtype=block_dtype
-    )
-    for slot, image in enumerate(images):
-        image_block[slot] = image
-    return {
+    example = {
         "input_ids": input_ids,
         "labels": labels,
         "loss_mask": mask,
         "segment_ids": segment_in,
         "positions": positions[:-1],
-        "images": image_block,
-        "vision_mask": vision_mask,
     }
+    if not with_images:
+        return example
+    vision_mask = has_image[segment_label].astype(np.float32)
+
+    # The block dtype follows the rows' images (uint8 in the production
+    # pipeline; float in unit tests exercising the tower's float path).
+    block_dtype = images[0].dtype if images else np.uint8
+    image_block = np.zeros((spec.max_images, *spec.image_shape), dtype=block_dtype)
+    for slot, image in enumerate(images):
+        if spec.host_patchify and image.ndim == 3:
+            image = patchify_pixels(image, spec.patch_size)
+        image_block[slot] = image
+    example["images"] = image_block
+    example["vision_mask"] = vision_mask
+    return example
+
+
+def pack_text_rows(token_rows, sequence_length: int, pad_id: int):
+    """Text-only rows -> the training packer's per-row-segment example.
+
+    Used by the "rows" holdout packing so held-out documents are scored
+    under exactly the contract the mixed training batches use (segment
+    isolation, restarting positions, masked row boundaries)."""
+    spec = VisionBatchSpec(
+        sequence_length=sequence_length,
+        visual_tokens=0,
+        image_size=0,
+        placeholder_id=-1,
+        pad_id=pad_id,
+        eos_id=pad_id,
+        max_images=0,
+    )
+    return pack_rows([(tokens, None) for tokens in token_rows], spec, with_images=False)
 
 
 _COUNTER_KEYS = (
@@ -182,6 +259,54 @@ def _derived_stats(
     return stats
 
 
+class _SourceFetcher:
+    """One stream's draw -> prepare thread with a bounded prepared-row buffer.
+
+    ``prepare(row)`` returns ``(rows, skipped)``: zero or more prepared rows
+    for the packer and the number of rows rejected on the way. Any draw
+    failure is handled by ``draw`` (reopen with backoff); an exception that
+    escapes ``prepare`` is re-raised on the packer thread at the next
+    ``get``. Counters are owned by this object and read approximately by
+    the packer (monotonic ints)."""
+
+    _SENTINEL = object()
+
+    def __init__(self, name: str, draw, prepare, buffer: int):
+        self.name = name
+        self._draw = draw
+        self._prepare = prepare
+        self._queue: queue_module.Queue = queue_module.Queue(maxsize=max(1, buffer))
+        self.rows_prepared = 0
+        self.rows_skipped = 0
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run, name=f"fetch-{name}", daemon=True
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            while True:
+                rows, skipped = self._prepare(self._draw())
+                self.rows_skipped += skipped
+                for row in rows:
+                    self._queue.put(row)
+                    self.rows_prepared += 1
+        except BaseException as error:  # noqa: BLE001 - re-raised on the packer thread
+            self._error = error
+            self._queue.put(self._SENTINEL)
+
+    def get(self):
+        item = self._queue.get()
+        if item is self._SENTINEL:
+            raise RuntimeError(f"stream {self.name}: fetch thread died") from self._error
+        return item
+
+    @property
+    def depth(self) -> int:
+        return self._queue.qsize()
+
+
 class MixedVisionTextIterator:
     """Streams packed mixed batches from a vision and a text corpus."""
 
@@ -208,17 +333,26 @@ class MixedVisionTextIterator:
         shuffle_buffer: int = 256,
         shard_index: int = 0,
         shard_count: int = 1,
+        # Rows may carry 1..max_images_per_row images (bounded by
+        # spec.max_images); rows outside that range are skipped.
+        max_images_per_row: int = 1,
+        # Per-source prepared-row buffer served by a fetch thread per
+        # stream; 0 draws inline on the packer thread.
+        row_buffer: int = 512,
     ):
         from datasets import load_dataset
 
         if p_text > 0.0 and not text_sources:
             raise ValueError("p_text > 0 requires at least one text source")
+        if not 1 <= max_images_per_row <= max(1, spec.max_images):
+            raise ValueError("max_images_per_row must lie in [1, spec.max_images]")
         self.tokenizer = tokenizer
         self.spec = spec
         self.batch_size = batch_size
         self.p_text = p_text
         self.text_row_tokens = text_row_tokens
         self.min_visual_dependency = min_visual_dependency
+        self.max_images_per_row = max_images_per_row
         self._rng = np.random.default_rng(shuffle_seed * 1009 + shard_index)
 
         def open_stream(name, seed, subset=None):
@@ -250,6 +384,7 @@ class MixedVisionTextIterator:
             "open": lambda: open_stream(vision_dataset, shuffle_seed),
         }
         self._vision["stream"] = self._vision["open"]()
+        self._vision_ready: list = []
         self._text_sources = []
         for offset, source in enumerate(text_sources):
             entry = dict(source)
@@ -271,7 +406,10 @@ class MixedVisionTextIterator:
             )
             entry["stream"] = entry["open"]()
             entry["queue"] = []
+            entry["ready"] = []
             entry["loss_tokens"] = 0
+            entry["rows"] = 0
+            entry["row_tokens_total"] = 0
             self._text_sources.append(entry)
         self._weight_total = sum(entry["weight"] for entry in self._text_sources)
         self._pending = None
@@ -287,6 +425,22 @@ class MixedVisionTextIterator:
         self.images_packed = 0
         self.loss_tokens_vision = 0
         self.loss_tokens_text = 0
+        self.vision_row_tokens_total = 0
+        self._fetchers: dict[str, _SourceFetcher] = {}
+        if row_buffer > 0:
+            self._fetchers["vision"] = _SourceFetcher(
+                "vision",
+                lambda: self._draw(self._vision),
+                self._prepare_vision_rows,
+                row_buffer,
+            )
+            for entry in self._text_sources:
+                self._fetchers[entry["name"]] = _SourceFetcher(
+                    entry["name"],
+                    lambda entry=entry: self._draw(entry),
+                    lambda row, entry=entry: self._prepare_text_rows(entry, row),
+                    row_buffer,
+                )
 
     def _draw(self, holder):
         """One row from a stream, reopening it on ANY failure.
@@ -325,45 +479,105 @@ class MixedVisionTextIterator:
                         flush=True,
                     )
 
-    def _next_vision_row(self):
+    # ----- row preparation (fetch threads, or inline when row_buffer == 0)
+
+    def _prepare_vision_rows(self, row):
+        """FineVision row -> ([(tokens, [images], "vision")], skipped)."""
         spec = self.spec
-        text_cap = spec.sequence_length - spec.visual_tokens - 1
-        while True:
-            row = self._draw(self._vision)
-            images = row.get("images") or []
-            turns = row.get("texts") or []
-            if len(images) != 1 or not turns:
-                self.rows_skipped += 1
+        images = row.get("images") or []
+        turns = row.get("texts") or []
+        if not 1 <= len(images) <= self.max_images_per_row or not turns:
+            return [], 1
+        rating = row.get("visual_dependency_min")
+        if (
+            self.min_visual_dependency
+            and rating is not None
+            and rating < self.min_visual_dependency
+        ):
+            return [], 1
+        text = render_texts(turns)
+        if not text:
+            return [], 1
+        ids = self.tokenizer.encode(text, add_special_tokens=False)
+        ids = [i for i in ids if i != spec.placeholder_id]
+        if not ids:
+            return [], 1
+        text_cap = spec.sequence_length - len(images) * spec.visual_tokens - 1
+        if text_cap < 1:
+            return [], 1
+        try:
+            pixels = [process_image(image, spec.image_size) for image in images]
+        except Exception:
+            return [], 1
+        tokens = (
+            [spec.placeholder_id] * (spec.visual_tokens * len(images))
+            + ids[:text_cap]
+            + [spec.eos_id]
+        )
+        return [(tokens, pixels, "vision")], 0
+
+    def _row_texts(self, source, row) -> list[str]:
+        """The documents one source row yields (plain: 0/1; repo: per file).
+
+        ``repo`` (Stack-v3-style rows: one repository per row with a
+        ``files[]`` array) emits each usable file's ``content`` as its own
+        document - content ONLY, no paths or metadata in the token stream;
+        the packer's per-row segments are the file boundaries. Vendor files
+        are skipped, files are capped per repository, and content is
+        char-sliced at collection time so giant repositories cannot stall
+        the producer."""
+        if source["format"] == "plain":
+            text = (row.get(source["field"]) or "").strip()
+            return [text] if text else []
+        contents = []
+        for file in row.get("files") or []:
+            if file.get("is_vendor"):
                 continue
-            rating = row.get("visual_dependency_min")
-            if (
-                self.min_visual_dependency
-                and rating is not None
-                and rating < self.min_visual_dependency
-            ):
-                self.rows_skipped += 1
+            content = file.get("content") or ""
+            if len(content) < 32:
                 continue
-            text = render_texts(turns)
-            if not text:
-                self.rows_skipped += 1
-                continue
-            ids = self.tokenizer.encode(text, add_special_tokens=False)
-            ids = [i for i in ids if i != spec.placeholder_id]
-            if not ids:
-                self.rows_skipped += 1
-                continue
-            try:
-                image = process_image(images[0], spec.image_size)
-            except Exception:
-                self.rows_skipped += 1
-                continue
-            tokens = (
-                [spec.placeholder_id] * spec.visual_tokens
-                + ids[:text_cap]
-                + [spec.eos_id]
-            )
-            self.vision_rows += 1
-            return tokens, image, "vision"
+            contents.append(content[: source["char_cap"]])
+            if len(contents) >= 64:
+                break
+        return contents
+
+    def _tokenize_text_row(self, source, text):
+        spec = self.spec
+        ids = self.tokenizer.encode(text[: source["char_cap"]], add_special_tokens=False)
+        ids = [i for i in ids if i != spec.placeholder_id]
+        if len(ids) < 8:
+            return None
+        return ids[: source["row_tokens"]] + [spec.eos_id], None, source["name"]
+
+    def _prepare_text_rows(self, source, row):
+        """Text source row -> ([(tokens, None, name), ...], skipped)."""
+        texts = self._row_texts(source, row)
+        if not texts:
+            return [], 1
+        rows = []
+        skipped = 0
+        for text in texts:
+            prepared = self._tokenize_text_row(source, text)
+            if prepared is None:
+                skipped += 1
+            else:
+                rows.append(prepared)
+        return rows, skipped
+
+    # ----- row supply to the packer
+
+    def _next_vision_row(self):
+        fetcher = self._fetchers.get("vision")
+        if fetcher is not None:
+            row = fetcher.get()
+        else:
+            while not self._vision_ready:
+                rows, skipped = self._prepare_vision_rows(self._draw(self._vision))
+                self.rows_skipped += skipped
+                self._vision_ready.extend(rows)
+            row = self._vision_ready.pop(0)
+        self.vision_rows += 1
+        return row
 
     def _pick_source(self):
         threshold = self._rng.random() * self._weight_total
@@ -375,59 +589,40 @@ class MixedVisionTextIterator:
         return self._text_sources[-1]
 
     def _next_source_text(self, source) -> str:
-        """One document's text from a source stream.
-
-        ``plain`` reads the text field. ``repo`` (Stack-v3-style rows: one
-        repository per row with a ``files[]`` array) emits each usable
-        file's ``content`` as its own document - content ONLY, no paths or
-        metadata in the token stream; the packer's per-row segments are
-        the file boundaries. Vendor files are skipped, files are capped
-        per repository, and content is char-sliced at collection time so
-        giant repositories cannot stall the producer."""
-        if source["format"] == "plain":
-            while True:
-                row = self._draw(source)
-                text = (row.get(source["field"]) or "").strip()
-                if text:
-                    return text
-                self.rows_skipped += 1
+        """One document's text from a source stream (inline path)."""
         while True:
             if source["queue"]:
                 return source["queue"].pop()
-            row = self._draw(source)
-            contents = []
-            for file in row.get("files") or []:
-                if file.get("is_vendor"):
-                    continue
-                content = file.get("content") or ""
-                if len(content) < 32:
-                    continue
-                contents.append(content[: source["char_cap"]])
-                if len(contents) >= 64:
-                    break
-            if not contents:
+            texts = self._row_texts(source, self._draw(source))
+            if not texts:
                 self.rows_skipped += 1
                 continue
-            contents.reverse()  # pop() then consumes in original file order
-            source["queue"] = contents
+            texts.reverse()  # pop() then consumes in original file order
+            source["queue"] = texts
 
     def _next_text_row(self):
-        spec = self.spec
         source = self._pick_source()
-        while True:
-            text = self._next_source_text(source)[: source["char_cap"]]
-            ids = self.tokenizer.encode(text, add_special_tokens=False)
-            ids = [i for i in ids if i != spec.placeholder_id]
-            if len(ids) < 8:
+        fetcher = self._fetchers.get(source["name"])
+        if fetcher is not None:
+            row = fetcher.get()
+        else:
+            while True:
+                prepared = self._tokenize_text_row(source, self._next_source_text(source))
+                if prepared is not None:
+                    row = prepared
+                    break
                 self.rows_skipped += 1
-                continue
-            self.text_rows += 1
-            return ids[: source["row_tokens"]] + [spec.eos_id], None, source["name"]
+        self.text_rows += 1
+        return row
 
     def _next_row(self):
         if self._text_sources and self._rng.random() < self.p_text:
             return self._next_text_row()
         return self._next_vision_row()
+
+    @staticmethod
+    def _image_count(image) -> int:
+        return len(_row_images(image))
 
     def _next_example(self):
         spec = self.spec
@@ -441,7 +636,7 @@ class MixedVisionTextIterator:
             else:
                 row = self._next_row()
             tokens, image, _ = row
-            needs_image = 1 if image is not None else 0
+            needs_image = self._image_count(image)
             if used + len(tokens) > capacity or image_count + needs_image > spec.max_images:
                 self._pending = row
                 break
@@ -475,8 +670,10 @@ class MixedVisionTextIterator:
         # tokens contributes exactly L-1 in-segment labels (the boundary
         # label is masked), so consume-time counting is exact.
         for tokens, image, source_name in rows:
-            if image is None:
+            if self._image_count(image) == 0:
                 self._source_loss_counter(source_name, len(tokens) - 1)
+            else:
+                self.vision_row_tokens_total += len(tokens)
         example = pack_rows([(tokens, image) for tokens, image, _ in rows], spec)
         loss_mask = example["loss_mask"]
         vision_mask = example["vision_mask"]
@@ -493,13 +690,33 @@ class MixedVisionTextIterator:
         for entry in self._text_sources:
             if entry["name"] == name:
                 entry["loss_tokens"] += count
+                entry["rows"] = entry.get("rows", 0) + 1
+                entry["row_tokens_total"] = entry.get("row_tokens_total", 0) + count + 1
                 return
 
     def raw_counters(self) -> dict[str, int]:
-        return {key: int(getattr(self, key)) for key in _COUNTER_KEYS}
+        counters = {key: int(getattr(self, key)) for key in _COUNTER_KEYS}
+        counters["rows_skipped"] += sum(
+            fetcher.rows_skipped for fetcher in self._fetchers.values()
+        )
+        return counters
 
     def raw_source_loss_tokens(self) -> dict[str, int]:
         return {entry["name"]: int(entry["loss_tokens"]) for entry in self._text_sources}
+
+    def raw_source_rows(self) -> dict[str, tuple[int, int]]:
+        """Per-source ``(rows_packed, row_tokens_total)`` - the calibration
+        record (mean row tokens = tokens / rows), including the vision rows."""
+        result = {
+            entry["name"]: (int(entry["rows"]), int(entry["row_tokens_total"]))
+            for entry in self._text_sources
+        }
+        result["vision"] = (int(self.vision_rows), int(self.vision_row_tokens_total))
+        return result
+
+    @property
+    def fetch_depths(self) -> dict[str, int]:
+        return {name: fetcher.depth for name, fetcher in self._fetchers.items()}
 
     @property
     def stats(self) -> dict[str, float]:
@@ -526,24 +743,32 @@ class MixedVisionTextIterator:
         }
 
 
+def _sum_counters(sources_counters, sources_source_loss, max_images):
+    totals = {key: 0 for key in _COUNTER_KEYS}
+    source_totals: dict[str, int] = {}
+    for counters in sources_counters:
+        for key, value in counters.items():
+            totals[key] += value
+    for source_loss in sources_source_loss:
+        for name, value in source_loss.items():
+            source_totals[name] = source_totals.get(name, 0) + value
+    return _derived_stats(totals, max_images, source_totals)
+
+
 class PooledMixedIterator:
     """N producer threads over disjoint stream shards, one example queue.
 
-    A single producer thread decodes images, tokenizes, and packs at
-    roughly one 4k sequence per 25 ms - slower than a heavy training
-    step consumes them across a local batch. The pool splits the shard
-    N ways (each thread owns its own HF streams; they are not
-    thread-safe) and the consumer assembles batches in arrival order,
-    so batch composition is nondeterministic across runs but each row
-    is still seen exactly once per epoch per shard."""
+    Each thread owns its own HF streams (they are not thread-safe) and its
+    own per-source fetch threads; the consumer assembles batches in
+    arrival order, so batch composition is nondeterministic across runs
+    but each row is still seen exactly once per epoch per shard."""
 
     def __init__(self, factory, *, threads: int, batch_size: int):
-        import queue
-        import threading
-
         self.batch_size = batch_size
         self._sources = [factory(thread) for thread in range(threads)]
-        self._queue: queue.Queue = queue.Queue(maxsize=max(2 * batch_size, 8))
+        self._queue: queue_module.Queue = queue_module.Queue(
+            maxsize=max(2 * batch_size, 8)
+        )
         self._threads = []
         for source in self._sources:
             worker = threading.Thread(
@@ -563,21 +788,18 @@ class PooledMixedIterator:
     def rows_stats(self):
         return (
             sum(source.rows_consumed for source in self._sources),
-            sum(source.rows_skipped for source in self._sources),
+            sum(source.raw_counters()["rows_skipped"] for source in self._sources),
             sum(source.vision_rows for source in self._sources),
             sum(source.text_rows for source in self._sources),
         )
 
     @property
     def stats(self) -> dict[str, float]:
-        totals = {key: 0 for key in _COUNTER_KEYS}
-        source_totals: dict[str, int] = {}
-        for source in self._sources:
-            for key, value in source.raw_counters().items():
-                totals[key] += value
-            for name, value in source.raw_source_loss_tokens().items():
-                source_totals[name] = source_totals.get(name, 0) + value
-        return _derived_stats(totals, self._sources[0].spec.max_images, source_totals)
+        return _sum_counters(
+            [source.raw_counters() for source in self._sources],
+            [source.raw_source_loss_tokens() for source in self._sources],
+            self._sources[0].spec.max_images,
+        )
 
     def get_state(self):
         raise RuntimeError("mixed vision+text stream position is not resumable")
@@ -591,3 +813,159 @@ class PooledMixedIterator:
             key: np.stack([example[key] for example in examples])
             for key in examples[0]
         }
+
+
+@dataclass
+class ProducerSpec:
+    """Picklable description of one MixedVisionTextIterator (a producer
+    process rebuilds tokenizer and streams from it; no live objects cross
+    the process boundary)."""
+
+    tokenizer_name: str
+    padded_vocab_size: int
+    spec: VisionBatchSpec
+    batch_size: int
+    vision_dataset: str
+    text_sources: list
+    p_text: float
+    text_row_tokens: int
+    min_visual_dependency: int
+    shuffle_seed: int
+    max_images_per_row: int
+    row_buffer: int
+
+
+def build_mixed_iterator(spec: ProducerSpec, *, shard_index: int, shard_count: int):
+    from yxtpu_pretrain.runtime.data import load_fast_tokenizer
+
+    tokenizer = load_fast_tokenizer(
+        spec.tokenizer_name, padded_vocab_size=spec.padded_vocab_size
+    )
+    return MixedVisionTextIterator(
+        tokenizer=tokenizer,
+        spec=spec.spec,
+        batch_size=spec.batch_size,
+        vision_dataset=spec.vision_dataset,
+        text_sources=spec.text_sources,
+        p_text=spec.p_text,
+        text_row_tokens=spec.text_row_tokens,
+        min_visual_dependency=spec.min_visual_dependency,
+        shuffle_seed=spec.shuffle_seed,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        max_images_per_row=spec.max_images_per_row,
+        row_buffer=spec.row_buffer,
+    )
+
+
+def _producer_main(worker: int, spec: ProducerSpec, shard_index: int, shard_count: int, out):
+    """Entry point of one producer process: batches + counters to ``out``."""
+    import os
+
+    # The children never touch the accelerator: keep any accidental JAX
+    # import on CPU and the Rust tokenizer single-threaded per process.
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    try:
+        iterator = build_mixed_iterator(spec, shard_index=shard_index, shard_count=shard_count)
+        while True:
+            batch = next(iterator)
+            out.put(
+                {
+                    "worker": worker,
+                    "batch": batch,
+                    "counters": iterator.raw_counters(),
+                    "source_loss": iterator.raw_source_loss_tokens(),
+                    "source_rows": iterator.raw_source_rows(),
+                    "fetch_depths": iterator.fetch_depths,
+                }
+            )
+    except BaseException:  # noqa: BLE001 - reported to the trainer, which raises
+        out.put({"worker": worker, "error": traceback.format_exc()})
+        raise
+
+
+class ProcessPooledMixedIterator:
+    """N producer PROCESSES over disjoint stream shards, one batch queue.
+
+    Spawn context (the trainer has libtpu initialized; forking it is
+    unsafe). Each child builds its own MixedVisionTextIterator from a
+    ProducerSpec, packs whole process batches and ships them - with its
+    counters - through one multiprocessing queue; the trainer's prefetch
+    thread unpickles (~40 MB, tens of ms per batch) off the main thread.
+    Stats are the sum of each child's latest counters."""
+
+    def __init__(
+        self,
+        spec: ProducerSpec,
+        *,
+        workers: int,
+        shard_base: int,
+        shard_count: int,
+        max_pending_batches: int | None = None,
+    ):
+        import multiprocessing
+
+        if workers < 1:
+            raise ValueError("producer_processes must be positive")
+        self.batch_size = spec.batch_size
+        self._max_images = spec.spec.max_images
+        context = multiprocessing.get_context("spawn")
+        self._queue = context.Queue(maxsize=max_pending_batches or 2 * workers)
+        self._latest: dict[int, dict] = {}
+        self._processes = []
+        for worker in range(workers):
+            process = context.Process(
+                target=_producer_main,
+                args=(worker, spec, shard_base + worker, shard_count, self._queue),
+                name=f"vision-producer-{worker}",
+                daemon=True,
+            )
+            process.start()
+            self._processes.append(process)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        payload = self._queue.get()
+        if "error" in payload:
+            raise RuntimeError(
+                f"producer process {payload['worker']} failed:\n{payload['error']}"
+            )
+        self._latest[payload["worker"]] = payload
+        return payload["batch"]
+
+    @property
+    def stats(self) -> dict[str, float]:
+        if not self._latest:
+            return {}
+        payloads = list(self._latest.values())
+        stats = _sum_counters(
+            [payload["counters"] for payload in payloads],
+            [payload["source_loss"] for payload in payloads],
+            self._max_images,
+        )
+        depths = [payload.get("fetch_depths", {}) for payload in payloads]
+        for name in sorted({name for depth in depths for name in depth}):
+            stats[f"fetch_depth_min_{name}"] = float(
+                min(depth.get(name, 0) for depth in depths)
+            )
+        return stats
+
+    def raw_source_rows(self) -> dict[str, tuple[int, int]]:
+        totals: dict[str, list[int]] = {}
+        for payload in self._latest.values():
+            for name, (rows, tokens) in payload.get("source_rows", {}).items():
+                entry = totals.setdefault(name, [0, 0])
+                entry[0] += rows
+                entry[1] += tokens
+        return {name: (rows, tokens) for name, (rows, tokens) in totals.items()}
+
+    def get_state(self):
+        raise RuntimeError("mixed vision+text stream position is not resumable")
+
+    def close(self) -> None:
+        for process in self._processes:
+            if process.is_alive():
+                process.terminate()
