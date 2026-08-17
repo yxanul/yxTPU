@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import time
 
 import jax
@@ -80,6 +81,33 @@ def reference(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state):
   return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
 
 
+def reference_conv_cotangents(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state, cotangents):
+  """Debug reference for YXTPU_KDA_FOLD_DEBUG_G: the cotangents of the conv
+  OUTPUT (SiLU' folded) that stage B should emit, via autodiff through an
+  explicit conv intermediate."""
+  batch, sequence_length, heads, dim = raw_q.shape
+  width = conv_weight.shape[0]
+  qkv = jnp.stack((raw_q, raw_k, raw_v), axis=3).reshape(batch, sequence_length, -1)
+  kernel = conv_weight.reshape(width, 1, heads * 3 * dim).astype(jnp.bfloat16)
+  padded = jnp.pad(qkv, ((0, 0), (width - 1, 0), (0, 0)))
+  conv = lax.conv_general_dilated(
+      padded, kernel, window_strides=(1,), padding="VALID",
+      dimension_numbers=("NWC", "WIO", "NWC"), feature_group_count=heads * 3 * dim,
+      preferred_element_type=jnp.bfloat16,
+  )
+
+  def from_conv(conv):
+    act = jax.nn.silu(conv.astype(jnp.float32)).astype(jnp.bfloat16)
+    act = act.reshape(batch, sequence_length, heads, 3, dim)
+    q, k, v = (act[..., i, :] for i in range(3))
+    return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
+
+  _, vjp = jax.vjp(from_conv, conv)
+  (g,) = vjp(cotangents)
+  g = g.reshape(batch, sequence_length, heads, 3, dim)
+  return tuple(g[..., i, :] for i in range(3))
+
+
 def candidate(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state):
   return pallas_kda_fused_v4_conv(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state)
 
@@ -120,6 +148,10 @@ def main() -> int:
     )
     (ref_out, ref_state), ref_grads = ref_fn(primals, cotangents)
     (cand_out, cand_state), cand_grads = cand_fn(primals, cotangents)
+    if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G"):
+      g_ref = jax.jit(reference_conv_cotangents)(*primals, cotangents)
+      ref_grads = (*g_ref, jnp.zeros_like(primals[3]), *ref_grads[4:])
+      print("  (debug: comparing stage B conv-output cotangents against autodiff)")
     values = [(ref_out, cand_out), (ref_state, cand_state)] + list(zip(ref_grads, cand_grads))
     print(f"seed {seed}:")
     for name, (r, c) in zip(names, values):

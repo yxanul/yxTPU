@@ -3080,6 +3080,17 @@ def _pallas_kda_fused_v4_backward_split(
         state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
     )
 
+  if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G"):
+    # Debug: return stage B's conv-output cotangents in place of the raw ones.
+    return (
+        unstream(query_cotangent_t, key_dim),
+        unstream(key_cotangent_t, key_dim),
+        unstream(value_cotangent_t, value_dim),
+        jnp.zeros_like(conv_weight),
+        unstream(log_decay_cotangent_t, key_dim),
+        unstream(beta_cotangent_t, 1)[..., 0],
+        state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
+    )
   # Conv + SiLU VJP: stage B emitted the cotangents of the conv OUTPUT;
   # turn them into raw-input cotangents and the depthwise weight gradient.
   weight_cotangent_spec = pl.BlockSpec(
