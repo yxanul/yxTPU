@@ -2251,9 +2251,9 @@ def _kda_backward_stage_b_body(
   else:
     query_cotangent = query_normalized_cotangent
 
-  query_cotangent_ref[0] = query_cotangent.astype(query_cotangent_ref.dtype)
-  key_cotangent_ref[0] = key_cotangent.astype(key_cotangent_ref.dtype)
-  value_cotangent_ref[0] = value_cotangent.astype(value_cotangent_ref.dtype)
+  query_cotangent_ref[0] = (query_cotangent * query_scale).astype(query_cotangent_ref.dtype)
+  key_cotangent_ref[0] = (key_cotangent * key_scale).astype(key_cotangent_ref.dtype)
+  value_cotangent_ref[0] = (value_cotangent * value_scale).astype(value_cotangent_ref.dtype)
   log_decay_cotangent_ref[0] = log_decay_cotangent
   beta_cotangent_ref[0, ..., 0] = beta_cotangent
 
