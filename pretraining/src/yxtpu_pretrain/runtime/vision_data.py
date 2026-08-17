@@ -867,10 +867,44 @@ def build_mixed_iterator(spec: ProducerSpec, *, shard_index: int, shard_count: i
     )
 
 
-def _producer_main(worker: int, spec: ProducerSpec, shard_index: int, shard_count: int, out):
+def _die_with_parent(parent_pid: int) -> None:
+    """Ties this producer's life to the trainer's.
+
+    ``daemon=True`` only helps on a graceful interpreter exit; a trainer
+    that dies by SIGABRT (the JAX distributed service's fatal-error path
+    on a multi-host slice) leaves the spawned producers streaming forever
+    - observed 2026-08-17: every worker kept its producers alive for an
+    hour after two crashed launches, holding memory and Hub quota. Linux
+    PR_SET_PDEATHSIG delivers SIGTERM when the parent goes; the getppid
+    watchdog covers the cases it does not (thread-based parenting)."""
+    import os
+    import signal
+    import threading
+
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, int(signal.SIGTERM))  # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001 - best effort, the watchdog remains
+        pass
+
+    def watch() -> None:
+        while True:
+            time.sleep(5.0)
+            if os.getppid() != parent_pid:
+                os._exit(0)
+
+    threading.Thread(target=watch, name="parent-watchdog", daemon=True).start()
+
+
+def _producer_main(
+    worker: int, spec: ProducerSpec, shard_index: int, shard_count: int, out, parent_pid: int
+):
     """Entry point of one producer process: batches + counters to ``out``."""
     import os
 
+    _die_with_parent(parent_pid)
     # The children never touch the accelerator: keep any accidental JAX
     # import on CPU and the Rust tokenizer single-threaded per process.
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -921,14 +955,17 @@ class ProcessPooledMixedIterator:
             raise ValueError("producer_processes must be positive")
         self.batch_size = spec.batch_size
         self._max_images = spec.spec.max_images
+        import os
+
         context = multiprocessing.get_context("spawn")
         self._queue = context.Queue(maxsize=max_pending_batches or 2 * workers)
         self._latest: dict[int, dict] = {}
         self._processes = []
+        parent_pid = os.getpid()
         for worker in range(workers):
             process = context.Process(
                 target=_producer_main,
-                args=(worker, spec, shard_base + worker, shard_count, self._queue),
+                args=(worker, spec, shard_base + worker, shard_count, self._queue, parent_pid),
                 name=f"vision-producer-{worker}",
                 daemon=True,
             )

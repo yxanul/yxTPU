@@ -131,6 +131,51 @@ State is dynamic; verify it before relying on this section.
   (460.2 ms) - K3 §2.5 reproduced, now a real 1B-A/B candidate; both +
   exact scale compensation -0.015, inside the 0.016-nat envelope,
   confirming the original -0.073 was the shape-rule artifact.
+- Data-path pass 2026-08-17 (branch feat/datapath-holdout-8k-prereqs,
+  results/v4-64-datapath-smoke-20260817/): the 30B continuation's mean
+  step (1,985 ms) sat 32% above its 1,499.7 ms floor because
+  _device_batch did jnp.asarray(value) first - the whole process batch
+  went to local device 0 and host_local_array_to_global_array re-sliced
+  it ON DEVICE behind the running step, blocking the host for the rest of
+  the step (probe on the idle slice: 1,509 ms call while busy vs 1 ms
+  call / 17 ms ready with numpy in; HBM pressure ruled out with ballast).
+  Fix: jax.make_array_from_process_local_data(sharding, np.asarray(v)).
+  The 4k smoke (same operating point, warm-started, 400 steps, cold
+  streams): p10 1,495.5 / median 1,497.1 / mean 1,533.6 ms, data_wait
+  ~0, h2d 2 ms, prefetch queue 47/47 all run, 342k total tok/s (was
+  264k mean). Producer side: per-source fetch threads + spawned producer
+  processes (vision.producer_processes) + prefetch 48. Rows holdout: the
+  historical concat holdout is OUT OF DISTRIBUTION for the mixed
+  campaigns - at the continuation's final checkpoint concat 2.789 vs rows
+  (training contract) 2.383, a 0.41-nat format gap; the Part II "anneal
+  degrades holdout" reading is that artifact. Cycle-0 attention maxima
+  ~60 on training batches are NOT visual positions (visual 60.4 / text
+  60.1 by the new modality split; heads 10/9/8 of cycle 0 on the cached
+  training batch) - text-only concat batches show 7-20, so it is the
+  training packing/content. Operational lessons: (1) opening one Hub
+  streaming dataset costs ~10-15 `api` requests (paginated tree listing:
+  FineVisionMax 14, ClimbMix 10, Nemotron 5) against the account's
+  1,000-per-5-minutes quota; 8 hosts x 4 producers x 4 sources (~1,470)
+  killed the second launch of the day at its first open - opens now
+  retry with backoff (honoring Retry-After) and are staggered; keep
+  producer_processes <= 2 on 8 hosts and do not relaunch inside the
+  window of a crashed launch. (2) A trainer killed by SIGABRT (the JAX
+  distributed fatal-error path) leaves spawned producers ORPHANED
+  (daemon=True only covers graceful exits): check `pgrep -f
+  'spawn_mai[n]'` on every worker before declaring the slice idle; the
+  producers now carry PR_SET_PDEATHSIG + a getppid watchdog. (3) The
+  TPU-VM healthagent (docker, --memory=512m, OOM-kill disabled) hit its
+  cap after 26 days up on all 8 workers at 16:00 UTC and the kernel
+  logged "Out of memory and no killable processes" ~2x/s from then on:
+  kern.log + syslog grew ~90 MB/min per host into disks already 90%
+  full (checkpoints). `sudo systemctl restart healthagent.service`
+  stops it (RSS 504 -> 38 MB); truncate /var/log/kern.log and syslog.
+  Worker 3 (the primary) went SSH-unreachable (TCP accepts, no banner)
+  during the second 8k launch and took the fleet down through the
+  coordinator heartbeats; assume any long-up worker can be in this
+  state - check `sudo grep -c 'Out of memory' /var/log/kern.log` and
+  `df -h /` first. The 8k profile compiled (peak 34.11 GB, temp 25.59
+  GB, code 527 MB - same as 4k) but no step ran in either attempt.
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array
