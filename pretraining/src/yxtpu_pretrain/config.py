@@ -31,6 +31,16 @@ class KDAConfig(StrictModel):
     safe_gate: bool = True
     gate_lower_bound: float = -5.0
     precision: Literal["guarded_fp32", "full_fp32"] = "guarded_fp32"
+    # Causal depthwise convolution on the XLA (v4 pre-fold) path. "xla" is
+    # the Flax/lax depthwise convolution; its weight-gradient lowering was
+    # measured at 66 GB/s on v4 (52 ms of a 1,662 ms 8k step, plus ~140 ms
+    # of pads/casts around it). "shifted" applies the four taps as shifted
+    # multiply-adds so autodiff yields plain reduce fusions for dW and
+    # shifted adds for dx (bitwise-equivalent forward up to summation
+    # order; measured 4.2% SLOWER at 273M on v6e in 2026-07, re-measured
+    # at 1B/8k on v4 in 2026-08). Ignored on the folded (v5e/v6e) kernel
+    # path, which owns the convolution.
+    conv_impl: Literal["xla", "shifted"] = "xla"
     # Merge in_proj_qkv, decay_down, beta_proj, and output_gate_down into one
     # [embed, 3HD + rank + heads + rank] GEMM that reads hidden_states once.
     # Initialization is distribution-identical (fan_in-only initializer, all

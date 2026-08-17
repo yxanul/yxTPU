@@ -1392,7 +1392,7 @@ class KimiDeltaAttention(nnx.Module):
       query = key = value = None
     else:
       qkv = qkv.reshape(batch, sequence_length, -1)
-      if _USE_SHIFTED_QKV_CONV:
+      if _USE_SHIFTED_QKV_CONV or getattr(self.config, "kda_conv_impl", "xla") == "shifted":
         qkv = _causal_depthwise_conv(
             qkv,
             self.conv1d.kernel.value.astype(qkv.dtype),
