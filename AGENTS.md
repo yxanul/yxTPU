@@ -174,8 +174,21 @@ State is dynamic; verify it before relying on this section.
   during the second 8k launch and took the fleet down through the
   coordinator heartbeats; assume any long-up worker can be in this
   state - check `sudo grep -c 'Out of memory' /var/log/kern.log` and
-  `df -h /` first. The 8k profile compiled (peak 34.11 GB, temp 25.59
-  GB, code 527 MB - same as 4k) but no step ran in either attempt.
+  `df -h /` first. Worker 3 stayed dark 1h40m; `tpu-vm stop` is not
+  supported on pod slices, and `gcloud compute tpus queued-resources
+  reset yxtpu-v4-64-train-qr` (18:22 UTC) turned out to REBOOT all 8
+  workers in ~4 min with disks intact (repo, venvs, checkpoints kept;
+  the tmpfs /mnt/ram lost) - a reboot, not a re-provision, when the node
+  is READY. HF PRO ($9/mo: 2,500 api / 12,000 resolvers per 5 min)
+  removed the 429s. 8k smoke (W&B cbp3ccs9, 400 steps, seq 8192 / PDB 2
+  / 8 slots / 4 images per row / row_tokens 4096): step p10 1,660.8 /
+  median 1,662.2 / mean 1,682.5 ms (+11% device time vs 4k for 2x
+  context), peak 34.11 GB (flat), loss tokens/step 441k (+5% yield),
+  net -6% loss-token throughput; rows holdout 2.377 at 4096-token rows;
+  the mix moved (vision .386 / climbmix .355 / stack .196 / math .062)
+  - recalibrate with `yx-pretrain calibrate-mix` before a campaign.
+  scripts/fleet.sh is the control-plane helper (parallel per-worker ssh,
+  keepalives, hard cap; verify idle with `procs`).
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array

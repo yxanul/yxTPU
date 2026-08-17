@@ -1,0 +1,49 @@
+run cbp3ccs9 20260817T183242Z-kda_hybrid_1b_yx49k-muonclip-vision_1b_smoke_8k finished steps 407
+steps analyzed 398 (step > 2)
+step_ms  {1: 1660.0, 5: 1660.4, 10: 1660.8, 25: 1661.4, 50: 1662.2, 75: 1663.8, 90: 1665.6, 95: 1667.9, 99: 2327.5}
+data_wait {1: 0.0, 5: 0.0, 10: 0.0, 25: 0.0, 50: 0.0, 75: 0.1, 90: 0.1, 95: 0.1, 99: 0.2}
+h2d      {1: 1.5, 5: 1.6, 10: 1.7, 25: 1.7, 50: 1.9, 75: 2.1, 90: 2.3, 95: 2.8, 99: 3.6}
+mean step_ms 1682.5  p10 1660.8  mean/p10 1.013
+tokens/s (loss tokens) mean 261269 ; total tok/s = 311618
+regime A (dw<5,h2d>100): 0.0%  regime B (dw>=5): 0.0%  slow(>1.05 floor): 3.0%
+queue depth: min 47  p10 47  median 47  frac==0 0.00
+hosts/queue_depth_min_host: last 0.0  max 0.0  min 0.0
+hosts/host_to_device_ms_max: last 3.7171990871429443  max 3.7171990871429443  min 1.8993200063705444
+hosts/hosts_waiting: last 0.0  max 0.0  min 0.0
+hosts/data_wait_ms_max_host: last 3.0  max 7.0  min 0.0
+hosts/queue_depth_min: last 47.0  max 47.0  min 47.0
+hosts/step_ms_max: last 1664.0709228515625  max 1668.8663330078125  min 1662.478271484375
+hosts/data_wait_ms_max: last 0.11226999759674072  max 0.17299999296665192  min 0.053780000656843185
+eval/train_holdout_perplexity_rows: [10.7773, 10.7576, 10.7499, 10.7408]
+eval/tokens_rows: [3863172.0, 3863172.0, 3863172.0, 3863172.0]
+eval/train_holdout_loss_rows: [2.3774, 2.3756, 2.3749, 2.3741]
+eval/tokens: [4194304.0, 4194304.0, 4194304.0, 4194304.0]
+eval/train_holdout_loss: [2.4892, 2.4939, 2.4948, 2.4937]
+eval/train_holdout_perplexity: [12.0517, 12.1078, 12.1189, 12.1064]
+diagnostics/finite: [1.0, 1.0, 1.0, 1.0]
+diagnostics/grad_norm: [0.0526, 0.0634, 0.0683, 0.0931]
+diagnostics/param_max_abs: [9.5653, 9.5655, 9.5656, 9.5657]
+diagnostics/grad_max_abs: [0.0122, 0.0199, 0.0272, 0.0518]
+diagnostics/sampled_logits_max_abs: [7.7226, 7.8328, 7.9003, 7.8501]
+diagnostics/hidden_rms: [8.5482, 8.5516, 8.5525, 8.5532]
+diagnostics/param_norm: [2421.2576, 2419.5012, 2417.7314, 2415.9658]
+diagnostics/loss: [1.1834, 1.1789, 1.1774, 1.1755]
+diagnostics/hidden_max_abs: [166.8921, 167.3804, 167.5937, 168.4587]
+data/climbmix_loss_token_share: last 0.3552
+data/image_slot_utilization: last 0.6133
+data/images_per_sequence: last 4.9062
+data/math_loss_token_share: last 0.0623
+data/pad_fraction: last 0.0452
+data/row_skip_rate: last 0.1911
+data/stack_loss_token_share: last 0.1962
+data/vision_loss_token_share: last 0.3862
+cycle 0: joint 67.1 visual 67.1 text 65.6
+cycle 1: joint 23.9 visual 21.1 text 23.9
+cycle 2: joint 27.3 visual 27.3 text 23.0
+cycle 3: joint 32.4 visual 32.4 text 28.1
+cycle 4: joint 33.0 visual 21.2 text 33.0
+cycle 5: joint 51.0 visual 16.8 text 51.0
+cycle 6: joint 27.6 visual 14.5 text 27.6
+cycle 7: joint 34.5 visual 21.8 text 34.5
+summary compiled_memory: {'temp_size_in_bytes': 25589608960, 'alias_size_in_bytes': 8511826944, 'estimated_peak_bytes': 34111426048, 'output_size_in_bytes': 8511855616, 'argument_size_in_bytes': 8521788416, 'generated_code_size_in_bytes': 526778880}
+summary mean_tps 261259.7571367529 max 271606.87553167675

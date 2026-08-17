@@ -88,3 +88,72 @@ the window of the 4k smoke's opens, died at a producer's first open
 retry-with-backoff at open (honoring Retry-After), staggered producer
 starts, and `producer_processes: 2` in the smoke profiles (~816 per
 launch including the eval iterators).
+
+## 8k smoke (`vision_1b_smoke_8k`, W&B `cbp3ccs9`, 400 steps)
+
+seq 8192 / PDB 2 (same 524,288 tokens/step), 8 image slots per sequence,
+up to 4 images per row, `text_row_tokens` 4096 for every source, rows
+holdout at 4096-token rows; 2 producer processes/host; warm-started from
+the continuation's final checkpoint at LR 1e-4. (Two earlier launches
+died before step 1 for reasons unrelated to the shape: the Hub api quota
+and the wedged worker 3 - see the operational notes.) The account was
+upgraded to HF PRO mid-run; the 429s stopped at startup and never
+recurred.
+
+| | 4k smoke | 8k smoke |
+| --- | ---: | ---: |
+| step p10 / median / p90 (ms) | 1,495.5 / 1,497.1 / 1,502.6 | 1,660.8 / 1,662.2 / 1,665.6 |
+| step mean (ms), mean/p10 | 1,533.6, 1.025 | 1,682.5, 1.013 |
+| `host_to_device_ms` / `data_wait_ms` median | 2.1 / 0.1 | 1.9 / 0.0 |
+| prefetch queue depth (min over hosts) | 47 | 47 |
+| compiled peak / temp / code | 34.12 / 25.60 GB / 505 MB | 34.11 / 25.59 GB / 527 MB |
+| loss tokens per step | ~420k | ~441k |
+| loss-token tok/s mean | 278.6k | 261.3k |
+| total tok/s | 342k | 312k |
+| pad fraction / images per seq / slot util | .063 / 2.64 / .66 | .045 / 4.91 / .61 |
+| row skip rate | .216 (1 image/row) | .191 (<= 4 images/row) |
+| loss-token shares vision/climbmix/stack/math | .363/.402/.159/.076 | .386/.355/.196/.062 (weights NOT recalibrated) |
+
+Device time +11.0% for 2x context (the GQA layers' O(T^2) term costs
+more on v4 than its ~5% FLOP share suggested; matches the earlier +9%
+device-only smoke), partly bought back by the +5% supervised-token
+yield of longer rows: net -6% loss-token throughput. Memory flat.
+The mix moved with the longer rows exactly as the config comment warns
+(stack rows are now file-length, math rows longer): run
+`yx-pretrain calibrate-mix` before any campaign at this shape.
+
+Holdout at the same checkpoint: rows (4096-token rows) 2.377 -> 2.374
+over the run; concat at 8192-token windows 2.489 -> 2.494 (a different
+window length than the 4k concat number, so only the rows numbers are
+comparable across the two smokes: 2.383 at 1024-token rows vs 2.377 at
+4096-token rows).
+
+Telemetry on the mixed 8k batch: cycle-0 maxima joint 67.1 = visual
+67.1 / text 65.6 (again both modalities); pre-norm residual RMS visual
+6.84 vs text 5.81 (the post-norm probe would report 8.5 / 8.5).
+
+## Operations record (2026-08-17)
+
+- Two crashed launches left spawned producers orphaned on every worker
+  (daemon=True does not survive SIGABRT); fixed with PR_SET_PDEATHSIG +
+  a getppid watchdog, verified: 0 leftover processes after the 8k run.
+- healthagent (docker, --memory=512m, OOM-kill disabled) crossed its cap
+  after 26 days up on all 8 workers at 16:00 UTC; the kernel logged
+  "Out of memory and no killable processes" ~2x/s into kern.log+syslog
+  (~90 MB/min per host, disks at 90%). `systemctl restart
+  healthagent.service` fixed it (RSS 504 -> 38 MB); logs truncated.
+- Worker 3 (primary/coordinator) became unreachable at ~16:40 (TCP
+  accepted, no SSH banner; from ~17:20 no ping) and stayed down 1h40m
+  while the node reported READY/HEALTHY with "maintenance event at
+  16:54:45Z". `tpu-vm stop` is not supported on pod slices;
+  `queued-resources reset` (18:22 UTC) REBOOTED all 8 workers in ~4
+  minutes with disks intact (repo, venvs, checkpoints; the tmpfs
+  /mnt/ram is lost) - it is a reboot, not a re-provision, at least when
+  the node stays READY.
+- Hub quotas: free tier 1,000 api / 5,000 resolvers per 5 min; each
+  streaming open costs 10-15 api requests; 16 producers filling shuffle
+  buffers also burst the resolvers bucket. PRO (2,500 / 12,000) removed
+  the 429s mid-run.
+- `pretraining/scripts/fleet.sh`: parallel per-worker gcloud ssh with
+  keepalives and a hard cap; status/run/launch/tail/procs/kill-orphans/
+  health.
