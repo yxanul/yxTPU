@@ -394,6 +394,68 @@ class PackedTokenBatcher(Iterator[Batch]):
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _retry_after_seconds(error: BaseException, default: float) -> float:
+    """Honors a Retry-After header / '(Retry after N seconds)' message on
+    HTTP 429 from the Hub; ``default`` otherwise."""
+    response = getattr(error, "response", None)
+    header = getattr(getattr(response, "headers", None), "get", lambda key, d=None: d)(
+        "Retry-After"
+    )
+    if header:
+        try:
+            return float(header) + 1.0
+        except (TypeError, ValueError):
+            pass
+    import re
+
+    match = re.search(r"[Rr]etry after (\d+) seconds", str(error))
+    if match:
+        return float(match.group(1)) + 1.0
+    return default
+
+
+def open_streaming_dataset(
+    name: str,
+    subset: str | None = None,
+    *,
+    split: str = "train",
+    attempts: int = 12,
+    backoff_seconds: float = 20.0,
+    max_backoff_seconds: float = 300.0,
+    label: str | None = None,
+):
+    """``load_dataset(name, subset, split=split, streaming=True)`` with
+    retry-and-backoff at OPEN time.
+
+    Opening a streaming Hub dataset costs ~10-15 ``api`` requests (the
+    paginated repo-tree listing) and the account quota is 1000 per 5
+    minutes; a slice launching dozens of producers at once, or a relaunch
+    inside the window of a previous burst, sees HTTP 429 at open (measured
+    2026-08-17: the second smoke of the day died at its first producer
+    open). Draw failures already reopen; this covers the open itself,
+    honoring the Hub's Retry-After."""
+    from datasets import load_dataset
+
+    label = label or name
+    delay = backoff_seconds
+    for attempt in range(1, attempts + 1):
+        try:
+            return load_dataset(name, subset, split=split, streaming=True)
+        except Exception as error:  # noqa: BLE001 - every open failure is retried
+            if attempt >= attempts:
+                raise
+            wait = _retry_after_seconds(error, delay)
+            wait = min(wait, max_backoff_seconds)
+            print(
+                f"stream {label}: open failed ({type(error).__name__}: "
+                f"{str(error)[:160]}), retry {attempt}/{attempts} in {wait:.0f}s",
+                flush=True,
+            )
+            time.sleep(wait)
+            delay = min(delay * 2.0, max_backoff_seconds)
+    raise RuntimeError("unreachable")
+
 # Streaming reads cross the public internet for hours, and on a multi-host
 # slice one worker's stream failure aborts every worker through the
 # coordination service. The ladder below rides out roughly ten minutes of
@@ -543,18 +605,16 @@ class StreamingHuggingFaceIterator(PackedTokenBatcher):
         packing: str = "concat",
         row_tokens: int | None = None,
     ):
-        from datasets import load_dataset
-
         if config.tokenizer is None:
             raise ValueError("streaming text data requires data.tokenizer")
         if not 0 <= process_index < process_count:
             raise ValueError(
                 f"process index {process_index} is outside [0, {process_count})"
             )
-        dataset = load_dataset(
+        dataset = open_streaming_dataset(
             config.dataset_name,
             split=config.split,
-            streaming=True,
+            label=f"{config.dataset_name}[{'validation' if validation else 'train'}]",
         )
         # Every process must shuffle with the same seed so the shard order that
         # split_dataset_by_node partitions is identical everywhere; a

@@ -340,7 +340,7 @@ class MixedVisionTextIterator:
         # stream; 0 draws inline on the packer thread.
         row_buffer: int = 512,
     ):
-        from datasets import load_dataset
+        from yxtpu_pretrain.runtime.data import open_streaming_dataset
 
         if p_text > 0.0 and not text_sources:
             raise ValueError("p_text > 0 requires at least one text source")
@@ -356,7 +356,9 @@ class MixedVisionTextIterator:
         self._rng = np.random.default_rng(shuffle_seed * 1009 + shard_index)
 
         def open_stream(name, seed, subset=None):
-            stream = load_dataset(name, subset, split=split, streaming=True)
+            stream = open_streaming_dataset(
+                name, subset, split=split, label=f"{name}[shard {shard_index}]"
+            )
             # Shard by FILES, never by row-modulo: a modulo shard still
             # downloads every row and discards shard_count-1 of every
             # shard_count - at 8 hosts x 4 producer threads that is 32x
@@ -833,6 +835,13 @@ class ProducerSpec:
     shuffle_seed: int
     max_images_per_row: int
     row_buffer: int
+    # Producer processes open their streams ``stagger_seconds * shard_index``
+    # after start. Every open costs ~10-15 Hub ``api`` requests (paginated
+    # repo-tree listing; ~41 per producer over the four sources) against an
+    # account quota of 1000 per 5 minutes: 8 hosts x 4 producers exhausted
+    # it on 2026-08-17 (the second launch of the day died at its first
+    # open). Keep producer_processes <= 2 on 8 hosts and spread the opens.
+    stagger_seconds: float = 3.0
 
 
 def build_mixed_iterator(spec: ProducerSpec, *, shard_index: int, shard_count: int):
@@ -867,6 +876,8 @@ def _producer_main(worker: int, spec: ProducerSpec, shard_index: int, shard_coun
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     try:
+        if spec.stagger_seconds > 0:
+            time.sleep(spec.stagger_seconds * shard_index)
         iterator = build_mixed_iterator(spec, shard_index=shard_index, shard_count=shard_count)
         while True:
             batch = next(iterator)

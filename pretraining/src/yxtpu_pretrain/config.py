@@ -172,7 +172,11 @@ class VisionConfig(StrictModel):
     # GIL coupling between packing and the training loop and scales image
     # decode across the host's cores. Batch composition is nondeterministic
     # across runs (like producer_threads > 1); every row is still seen once
-    # per epoch per shard.
+    # per epoch per shard. Hub budget: each producer opens one stream per
+    # source at ~10-15 ``api`` requests each (~41 for the four-source mix)
+    # against the account's 1000-per-5-minutes quota; on 8 hosts keep this
+    # at <= 2 (2026-08-17: 4 per host = ~1,470 requests per launch, and the
+    # second launch inside the window died at its first open).
     producer_processes: int = 0
     # Prepared rows buffered PER SOURCE STREAM ahead of the packer by that
     # source's fetch thread (draw -> filter -> decode/tokenize). A shard
