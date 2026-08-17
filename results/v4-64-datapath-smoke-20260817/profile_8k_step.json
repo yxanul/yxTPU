@@ -5,10 +5,6 @@
  "step_ms_assumed": 1713.0,
  "device_busy_ms": 1647.9,
  "by_component": {
-  "dense GEMMs: bwd/other": {
-   "percent_of_device_time": 19.67,
-   "ms_per_step": 324.2
-  },
   "KDA fused kernels (pallas)": {
    "percent_of_device_time": 17.29,
    "ms_per_step": 284.9
@@ -17,9 +13,17 @@
    "percent_of_device_time": 16.48,
    "ms_per_step": 271.5
   },
+  "dense GEMMs: bwd/other": {
+   "percent_of_device_time": 9.58,
+   "ms_per_step": 157.8
+  },
+  "optimizer: Muon Newton-Schulz matmuls": {
+   "percent_of_device_time": 8.95,
+   "ms_per_step": 147.5
+  },
   "GQA splash attention (pallas)": {
-   "percent_of_device_time": 8.36,
-   "ms_per_step": 137.8
+   "percent_of_device_time": 8.35,
+   "ms_per_step": 137.6
   },
   "dense GEMMs: rematted fwd recompute": {
    "percent_of_device_time": 7.92,
@@ -29,25 +33,33 @@
    "percent_of_device_time": 6.41,
    "ms_per_step": 105.6
   },
-  "KDA depthwise conv (XLA)": {
-   "percent_of_device_time": 5.97,
-   "ms_per_step": 98.4
-  },
-  "elementwise (norms, gates, softmax, adds)": {
-   "percent_of_device_time": 4.79,
-   "ms_per_step": 78.9
-  },
   "pads / reshapes / copies": {
    "percent_of_device_time": 4.23,
-   "ms_per_step": 69.7
+   "ms_per_step": 69.6
   },
-  "collectives": {
-   "percent_of_device_time": 3.66,
-   "ms_per_step": 60.2
+  "elementwise (norms, gates, softmax, adds)": {
+   "percent_of_device_time": 3.88,
+   "ms_per_step": 64.0
+  },
+  "KDA depthwise conv: weight gradient (XLA reduce, 66 GB/s)": {
+   "percent_of_device_time": 3.14,
+   "ms_per_step": 51.8
+  },
+  "collectives: gradient all-reduce (in scan)": {
+   "percent_of_device_time": 2.96,
+   "ms_per_step": 48.8
+  },
+  "KDA depthwise conv (XLA)": {
+   "percent_of_device_time": 2.83,
+   "ms_per_step": 46.7
   },
   "loss head GEMMs (chunked CE)": {
    "percent_of_device_time": 2.59,
    "ms_per_step": 42.7
+  },
+  "ViT attention einsums": {
+   "percent_of_device_time": 1.14,
+   "ms_per_step": 18.9
   },
   "einsum ...k,k->...k": {
    "percent_of_device_time": 1.07,
@@ -57,13 +69,25 @@
    "percent_of_device_time": 1.01,
    "ms_per_step": 16.6
   },
-  "other: custom fusion": {
-   "percent_of_device_time": 0.29,
-   "ms_per_step": 4.8
+  "optimizer: Muon norms / elementwise (vmapped)": {
+   "percent_of_device_time": 0.91,
+   "ms_per_step": 15.0
+  },
+  "collectives: embedding / loss-head all-reduce": {
+   "percent_of_device_time": 0.69,
+   "ms_per_step": 11.4
+  },
+  "embedding gather / scatter-add": {
+   "percent_of_device_time": 0.23,
+   "ms_per_step": 3.8
   },
   "other: broadcast": {
    "percent_of_device_time": 0.22,
    "ms_per_step": 3.6
+  },
+  "other: custom fusion": {
+   "percent_of_device_time": 0.06,
+   "ms_per_step": 1.1
   },
   "other: async-done": {
    "percent_of_device_time": 0.02,
@@ -81,10 +105,6 @@
    "percent_of_device_time": 0.01,
    "ms_per_step": 0.1
   },
-  "other: sort": {
-   "percent_of_device_time": 0.0,
-   "ms_per_step": 0.0
-  },
   "other: custom-call": {
    "percent_of_device_time": 0.0,
    "ms_per_step": 0.0
@@ -94,6 +114,10 @@
    "ms_per_step": 0.0
   },
   "other: iota": {
+   "percent_of_device_time": 0.0,
+   "ms_per_step": 0.0
+  },
+  "other: sort": {
    "percent_of_device_time": 0.0,
    "ms_per_step": 0.0
   },

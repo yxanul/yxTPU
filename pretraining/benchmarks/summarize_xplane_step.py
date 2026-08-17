@@ -48,8 +48,23 @@ def _kind(r) -> str:
   scope = r["tf_op_name"] or ""
   name = r["hlo_op_name"] or ""
   low = (scope + " " + name).lower()
+  expr = (r["hlo_op_expression"] or "")
   if "all-reduce" in cat or "all-gather" in cat or "reduce-scatter" in cat:
-    return "collectives"
+    if "while/body" in scope:
+      return "collectives: gradient all-reduce (in scan)"
+    return "collectives: embedding / loss-head all-reduce"
+  # Outside the cycle scan the only vmapped work is the optimizer over the
+  # stacked [cycles, ...] parameters: Muon Newton-Schulz matmuls and norms.
+  if "while/body" not in scope and "vmap(" in scope:
+    if "dot_general" in scope:
+      return "optimizer: Muon Newton-Schulz matmuls"
+    return "optimizer: Muon norms / elementwise (vmapped)"
+  if "scatter-add" in low or "gather" in low:
+    return "embedding gather / scatter-add"
+  if re.search(r"jvp\((bqhd|bhqk)", scope):
+    return "ViT attention einsums"
+  if "conv_general_dilated" in scope and re.search(r"= bf16\[4,1,", expr):
+    return "KDA depthwise conv: weight gradient (XLA reduce, 66 GB/s)"
   if "splash" in low or "flash_attention" in low:
     return "GQA splash attention (pallas)"
   if "kda_" in low or "pallas_kda" in low:

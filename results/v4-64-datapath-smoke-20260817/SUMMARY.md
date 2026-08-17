@@ -203,3 +203,53 @@ math + ViT over 16 image slots/device; v4 peak 275 TFLOP/s x 32):
 | **MFU (model FLOPs)** | **25.7%** | **24.2%** |
 | parameter-only 6N x tokens (the report's convention) | 24.5% | 22.1% |
 | xprof MXU utilization (Pallas FLOPs uncounted) | - | 21.8% |
+
+### Second pass: optimizer, embedding, ViT, and the conv weight gradient
+
+The first bucketing keyed on einsum specs and kernel names and hid the
+optimizer inside "dense GEMMs: bwd/other". Splitting the step into
+inside-the-cycle-scan (83.6%) vs outside (16.4%, 271 ms) exposes it:
+
+| component | % device | ms/step |
+| --- | ---: | ---: |
+| KDA fused kernels (pallas) | 17.3 | 285 |
+| dense GEMMs: fwd (checkpointed) | 16.5 | 272 |
+| dense GEMMs: bwd | 9.6 | 158 |
+| **optimizer: Muon Newton-Schulz matmuls** (vmapped over the 8 stacked cycles, fp32, HBM-bound at ~470 GB/s; replicated on all 32 chips) | **9.0** | **148** |
+| GQA splash attention | 8.4 | 138 |
+| dense GEMMs: rematted MLP fwd recompute | 7.9 | 131 |
+| casts bf16<->f32 around the KDA kernel (`[2,8192,4608]`, `[2,8192,12,3,128]`, ~460 GB/s) | 6.4 | 106 |
+| pads / reshapes (chunk pads `[2,8,1025,4608]`, `[2,8200,4608]`, qkv reshapes) | 4.2 | 70 |
+| elementwise (norms, gates, softmax, adds) | 3.9 | 64 |
+| **KDA depthwise conv: weight gradient** (`bf16[4,1,4608]` output from a B*T reduction at **66 GB/s**) | **3.1** | **52** |
+| collectives: gradient all-reduce inside the scan (37-39 GB/s, synchronous) | 3.0 | 49 |
+| KDA depthwise conv fwd + recompute + data grad (146 GB/s) | 2.8 | 47 |
+| loss head GEMMs (chunked CE) | 2.6 | 43 |
+| ViT attention einsums (scores materialized `[16,6,784,784]`) | 1.1 | 19 |
+| RMSNorm scale einsums | 1.1 | 18 |
+| optimizer: Muon norms / vmapped elementwise | 0.9 | 15 |
+| collectives: tied-embedding / loss-head all-reduce | 0.7 | 11 |
+| embedding gather / scatter-add | 0.2 | 4 |
+| other | ~1.3 | ~21 |
+| (device idle inside the step: 3.8%) | | 65 |
+
+Optimizer total ~10% (Muon NS + norms + updates), all outside the scan.
+NS: ~45 TFLOP per step of fp32 matmuls, executed on EVERY chip
+(replicated), reading/writing fp32 `[8,1536,4096]`-class tensors at
+HBM speed - it is bandwidth-bound, not MXU-bound, on v4.
+
+Levers, ranked by (ms saved / effort):
+1. Depthwise-conv weight gradient: 52 ms in a 66 GB/s XLA reduction -
+   rewrite as an einsum over the 4 shifted views (pure XLA, in
+   kimi_delta_attention.py); expect ~45 ms (-2.7%).
+2. Muon: `muon_ns_bf16` (exists, gate-validated at 337M within 0.016
+   nats, perf-neutral there because NS was 16 ms) halves NS traffic -
+   expect 50-70 ms (-3-4%); `muon_distributed_ns` (perf-REJECTED at 337M
+   because the all-gather exceeded 16 ms of NS) now trades ~140 ms of
+   replicated NS for a 1.8-3.6 GB update all-gather - expect a net
+   -50..-100 ms; both need a 1B A/B, the 337M verdicts do not transfer.
+3. KDA glue fold (conv fwd/bwd, casts, pads into the v4 kernel, bf16
+   dQKV epilogue): up to ~200 ms (-12%) - kernel project.
+4. Remat recompute (MLP 131 ms + KDA fwd 65 ms) and synchronous
+   collectives (60 ms) are memory- and compiler-bound respectively; no
+   cheap move at 99.3% HBM.
