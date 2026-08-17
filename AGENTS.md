@@ -5,8 +5,11 @@ the user's TPU Research Cloud allocation.
 
 ## TPU allocation
 
-Source: the TPU Research Cloud approval email. The offer is free for 30 days
-and applies only to newly created Cloud TPUs in the exact zones below.
+Source: the TPU Research Cloud approval email. The offer was granted for
+30 days from 2026-07-20 and then EXTENDED by TRC Support on 2026-08-17
+(reply to the extension request) "until the end of November" 2026, with
+the same resources: no additional on-demand quota was granted. It applies
+only to newly created Cloud TPUs in the exact zones below.
 
 | TPU | Provisioning | Chip quota | Zone |
 | --- | --- | ---: | --- |
@@ -17,11 +20,17 @@ and applies only to newly created Cloud TPUs in the exact zones below.
 | v4 | On-demand | 32 | `us-central2-b` |
 | v6e | Spot | 64 | `europe-west4-a` |
 
-The approval email did not provide an exact expiry timestamp. The 30-day
-window is counted from the confirmed start date below:
+Neither the approval nor the extension email gave an exact expiry
+timestamp; the extension says "until the end of November":
 
 - TRC start: 2026-07-20
-- TRC expiry: 2026-08-19 (30 days from start; exact timestamp unconfirmed)
+- Original expiry: 2026-08-19 (superseded)
+- TRC expiry: 2026-11-30 (last day of November; exact timestamp
+  unconfirmed - treat the final days as at-risk and keep checkpoints
+  exported)
+
+Consequence: the v4-64 slice must NOT be wound down or deleted on
+2026-08-19; it stays up for the extended program.
 
 ### v5e quota distinction
 
