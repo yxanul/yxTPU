@@ -102,6 +102,17 @@ def reference_conv_cotangents(raw_q, raw_k, raw_v, conv_weight, log_decay, beta,
     q, k, v = (act[..., i, :] for i in range(3))
     return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
 
+  def from_act(act):
+    act = act.reshape(batch, sequence_length, heads, 3, dim)
+    q, k, v = (act[..., i, :] for i in range(3))
+    return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
+
+  if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G") == "act":
+    act = jax.nn.silu(conv.astype(jnp.float32)).astype(jnp.bfloat16)
+    _, vjp = jax.vjp(from_act, act)
+    (g,) = vjp(cotangents)
+    g = g.reshape(batch, sequence_length, heads, 3, dim)
+    return tuple(g[..., i, :] for i in range(3))
   _, vjp = jax.vjp(from_conv, conv)
   (g,) = vjp(cotangents)
   g = g.reshape(batch, sequence_length, heads, 3, dim)

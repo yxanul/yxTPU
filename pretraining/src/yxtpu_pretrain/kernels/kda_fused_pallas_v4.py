@@ -2065,6 +2065,8 @@ def _kda_backward_stage_b_kernel_fold(
       chunk_index > 0,
       conv_width=conv_width,
   )
+  if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G") == "act":
+    query_scale = key_scale = value_scale = 1.0  # debug: emit d(act) unscaled
   _kda_backward_stage_b_body(
       query,
       key,
