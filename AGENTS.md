@@ -270,6 +270,23 @@ State is dynamic; verify it before relying on this section.
   buffer-sized backward intermediates and the DUS stops being in place.
   The lever is a fused Pallas read at the hoisted_depth_read boundary
   (~20-40 ms roofline).
+- Fused AttnRes read 2026-08-18 (branch feat/attnres-fused-read;
+  kernels/attnres_pallas.py, model.attnres_read=pallas): three VPU
+  Pallas kernels (scores / numerators / backward) over token tiles of
+  the [S, B*T, D] buffer, shard_mapped over the mesh (Mosaic kernels
+  cannot be auto-partitioned - a single-chip gate does NOT catch that;
+  always run the fleet compile). Gate at production shape: fused 3.4 /
+  7.1 / 12.0 ms vs 15.9 XLA per cycle read (block index 0/4/8), bf16
+  numerics. End-to-end at 4k: p10 1,716 vs 1,755 (XLA hoisted) vs 1,493
+  standard - the attnres overhead is now +223 ms (+15%), of which the
+  read kernels are 64 ms; the rest is XLA glue in the per-site merge
+  (bf16->fp32 converts and fp32 [B,T,D] temporaries: elementwise +130,
+  casts +50 ms) - next lever is a fused merge (reformulation or a fourth
+  kernel), then MXU for the kernel's shared-operand groups. Ops: a
+  crashed fleet launch left a survivor on w2 twice today; killing it
+  with `pgrep -f "yx-pretrain train"` matched the ssh command itself and
+  cut the session (255 retries) - ALWAYS bracket the pattern
+  (`"[y]x-pretrain train"`), as the AGENTS rule says.
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array

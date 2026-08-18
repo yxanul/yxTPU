@@ -395,3 +395,57 @@ read (9 -> avg 4.5). (3) The residual dedup (save block outputs once,
 rebuild the buffer in a custom backward scan) is a memory improvement
 (3.6 -> 0.45 GB of stacked residual) but no longer a fit prerequisite.
 (4) `mixer_only` sites as a quality A/B once the mechanism costs ~5%.
+
+### Fused Pallas read (branch feat/attnres-fused-read, 2026-08-18 evening)
+
+`kernels/attnres_pallas.py`, `model.attnres_read=pallas`: three VPU
+kernels over token tiles of the [S, B*T, D] buffer (scores; numerators
+with fp32 VMEM accumulation and one bf16 write per site; backward with
+dB accumulated in fp32 in VMEM and written bf16 once, plus per-tile dq
+partials), masked slots skipped by `pl.when`, shard_mapped over the mesh
+(Mosaic kernels cannot be auto-partitioned - the first fleet compile
+failed on exactly that). Same custom_vjp interface as the XLA hoisted
+read; interpret-mode CPU tests (forward to bf16, backward to fp32
+reordering, tiny model logits/grads identical) and an on-device gate
+(`benchmarks/verify_attnres_fused_read.py`).
+
+On-device gate, production shape [9, 2, 8192, 1536] bf16, one v4 chip,
+fwd+bwd of one cycle's read: XLA hoisted 15.9 ms at every block index;
+fused **3.4 / 7.1 / 12.0 ms** at block index 0 / 4 / 8 (the masked-slot
+skip is real; ~1.07 ms per valid slot, VPU-bound - roofline traffic
+would be ~0.15 ms/slot). Numerics: numerators 6e-4 rel (bf16),
+normalizers/maxima 1e-7, dB 2.7e-3 (bf16 output rounding), dq 1.7e-3.
+
+End-to-end (4k/PDB4, 200 steps, from scratch, deterministic stream):
+
+| arm | p10 step (ms) | attnres overhead vs standard 1,493 |
+| --- | ---: | ---: |
+| old per-site reads | 1,761.5 | +268 |
+| XLA hoisted numerators (6d0bc46) | 1,754.8 | +262 |
+| **fused Pallas read (617934a + 6d94a99)** | **1,716.4** | **+223 (+15%)** |
+
+Loss overlay fused vs XLA hoisted: final 4.421977 vs 4.421988, mean d
+-1.4e-4. Estimated peak 40.1 G (runs).
+
+Profile of the fused arm (traced steps ~1,716 ms) vs the old-read arm:
+the read kernels total **64.5 ms** (`attnres_backward` 35, numerators
+fwd + recompute 19, scores 10); the DUS is back in place (0.3 ms); the
+per-site einsums are gone. What remains of the +223 is XLA glue around
+the sites: elementwise 204 ms (old arm 183, standard ~70-80) and casts
+148 ms (old 113, standard ~95-106) - i.e. ~150+ ms in the per-site
+`merge_hoisted` (`(N_k a + b P) / (Z_k a + b)` with per-token scalars:
+XLA materializes the bf16->fp32 converts of N_k and the partial sum and
+several fp32 [B, T, D] temporaries per site, forward, recompute and
+backward) plus the tiny softmax stats. Next levers, in order:
+1. The site merge as one fused pass: either the reformulation
+   `out = alpha_t N_k + beta_t P` (alpha, beta per-token scalars from
+   XLA) so XLA can fuse a single multiply-add with bf16 in/out, or a
+   fourth small Pallas kernel (fwd: one pass over N_k, P; bwd: dN_k, dP
+   and the two per-token reductions in one pass) - expected ~150 ->
+   ~30-50 ms.
+2. Kernel v2: MXU for the shared-operand groups (scores `[tile,D] x
+   [D,K]`, `dscore.q` `[tile,K] x [K,D]`, dq `[D,tile] x [tile,K]`,
+   with K lane-padded to 128) - the VPU-bound 1.07 ms/slot should
+   roughly halve.
+3. Larger tiles once VMEM allows (forward 64, backward 32 today).
+4. Residual dedup (memory only) and `mixer_only` (quality A/B).
