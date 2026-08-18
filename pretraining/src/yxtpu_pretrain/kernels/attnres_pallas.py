@@ -435,8 +435,16 @@ def pallas_site_merge(numerator, alpha, partial=None, beta=None, *, tile=_DEFAUL
   """``out = alpha_t * numerator + beta_t * partial`` over ``[B, T, D]``
   (``partial``/``beta`` optional) as ONE fused pass forward and one
   backward (dN, dP and the two per-token reductions), bf16 in/out, fp32
-  inside. XLA left this as several fp32 [B, T, D] temporaries and converts
-  per read site (~100 ms/step at 1B), which is what this replaces."""
+  inside.
+
+  MEASURED, NOT ADOPTED (2026-08-19, benchmarks/bench_attnres_merge.py,
+  one v4 chip, [4, 4096, 1536] bf16, fwd+bwd): XLA's own fusion of the
+  same expression runs at 0.377 ms against a 0.336 ms roofline; this
+  kernel takes 0.456 ms (tile 256; 512 exceeds the 16 MB VMEM). The
+  per-site glue XLA leaves in the model is not a fusion failure of the
+  merge - it is ~64 sites x ~1.5 ms of memory-bound passes each already at
+  roofline. Kept as the building block for a whole-site kernel (merge +
+  partial score in one read of P) should that be pursued."""
   return _pallas_site_merge(numerator, alpha, partial, beta, tile)
 
 

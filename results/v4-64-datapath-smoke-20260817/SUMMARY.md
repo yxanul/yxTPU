@@ -449,3 +449,30 @@ backward) plus the tiny softmax stats. Next levers, in order:
    roughly halve.
 3. Larger tiles once VMEM allows (forward 64, backward 32 today).
 4. Residual dedup (memory only) and `mixer_only` (quality A/B).
+
+### Site-merge follow-up (2026-08-19)
+
+Two attempts on the ~96 ms of per-site glue (elementwise +62, casts +34
+over the standard arm; read kernels +64; copies +31):
+
+1. Reformulation `out = alpha_t N_k + beta_t P` (commit 1ea78cd, exact):
+   profile step median 1,710 vs ~1,717 - elementwise 204 -> 195, casts
+   unchanged. Kept (slightly cheaper, cleaner).
+2. `pallas_site_merge` (commit 402b7d6): one fused pass each way. Not
+   adopted: microbench on one chip at [4, 4096, 1536] bf16, fwd+bwd -
+   XLA 0.377 ms vs kernel 0.456 ms vs roofline 0.336 ms; numerics
+   identical. XLA already fuses the merge to roofline in isolation.
+
+Reading: the remaining glue is ~64 sites x ~1.5 ms of memory-bound
+passes each at roofline (merge ~0.5, partial-score dot + sum-squares
+~0.3, dalpha/dbeta reductions, softmax stats, the add_any into the
+partial-sum cotangent). It cannot be fused away by better XLA; a
+whole-site kernel (merge + partial score in ONE read of P, forward and
+backward) would remove at most ~half of it (~40-50 ms). The floor of the
+mechanism at 4k with 8 read sites per cycle is therefore roughly:
+read kernels 64 (-> ~35 with the MXU groups) + site glue 50-96 + carry
+copies 31 = **120-160 ms (8-11%)**; the one lever that halves ALL of it
+is the number of sites - `mixer_only` (4 per cycle) - which is a quality
+question (the 308M A/B was with both sites). Order now: (1) MXU groups in
+the read kernels, (2) mixer_only quality A/B at 200 steps, (3) whole-site
+kernel only if (2) keeps both sites, (4) residual dedup for the copies.
