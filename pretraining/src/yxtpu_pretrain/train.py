@@ -132,8 +132,8 @@ def _loss(model: HybridLanguageModel, batch, *, record_max_logits: bool):
         # depth-integrated scale of visual vs text positions after all
         # cycles (post-norm both equal the norm's scale by construction).
         residual = residual_probe_intermediates(model)
-        vision_aux["hidden_visual_rms"] = residual[0]
-        vision_aux["hidden_text_rms"] = residual[1]
+        vision_aux["residual_visual_rms"] = residual[0]
+        vision_aux["residual_text_rms"] = residual[1]
     return loss, {"max_logits": logits_max, "tokens": token_count, **vision_aux}
 
 
@@ -166,8 +166,8 @@ def _vision_metrics(host_metrics) -> dict[str, float] | None:
         "visual_embed_rms",
         "text_embed_rms",
         "visual_embed_max_abs",
-        "hidden_visual_rms",
-        "hidden_text_rms",
+        "residual_visual_rms",
+        "residual_text_rms",
     ):
         if key in host_metrics:
             derived[key] = float(host_metrics[key])
@@ -860,14 +860,17 @@ def run(
         train_step = _make_train_step(config)
         eval_step = _make_eval_step()
         diagnostics_step = _make_diagnostics_step()
-    # The batch conversion must happen outside logical_mesh_context: under
-    # jax.set_mesh the host-local -> global expansion silently no-ops, so the
-    # step would be compiled for the per-host shape and reject the global
-    # batches the loop feeds it on multi-host slices.
+    # The batch conversion stays outside logical_mesh_context (it does not
+    # depend on the logical rules; the step below is lowered for the global
+    # shape the loop feeds it).
     first_host_batch = next(data_iterator)
     first_batch = _device_batch(first_host_batch, mesh)
+    # The diagnostics step is one un-accumulated forward+backward: it takes
+    # a MICROBATCH (the eval shape), so with gradient accumulation only the
+    # first microbatch of the cached update batch is used - the whole update
+    # batch would be accum x the compiled memory at once.
     diagnostic_host_batch = (
-        first_host_batch
+        {key: value[:eval_process_batch] for key, value in first_host_batch.items()}
         if config.experiment.diagnostics.batch == "train_fixed"
         else None
     )
@@ -1062,11 +1065,13 @@ def run(
                 if host_stats_interval and step % host_stats_interval == 0:
                     # Fleet view of the host path: any host's stall stalls
                     # every chip, so log the worst host, not the primary's.
+                    # (host_to_device_ms is the asynchronous enqueue since
+                    # the numpy device-batch path, ~1-3 ms everywhere; it is
+                    # not gathered.)
                     local_stats = np.asarray(
                         [
                             float(log_groups["data"].get("prefetch_queue_depth", -1.0)),
                             record["data_wait_ms"],
-                            record["host_to_device_ms"],
                             record["step_ms"],
                         ],
                         dtype=np.float64,
@@ -1079,8 +1084,7 @@ def run(
                         "queue_depth_min_host": int(fleet[:, 0].argmin()),
                         "data_wait_ms_max": float(fleet[:, 1].max()),
                         "data_wait_ms_max_host": int(fleet[:, 1].argmax()),
-                        "host_to_device_ms_max": float(fleet[:, 2].max()),
-                        "step_ms_max": float(fleet[:, 3].max()),
+                        "step_ms_max": float(fleet[:, 2].max()),
                         "hosts_waiting": int((fleet[:, 1] > 5.0).sum()),
                     }
                 tracker.log(
@@ -1163,6 +1167,10 @@ def run(
                         diagnostic_metrics = diagnostics_step(state.model, diagnostic_batch)
                         jax.block_until_ready(diagnostic_metrics)
                     host_diagnostics = _host_diagnostics(diagnostic_metrics)
+                    # Which batch the pass ran on: the holdout eval batch or
+                    # the cached first training batch (they are not comparable
+                    # - see the 2026-08-17 cycle-0 max-logit finding).
+                    host_diagnostics["batch"] = diagnostics.batch
                     diagnostics_record = {"step": step, "diagnostics": host_diagnostics}
                     metrics_writer.write(diagnostics_record)
                     emit(diagnostics_record)

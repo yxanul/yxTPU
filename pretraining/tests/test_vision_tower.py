@@ -300,7 +300,7 @@ def test_train_step_emits_vision_metrics():
     vit_norm = float(metrics["vit_grad_norm"])
     assert 0.0 < vit_norm < float(metrics["grad_norm"])
     assert float(metrics["visual_embed_rms"]) > 0.0
-    assert float(metrics["hidden_text_rms"]) > 0.0
+    assert float(metrics["residual_text_rms"]) > 0.0
 
     derived = _vision_metrics(metrics)
     assert derived is not None

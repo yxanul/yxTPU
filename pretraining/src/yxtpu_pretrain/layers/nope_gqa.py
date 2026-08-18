@@ -170,7 +170,9 @@ class NoPEGQA(nnx.Module):
 
     def _record_maxima(self, per_query, modality_mask) -> None:
         """Reduces [batch, heads, q_len] maxima into the joint [1, heads]
-        (QK-clip's input) and the [2, heads] modality split."""
+        (QK-clip's input) and the [2, heads] modality split. The split is by
+        QUERY position: "visual" is the maximum over visual queries (any
+        key), "text" over text queries."""
         joint = jnp.max(per_query, axis=(0, 2)).reshape(1, self.num_query_heads)
         self.max_logits.value = joint
         if modality_mask is None:
@@ -281,9 +283,15 @@ class NoPEGQA(nnx.Module):
                 # intermediates on the model that a subsequent record-free
                 # (e.g. adamw) train step cannot consume.
                 per_query = self.attention_op.max_logits.value
-                if per_query.ndim == 2:  # a vendored op without the flag
-                    per_query = per_query[:, :, None]
-                self._record_maxima(per_query, modality_mask)
+                if per_query.ndim == 2:
+                    # A vendored op without keep_max_logits_query_axis only
+                    # returns [batch, heads]: the joint maximum is still
+                    # exact, but there is no per-query axis to split by
+                    # modality - report the split ABSENT rather than the row
+                    # maximum for both modalities.
+                    self._record_maxima(per_query[:, :, None], None)
+                else:
+                    self._record_maxima(per_query, modality_mask)
                 self.attention_op.max_logits.value = self.max_logits.value
         if self.gate_proj is not None:
             # Sigmoid in fp32, consistent with the KDA output gate.

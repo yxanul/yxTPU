@@ -84,8 +84,11 @@ def _declare_kda_roles(layer: KimiDeltaAttention) -> None:
     declare_norm(layer.output_norm)
 
 
-def _embedding_probe(hidden_states, placeholder_mask, segment_ids):
-    """[visual_rms, text_rms, visual_max_abs] over post-splice embeddings."""
+def _embedding_probe(hidden_states, placeholder_mask, segment_ids, *, with_max_abs=True):
+    """Per-modality RMS of a [B, T, D] activation over non-pad positions:
+    ``[visual_rms, text_rms, visual_max_abs]`` (the last only with
+    ``with_max_abs``). Used on the post-splice embeddings and, without the
+    max, on the pre-final-norm residual."""
     values = hidden_states.astype(jnp.float32)
     squares = jnp.mean(jnp.square(values), axis=-1)
     nonpad = segment_ids != 0
@@ -96,8 +99,10 @@ def _embedding_probe(hidden_states, placeholder_mask, segment_ids):
         total = jnp.sum(jnp.where(mask, squares, 0.0))
         return jnp.sqrt(total / jnp.maximum(jnp.sum(mask), 1))
 
-    visual_max = jnp.max(jnp.where(visual[..., None], jnp.abs(values), 0.0))
-    return jnp.stack([masked_rms(visual), masked_rms(text), visual_max])
+    parts = [masked_rms(visual), masked_rms(text)]
+    if with_max_abs:
+        parts.append(jnp.max(jnp.where(visual[..., None], jnp.abs(values), 0.0)))
+    return jnp.stack(parts)
 
 
 def _remat_policy(name: str, save_kda_residuals: bool):
@@ -616,8 +621,13 @@ class HybridLanguageModel(nnx.Module):
                 modality_mask=modality_mask,
             )
         if self.residual_probe is not None:
-            probe = _embedding_probe(hidden_states, modality_mask, decoder_segment_ids)
-            self.residual_probe.value = jax.lax.stop_gradient(probe[:2])
+            # Pre-final-norm residual scale by modality (post-norm the two are
+            # equal by construction). One fp32 pass over [B, T, D]; recorded
+            # every step next to the embedding probe.
+            probe = _embedding_probe(
+                hidden_states, modality_mask, decoder_segment_ids, with_max_abs=False
+            )
+            self.residual_probe.value = jax.lax.stop_gradient(probe)
         hidden_states = nn.with_logical_constraint(
             self.final_norm(hidden_states),
             ACTIVATION_LOGICAL_AXES,
