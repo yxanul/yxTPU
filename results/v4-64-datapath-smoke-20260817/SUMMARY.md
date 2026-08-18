@@ -253,3 +253,34 @@ Levers, ranked by (ms saved / effort):
 4. Remat recompute (MLP 131 ms + KDA fwd 65 ms) and synchronous
    collectives (60 ms) are memory- and compiler-bound respectively; no
    cheap move at 99.3% HBM.
+
+## Device levers A/B (8k, 40 steps each, p10 step; baseline 1,660.8 ms)
+
+| lever | p10 (ms) | delta | verdict |
+| --- | ---: | ---: | --- |
+| `kda.conv_impl=shifted` (conv as shifted multiply-adds in XLA) | 1,613.5 | **-2.9%** | adopt after the 200-step loss overlay (`vision-1b-conv-overlay`) |
+| `optimizer.muon_ns_bf16` (vs a matched from-scratch baseline 1,663.7) | 1,636.6 | -1.6% | needs a 1B numerics gate; the flag changes the optimizer pytree (no warm-start from existing checkpoints) |
+| `optimizer.muon_distributed_ns` | 1,688.6 | +1.7% | rejected at 1B too - the update all-gather costs more than the replicated NS |
+| `kda.conv_impl=fused` (conv + SiLU folded into the v4 kernel, stage A at 4 streams/program) | 1,655.2 | -0.3% | correct, flag-gated; does not pay (below) |
+
+### The conv + SiLU fold on v4 (`pallas_kda_fused_v4_conv`)
+
+Implemented and gated on device (`benchmarks/verify_kda_v4_conv_fold.py`,
+production per-device shape B=2, T=8192, H=12): forward, final state,
+d_log_decay, d_beta, d_state BITWISE identical to the XLA path; raw-input
+and conv-weight cotangents at rel L2 3e-3 (one bf16 ulp; the XLA path
+rounds its conv-transpose and dW to bf16, the fold keeps fp32). Two
+plumbing bugs were found by the gate (an edit that had landed on the
+identical-looking integrated backward kernel; the SiLU' scale missing at
+stage B's final writes) - the gate's bitwise columns made both obvious.
+
+Why it does not pay: stage A is the largest v4 kernel and at the
+production 8 streams/program it already spills ~5.3 MB of registers;
+the fold's recompute pushes it 168 KB over v4's 16 MB VMEM. The three
+ways to fit each cost more than the fold saves (mixer-core fwd+bwd
+microbenchmark, reference = XLA conv + kernel 18.10 ms): stage A at 4
+streams/program 16.48 ms (-9%, but end-to-end -0.3%); stage A at 8 with
+all halo/weight windows single-buffered 19.38; single-buffered only in
+stage A 18.34. The cheap `shifted` XLA form captures most of what is
+available; the fold would need a stage A rewrite that lowers its
+register pressure (or v5e/v6e, where the folded kernel already runs).
