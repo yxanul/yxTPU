@@ -240,6 +240,26 @@ State is dynamic; verify it before relying on this section.
   script asserts thresholds (exit 1), input contract checked (bf16 raw,
   [width,H,3,D] weight, width-1 <= halo), and a CPU interpret-mode test
   runs the whole folded custom_vjp against the XLA path.
+- Review gates 2026-08-18 (results/v4-64-datapath-smoke-20260817/SUMMARY.md,
+  "Review gates"): the fixed branch reproduces the pre-fix run bitwise
+  (loss and grad norm) on every step where the recipes coincide, and is
+  run-to-run reproducible 200/200 (gate A vs A2). Two lessons: (1) a
+  warm-start recipe must be reproduced INCLUDING
+  optimizer.final_learning_rate_fraction (muonclip defaults to 0.1; the
+  overlay runs used 1.0) - a schedule mismatch looks like a numerics
+  divergence that starts one step after warmup; (2) ~1.5 s fleet stalls
+  at nearby steps in identical runs, with every host's prefetch queue
+  full and data_wait ~0, are Python generation-2 garbage collections of
+  the trainer's large heap - the loop now gc.freeze()s after compile
+  (collections drop to 70-75 ms; mean/p10 1.004 over 200 steps) and
+  writes per-host host_metrics.<process>.jsonl with gc_ms so the next
+  such stall is attributable (benchmarks/summarize_host_metrics.py).
+  muon_ns_bf16 passed its 1B overlay (max abs d 3.6e-3 vs the matched
+  run, -1.7% step) through the weights-only warm-start; adopt it for the
+  next campaign. A crashed multi-host launch can leave ONE survivor
+  holding the chips for 30+ minutes (w2 after gate C, 35 GB RSS, in a
+  barrier): `fleet.sh procs` before every launch; the launch guard
+  refuses on that host, which is the tell.
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array

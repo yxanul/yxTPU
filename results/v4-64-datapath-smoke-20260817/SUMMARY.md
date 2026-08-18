@@ -308,3 +308,32 @@ deterministic single-producer stream (identical batches): loss
 shifted - xla within +-2.6e-3 (mean -2.4e-4, last-50 mean -3.8e-4);
 grad norms track; p10 step 1,666.0 (xla) vs 1,619.6 (shifted), -2.8%.
 Adopted as the 1B model config default (`kda_hybrid_1b_yx49k.yml`).
+
+## Review gates 2026-08-18 (W&B group `vision-1b-review-gate`)
+
+After the branch review's fixes (see the AGENTS.md entry "Review fixes
+2026-08-18"), five 200-step fleet runs at the 8k operating point, all
+warm-started from the continuation checkpoint, LR 6e-4 (warmup 50,
+cosine to 0.1 over 200), deterministic single-producer stream unless
+noted:
+
+| gate | what | result |
+| --- | --- | --- |
+| fold gate (w0 carve-out) | `verify_kda_v4_conv_fold.py`, production shape, stage A at 4 streams (new default) | PASSED: fwd/state/decay/beta/state bitwise, raw grads 3.2e-3, dW 2.8e-3; fold 16.49 vs 18.09 ms reference |
+| A (`o3kav3yf`) | fixed code vs the pre-fix `ov-shifted` run (`nday93hv`) | loss AND grad norm bitwise identical on all 52 steps where the two LR schedules coincide (the reference used final_learning_rate_fraction 1.0; the divergence at step 53 is the schedule, not the code); p10 1,619.6 ms |
+| A2 | rerun of A | 200/200 steps bitwise identical to A - the pipeline is run-to-run reproducible |
+| B (`v30yqw2f`) | production-like: 2 producer processes, prefetch 48, eval concat+rows every 100, train_fixed diagnostics, LR 1e-4 | p10 1,616.3 / median 1,620.7 / mean 1,656 ms; data_wait 0.05 ms; rows 2.378 vs concat 2.487 (as before); diagnostics carry `batch=train_fixed`; residual_* keys; 0 orphans |
+| C2 (`6mvelcvl`) | `optimizer.muon_ns_bf16=true`, warm-started through the new weights-only restore (the full restore failed on the optimizer pytree - that was gate C) | p10 **1,593.4 ms (-1.7%)**; loss overlay vs A2 max abs d 3.6e-3, mean -3.9e-5, final 1.31932 vs 1.31921 (the conv adoption gate was +-2.6e-3) - the pending 1B numerics gate; adopt for the next campaign |
+| D | A's recipe with gc.freeze() after compile + GC telemetry | 200/200 bitwise identical to A2; **0 stalls** (max step 1,690 ms vs 3,738 / 4,115 in A / A2), mean 1,625.9 vs 1,659.9 ms (mean/p10 1.004) |
+
+The stall finding: A and A2 had ~1.5 s stalls at nearby steps (78/83/85
+and 78/83/85/88; C2 at 75/79/80/82) with the primary's data_wait 0.2 ms,
+h2d 6 ms and every collected host's prefetch queue full (new per-host
+`host_metrics.<process>.jsonl`). The mechanism is Python's generation-2
+garbage collection walking the trainer's large heap (streams, shuffle
+and fetch buffers, compiled programs): after `gc.freeze()` the same
+collections cost 70-75 ms (steps 167 and 194 of D). Any host's
+collection stalls every chip, so on the 30B continuation this was part
+of the "other host" excess. Net at 8k after this pass: p10 1,620 ms
+(shifted conv), mean 1,626 (no GC tail), 1,593 with bf16 NS pending
+adoption.
