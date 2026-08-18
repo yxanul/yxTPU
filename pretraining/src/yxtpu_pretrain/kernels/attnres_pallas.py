@@ -351,3 +351,129 @@ def _pallas_bwd(epsilon, forward_tile, backward_tile, residuals, cotangents):
 
 
 _pallas_hoisted_depth_read.defvjp(_pallas_fwd, _pallas_bwd)
+
+
+# --------------------------------------------------------------------------
+# kernel 4: the per-site merge  out = alpha_t N_k + beta_t P  (one pass)
+# --------------------------------------------------------------------------
+_DEFAULT_MERGE_TILE = 256
+
+
+def _merge_fwd_kernel(num_ref, alpha_ref, *rest, with_partial):
+  if with_partial:
+    partial_ref, beta_ref, out_ref = rest
+    out = num_ref[...].astype(jnp.float32) * alpha_ref[...] + partial_ref[...].astype(
+        jnp.float32
+    ) * beta_ref[...]
+  else:
+    (out_ref,) = rest
+    out = num_ref[...].astype(jnp.float32) * alpha_ref[...]
+  out_ref[...] = out.astype(out_ref.dtype)
+
+
+def _merge_bwd_kernel(d_out_ref, num_ref, alpha_ref, *rest, with_partial):
+  d_out = d_out_ref[...].astype(jnp.float32)
+  if with_partial:
+    partial_ref, beta_ref, d_num_ref, d_partial_ref, d_alpha_ref, d_beta_ref = rest
+    d_partial_ref[...] = (d_out * beta_ref[...]).astype(d_partial_ref.dtype)
+    d_beta_ref[...] = jnp.sum(d_out * partial_ref[...].astype(jnp.float32), axis=-1, keepdims=True)
+  else:
+    d_num_ref, d_alpha_ref = rest
+  d_num_ref[...] = (d_out * alpha_ref[...]).astype(d_num_ref.dtype)
+  d_alpha_ref[...] = jnp.sum(d_out * num_ref[...].astype(jnp.float32), axis=-1, keepdims=True)
+
+
+def _merge_forward(numerator, alpha, partial, beta, tile):
+  tokens, dim = numerator.shape
+  with_partial = partial is not None
+  full = lambda i: (i, 0)
+  ins = [numerator, alpha] + ([partial, beta] if with_partial else [])
+  in_specs = [pl.BlockSpec((tile, dim), full), pl.BlockSpec((tile, 1), full)]
+  if with_partial:
+    in_specs += [pl.BlockSpec((tile, dim), full), pl.BlockSpec((tile, 1), full)]
+  return pl.pallas_call(
+      functools.partial(_merge_fwd_kernel, with_partial=with_partial),
+      grid=(tokens // tile,),
+      in_specs=in_specs,
+      out_specs=pl.BlockSpec((tile, dim), full),
+      out_shape=jax.ShapeDtypeStruct((tokens, dim), numerator.dtype),
+      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel",)),
+      interpret=_interpret(),
+      name="attnres_merge",
+  )(*ins)
+
+
+def _merge_backward(d_out, numerator, alpha, partial, beta, tile):
+  tokens, dim = numerator.shape
+  with_partial = partial is not None
+  full = lambda i: (i, 0)
+  ins = [d_out, numerator, alpha] + ([partial, beta] if with_partial else [])
+  in_specs = [pl.BlockSpec((tile, dim), full), pl.BlockSpec((tile, dim), full),
+              pl.BlockSpec((tile, 1), full)]
+  out_specs = [pl.BlockSpec((tile, dim), full), pl.BlockSpec((tile, 1), full)]
+  out_shape = [jax.ShapeDtypeStruct((tokens, dim), numerator.dtype),
+               jax.ShapeDtypeStruct((tokens, 1), jnp.float32)]
+  if with_partial:
+    in_specs += [pl.BlockSpec((tile, dim), full), pl.BlockSpec((tile, 1), full)]
+    out_specs = [out_specs[0], pl.BlockSpec((tile, dim), full), out_specs[1],
+                 pl.BlockSpec((tile, 1), full)]
+    out_shape = [out_shape[0], jax.ShapeDtypeStruct((tokens, dim), numerator.dtype),
+                 out_shape[1], jax.ShapeDtypeStruct((tokens, 1), jnp.float32)]
+  return pl.pallas_call(
+      functools.partial(_merge_bwd_kernel, with_partial=with_partial),
+      grid=(tokens // tile,),
+      in_specs=in_specs,
+      out_specs=out_specs,
+      out_shape=out_shape,
+      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel",)),
+      interpret=_interpret(),
+      name="attnres_merge_bwd",
+  )(*ins)
+
+
+def pallas_site_merge(numerator, alpha, partial=None, beta=None, *, tile=_DEFAULT_MERGE_TILE):
+  """``out = alpha_t * numerator + beta_t * partial`` over ``[B, T, D]``
+  (``partial``/``beta`` optional) as ONE fused pass forward and one
+  backward (dN, dP and the two per-token reductions), bf16 in/out, fp32
+  inside. XLA left this as several fp32 [B, T, D] temporaries and converts
+  per read site (~100 ms/step at 1B), which is what this replaces."""
+  return _pallas_site_merge(numerator, alpha, partial, beta, tile)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4,))
+def _pallas_site_merge(numerator, alpha, partial, beta, tile):
+  out, _ = _site_merge_fwd(numerator, alpha, partial, beta, tile)
+  return out
+
+
+def _site_merge_fwd(numerator, alpha, partial, beta, tile):
+  batch, length, dim = numerator.shape
+  tokens = batch * length
+  if tokens % tile:
+    raise ValueError(f"batch*length ({tokens}) must be a multiple of the merge tile ({tile})")
+  num2 = numerator.reshape(tokens, dim)
+  alpha2 = alpha.reshape(tokens, 1).astype(jnp.float32)
+  part2 = None if partial is None else partial.reshape(tokens, dim)
+  beta2 = None if beta is None else beta.reshape(tokens, 1).astype(jnp.float32)
+  out = _merge_forward(num2, alpha2, part2, beta2, tile)
+  return out.reshape(batch, length, dim), (num2, alpha2, part2, beta2)
+
+
+def _site_merge_bwd(tile, residuals, d_out):
+  num2, alpha2, part2, beta2 = residuals
+  batch, length, dim = d_out.shape
+  tokens = batch * length
+  outs = _merge_backward(d_out.reshape(tokens, dim), num2, alpha2, part2, beta2, tile)
+  if part2 is None:
+    d_num, d_alpha = outs
+    return d_num.reshape(batch, length, dim), d_alpha.reshape(batch, length), None, None
+  d_num, d_partial, d_alpha, d_beta = outs
+  return (
+      d_num.reshape(batch, length, dim),
+      d_alpha.reshape(batch, length),
+      d_partial.reshape(batch, length, dim),
+      d_beta.reshape(batch, length),
+  )
+
+
+_pallas_site_merge.defvjp(_site_merge_fwd, _site_merge_bwd)
