@@ -284,3 +284,11 @@ all halo/weight windows single-buffered 19.38; single-buffered only in
 stage A 18.34. The cheap `shifted` XLA form captures most of what is
 available; the fold would need a stage A rewrite that lowers its
 register pressure (or v5e/v6e, where the folded kernel already runs).
+
+### `conv_impl=shifted` adoption gate (W&B group `vision-1b-conv-overlay`)
+
+Two 200-step runs at 8k from the continuation checkpoint, LR 6e-4,
+deterministic single-producer stream (identical batches): loss
+shifted - xla within +-2.6e-3 (mean -2.4e-4, last-50 mean -3.8e-4);
+grad norms track; p10 step 1,666.0 (xla) vs 1,619.6 (shifted), -2.8%.
+Adopted as the 1B model config default (`kda_hybrid_1b_yx49k.yml`).

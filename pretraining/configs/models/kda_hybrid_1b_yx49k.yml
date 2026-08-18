@@ -45,6 +45,13 @@ kda:
   safe_gate: true
   gate_lower_bound: -5.0
   precision: guarded_fp32
+  # v4 XLA-path causal depthwise conv as shifted multiply-adds (2026-08-18):
+  # p10 step 1,666.0 -> 1,619.6 ms at 8k/PDB2 (-2.8%); 200-step deterministic
+  # loss overlay vs "xla" within +-2.6e-3 (mean -2.4e-4). The lax conv's
+  # weight-gradient lowering ran at 66 GB/s (52 ms/step). "fused" (conv +
+  # SiLU inside the kernel) is correct but perf-neutral on v4 - see
+  # results/v4-64-datapath-smoke-20260817/SUMMARY.md.
+  conv_impl: shifted
 attention:
   implementation: tokamax_splash
   num_query_heads: 12

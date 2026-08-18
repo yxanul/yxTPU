@@ -188,7 +188,20 @@ State is dynamic; verify it before relying on this section.
   the mix moved (vision .386 / climbmix .355 / stack .196 / math .062)
   - recalibrate with `yx-pretrain calibrate-mix` before a campaign.
   scripts/fleet.sh is the control-plane helper (parallel per-worker ssh,
-  keepalives, hard cap; verify idle with `procs`). 8k profile (4 traced
+  keepalives, hard cap; verify idle with `procs`). Device levers at
+  8k (40-step p10 vs 1,660.8): kda.conv_impl=shifted -2.9% (adopted in
+  the 1B model config after a 200-step deterministic overlay within
+  +-2.6e-3), muon_ns_bf16 -1.6% (numerics gate pending; changes the
+  optimizer pytree), muon_distributed_ns +1.7% (rejected at 1B too),
+  kda.conv_impl=fused (conv + SiLU folded into the v4 kernel,
+  pallas_kda_fused_v4_conv, gate benchmarks/verify_kda_v4_conv_fold.py:
+  forward/state/decay/beta bitwise, grads one bf16 ulp) -0.3% -
+  correct but perf-neutral because stage A spills ~5.3 MB of registers
+  at 8 streams/program and the fold's recompute pushes it past 16 MB
+  VMEM; running it at 4 streams or single-buffering the windows gives
+  back the saving. Lesson from the fold work: the v4 kernel file has
+  two backward kernels with IDENTICAL heads (integrated + stage A) - any
+  text-anchored edit must be scoped to the function span. 8k profile (4 traced
   steps, benchmarks/summarize_xplane_step.py on xprof's converter -
   modern xprof has no xplane_pb2): duty 96.2%; dense GEMMs 44% (8% of
   it MLP remat recompute), KDA kernels 17%, KDA XLA glue ~17% (depthwise
