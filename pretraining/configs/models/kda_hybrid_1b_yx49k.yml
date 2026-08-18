@@ -10,12 +10,21 @@
 # minimal_with_context asks 35.89G of HLO temporaries against 30.75G.
 # Chunked block 256 keeps the loss temporaries at ~200 MB.
 # MEASURED 2026-08-10 on v4-64, 14-step medians at PDB4/4096 vision+text:
-# block_attnres costs 736 ms/step (2,309 -> 1,573 ms; its depth-read
-# buffer + saved history is ~3.5 GB of bf16 shuffled through both scan
-# loops) - standard residuals until the depth-attention bet is re-argued.
-# fused_mlp=false +1.3% (the [B,T,2,mlp] split/reassembly copies outweigh
-# the fusion), param_scan_axis=0 +0.7% (no whole-tree transpose),
-# save_dot_context neutral, scan_unroll 4/8 OOM (37.2/50.9 G temporaries).
+# block_attnres: re-measured 2026-08-18 on the current loop (same code,
+# same stream, from-scratch init): +264 ms at 4k/PDB4 (1,757 vs 1,493
+# ms, +17.7%) and +245 ms at 8k/PDB2 (1,865 vs 1,620, +15%) - and it
+# FITS at 8k/PDB2 (XLA's 39.9 G "estimated peak" exceeds the 34.4 G HBM
+# at both shapes and is not what gets allocated). The 736 ms recorded
+# earlier (2,309 -> 1,573 ms) was measured before the data-path/GC
+# fixes. Profile (results/v4-64-datapath-smoke-20260817/SUMMARY.md, "AttnRes
+# re-investigation"): the cost is the depth READS (per-site combine
+# einsums 114 ms + their bf16 cotangent accumulation ~100 ms + hoisted
+# scores 38 ms); the buffer copies are ~9 ms. Hoisting the numerators
+# in XLA (commit 6d0bc46, exact to rounding) cut the read einsums 152 ->
+# 93 ms but XLA gave it back in fp32 buffer-sized intermediates, casts
+# and a no-longer-in-place DUS (net -0.4%): the remaining lever is a
+# fused Pallas read (see the SUMMARY section). Earlier notes: save_dot_context
+# neutral, scan_unroll 4/8 OOM (37.2/50.9 G temporaries).
 # Operating point: 1,533 ms -> 342k tok/s, 23.9% parameter-FLOP MFU.
 name: kda_hybrid_1b_yx49k
 vocab_size: 49152

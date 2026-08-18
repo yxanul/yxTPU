@@ -337,3 +337,61 @@ collection stalls every chip, so on the 30B continuation this was part
 of the "other host" excess. Net at 8k after this pass: p10 1,620 ms
 (shifted conv), mean 1,626 (no GC tail), 1,593 with bf16 NS pending
 adoption.
+
+## AttnRes re-investigation 2026-08-18 (W&B group `vision-1b-attnres-gate`)
+
+Question: can Block AttnRes (Part I's residual policy, +0.076 nats at
+308M) be made cheap enough for the 1B? All runs on the current loop
+(shifted conv, gc.freeze), from-scratch init, deterministic stream.
+
+| arm | shape | step (ms) | vs standard |
+| --- | --- | ---: | ---: |
+| standard (profile run) | 4k / PDB 4 | 1,493 median | - |
+| block_attnres, old reads (profile run) | 4k / PDB 4 | 1,757 median (200-step p10 1,761.5) | **+264 ms, +17.7%** |
+| block_attnres, hoisted numerators (6d0bc46) | 4k / PDB 4 | 200-step p10 1,754.8 | +262 ms (-0.4% vs old reads) |
+| block_attnres | 8k / PDB 2 | 1,865 median (30 steps) | +245 ms, +15% - and it FITS |
+
+The config's earlier "736 ms" (2,309 -> 1,573) predates the data-path
+and GC fixes; today's overhead is 264 ms.
+
+Where the 264 ms go (xprof, `summarize_xplane_step.py`, traced steps
+1,757 ms): per-site combine einsums `sbt,sbtd->btd` 114.5 ms; elementwise
++~100 ms over the standard arm (masked softmax / partial merges and the
+bf16 `add_any` accumulation of the 12 buffer-cotangent contributions per
+cycle that autodiff emits); hoisted scores `sbtd,dr->sbtr` 37.6 ms;
+sum-squares 7; partial-score einsums ~14; casts/pads/copies ~+25. The
+buffer copies (`copy.3862` 8.8 ms, DUS 0.3 ms) are NOT the cost. XLA's
+memory estimate for the arm is 39.3 G at 4k and 39.9 G at 8k - above the
+34.4 G HBM - yet both run; treat the estimate as an upper bound.
+
+Lever 1 (commit 6d0bc46, `hoisted_depth_read`): all sites' numerators
+`N_k = sum_s exp(score_ks - m_k) B_s`, normalizers and maxima from ONE
+buffer pass per cycle (custom_vjp with a hand-written single-pass
+backward, fp32 accumulation), each site merging its partial-sum term
+online-softmax style. Numerics: CPU tests equal the standalone reads to
+bf16 rounding and autodiff to 2e-4; 200-step overlay old vs new reads
+final loss 4.42199 vs 4.42228, mean d 2e-4. Perf: -0.4% only. Profile
+old -> new: the read einsums fell 152 -> 93 ms (`sbtk,sbtd->kbtd` 16.6,
+`sbtd,dk->sbtk` 11.4, `sbtd,sbtd->sbt` 13.7, bwd `kbtd,sbtd->sbtk` 9.3,
+`sbtk,kbtd->sbtd` 15.4, `sbtk,dk->sbtd` 23.2, `sbtk,sbtd->dk` 3.8), but
+casts +32 ms, pads/copies +15 ms and the buffer dynamic-update-slice
+0.3 -> 23 ms (no longer in place): XLA materializes each backward
+contraction as a full fp32 buffer-sized output (906 MB), adds them,
+applies the radial term and casts in separate passes, and the
+custom_vjp's buffer residual keeps the buffer alive across the DUS. The
+"one fp32-accumulated write" only exists inside a fused kernel.
+
+Next (not done): (1) a Pallas fused hoisted read - forward tile
+[c+1 slots, 128-256 tokens, D] in VMEM -> scores, sum-squares, softmax
+weights, all K numerators written once (K x [tile, D] FMA loops over
+the resident tile; no MXU, no layout tricks); backward: dB tile
+accumulated in fp32 in VMEM from w.dN, r.(dscore.q) and the radial term,
+written bf16 once, dq accumulated [D, K]. Roofline ~ read the buffer
+once forward, twice backward: ~20-40 ms/step, i.e. the mechanism at
+~2-3% instead of 15-18%. The custom_vjp boundary of 6d0bc46 is exactly
+the interface such a kernel replaces (`hoisted_depth_read` fwd/bwd).
+(2) `lax.switch(block_index)` static prefixes so masked slots are not
+read (9 -> avg 4.5). (3) The residual dedup (save block outputs once,
+rebuild the buffer in a custom backward scan) is a memory improvement
+(3.6 -> 0.45 GB of stacked residual) but no longer a fit prerequisite.
+(4) `mixer_only` sites as a quality A/B once the mechanism costs ~5%.

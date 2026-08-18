@@ -260,6 +260,16 @@ State is dynamic; verify it before relying on this section.
   holding the chips for 30+ minutes (w2 after gate C, 35 GB RSS, in a
   barrier): `fleet.sh procs` before every launch; the launch guard
   refuses on that host, which is the tell.
+- AttnRes re-investigation 2026-08-18 (SUMMARY.md of the datapath smoke,
+  "AttnRes re-investigation"): block_attnres costs +264 ms at 4k/PDB4
+  (+17.7%) and +245 ms at 8k/PDB2 (+15%) on the current loop, and it
+  FITS at 8k (XLA's 39.9 G estimate is above HBM and wrong as a fit
+  test - always run the compile). The cost is the depth reads and their
+  backward, not the buffer copies (~9 ms). Hoisting the numerators in
+  XLA (6d0bc46, exact) is perf-neutral: XLA materializes fp32
+  buffer-sized backward intermediates and the DUS stops being in place.
+  The lever is a fused Pallas read at the hoisted_depth_read boundary
+  (~20-40 ms roofline).
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array
