@@ -11,10 +11,111 @@ combination instead of an unbounded sum.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from maxtext.layers.normalizations import RMSNorm
+
+_MASKED_SCORE = -1.0e30
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def hoisted_depth_read(blocks_buffer, block_index, folded_queries, epsilon):
+  """All of a cycle's depth reads over the (loop-invariant) buffer in ONE
+  buffer pass, as unnormalized softmax numerators.
+
+  For read site ``k`` with folded pseudo-query ``q_k`` and buffer slots
+  ``B_s`` (``s <= block_index`` valid): ``score_ks = (q_k . B_s) *
+  rsqrt(mean(B_s^2) + eps)``, ``m_k = max_s score_ks``, ``w_ks =
+  exp(score_ks - m_k)``, and the outputs are
+
+    numerators   N_k = sum_s w_ks B_s        (K arrays [B, T, D], buffer dtype)
+    normalizers  Z_k = sum_s w_ks            ([B, T, K] fp32)
+    maxima       m_k                         ([B, T, K] fp32)
+
+  A site then merges its own partial-sum term online-softmax style
+  (``DepthAttnRead.merge_hoisted``), so the buffer is read once per cycle
+  instead of once per site, and the backward is one hand-written pass
+  (``_hoisted_depth_read_bwd``) with fp32 accumulation into a single
+  buffer cotangent - where autodiff of the per-site einsums emitted one
+  buffer-sized, fp32-converted, bf16-accumulated contribution per site.
+  ``epsilon`` is static; ``block_index`` is an integer (no cotangent)."""
+  numerators, normalizers, maxima, _ = _hoisted_depth_read_forward(
+      blocks_buffer, block_index, folded_queries, epsilon
+  )
+  return numerators, normalizers, maxima
+
+
+def _hoisted_depth_read_forward(blocks_buffer, block_index, folded_queries, epsilon):
+  slots, _, _, dim = blocks_buffer.shape
+  dtype = blocks_buffer.dtype
+  queries = folded_queries.astype(dtype)  # [D, K]
+  raw = jnp.einsum(
+      "sbtd,dk->sbtk", blocks_buffer, queries, preferred_element_type=jnp.float32
+  )
+  sum_squares = jnp.einsum(
+      "sbtd,sbtd->sbt", blocks_buffer, blocks_buffer, preferred_element_type=jnp.float32
+  )
+  inverse_rms = jax.lax.rsqrt(sum_squares / dim + epsilon)  # [S, B, T]
+  valid = (jnp.arange(slots) <= block_index)[:, None, None, None]
+  scores = jnp.where(valid, raw * inverse_rms[..., None], jnp.float32(_MASKED_SCORE))
+  maxima = jnp.max(scores, axis=0)  # [B, T, K]
+  weights = jnp.where(valid, jnp.exp(scores - maxima[None]), 0.0)  # [S, B, T, K]
+  normalizers = jnp.sum(weights, axis=0)  # [B, T, K]
+  numerators = jnp.einsum(
+      "sbtk,sbtd->kbtd",
+      weights.astype(dtype),
+      blocks_buffer,
+      preferred_element_type=jnp.float32,
+  ).astype(dtype)
+  numerators = tuple(numerators[k] for k in range(numerators.shape[0]))
+  residuals = (blocks_buffer, queries, raw, inverse_rms, weights)
+  return numerators, normalizers, maxima, residuals
+
+
+def _hoisted_depth_read_fwd(blocks_buffer, block_index, folded_queries, epsilon):
+  numerators, normalizers, maxima, residuals = _hoisted_depth_read_forward(
+      blocks_buffer, block_index, folded_queries, epsilon
+  )
+  return (numerators, normalizers, maxima), residuals
+
+
+def _hoisted_depth_read_bwd(epsilon, residuals, cotangents):
+  del epsilon
+  blocks_buffer, queries, raw, inverse_rms, weights = residuals
+  d_numerators, d_normalizers, _ = cotangents  # maxima: see below
+  dtype = blocks_buffer.dtype
+  dim = blocks_buffer.shape[-1]
+  d_numerators = jnp.stack(d_numerators, axis=0)  # [K, B, T, D] (buffer dtype)
+  # dw_ks = dN_k . B_s + dZ_k ; d score_ks = w_ks * dw_ks. The maxima's
+  # cotangent is dropped on purpose: every consumer is exactly invariant to
+  # the shift m_k (numerator and normalizer scale together), so the
+  # derivative taken with m_k held fixed IS the derivative.
+  d_weights = jnp.einsum(
+      "kbtd,sbtd->sbtk", d_numerators, blocks_buffer, preferred_element_type=jnp.float32
+  ) + d_normalizers[None].astype(jnp.float32)
+  d_scores = weights * d_weights  # [S, B, T, K] fp32 (masked slots: w = 0)
+  # score_ks = raw_ks * r_s with raw_ks = q_k . B_s and r_s = rsqrt(ss_s/D+eps):
+  #   dB_s += r_s * sum_k d_score_ks q_k  -  (r_s^3 / D) (sum_k d_score_ks raw_ks) B_s
+  #   dq_k += sum_{s,b,t} d_score_ks r_s B_s
+  scaled_scores = d_scores * inverse_rms[..., None]  # [S, B, T, K]
+  d_buffer = jnp.einsum(
+      "sbtk,kbtd->sbtd", weights.astype(dtype), d_numerators, preferred_element_type=jnp.float32
+  )
+  d_buffer = d_buffer + jnp.einsum(
+      "sbtk,dk->sbtd", scaled_scores.astype(dtype), queries, preferred_element_type=jnp.float32
+  )
+  radial = -jnp.sum(d_scores * raw, axis=-1) * inverse_rms**3 / dim  # [S, B, T]
+  d_buffer = d_buffer + radial[..., None] * blocks_buffer.astype(jnp.float32)
+  d_queries = jnp.einsum(
+      "sbtk,sbtd->dk", scaled_scores.astype(dtype), blocks_buffer, preferred_element_type=jnp.float32
+  )
+  return d_buffer.astype(dtype), None, d_queries
+
+
+hoisted_depth_read.defvjp(_hoisted_depth_read_fwd, _hoisted_depth_read_bwd)
 
 
 class DepthAttnRead(nnx.Module):
@@ -42,10 +143,11 @@ class DepthAttnRead(nnx.Module):
     scale = jnp.asarray(self.norm.scale.get_value(), jnp.float32)
     return jnp.asarray(self.pseudo_query[...], dtype=jnp.float32) * scale
 
-  def _slot_scores(self, values: jax.Array) -> jax.Array:
-    """Scores one source tensor against this site's folded pseudo-query."""
+  def _slot_scores(self, values: jax.Array, folded_query: jax.Array | None = None) -> jax.Array:
+    """Scores one source tensor against this site's folded pseudo-query
+    (``folded_query`` lets a caller that already formed it pass it in)."""
     dim = values.shape[-1]
-    folded = self.folded_query().astype(values.dtype)
+    folded = (self.folded_query() if folded_query is None else folded_query).astype(values.dtype)
     raw = jnp.einsum(
         "d,...d->...", folded, values,
         preferred_element_type=jnp.float32,
@@ -86,6 +188,35 @@ class DepthAttnRead(nnx.Module):
           jnp.float32
       )
     return combined.astype(dtype)
+
+  def merge_hoisted(
+      self,
+      numerator: jax.Array,
+      normalizer: jax.Array,
+      maximum: jax.Array,
+      partial_sum: jax.Array,
+      *,
+      include_partial: bool,
+      folded_query: jax.Array | None = None,
+  ) -> jax.Array:
+    """Finishes this site's read from the cycle-hoisted buffer numerator
+    (see ``hoisted_depth_read``): folds the intra-block partial sum in as
+    one more softmax slot (online-softmax merge of the two maxima), then
+    normalizes. Without the partial term it is ``N_k / Z_k``."""
+    dtype = numerator.dtype
+    combined = numerator.astype(jnp.float32)
+    if not include_partial:
+      return (combined / normalizer[..., None]).astype(dtype)
+    partial_score = self._slot_scores(partial_sum, folded_query)  # [B, T] fp32
+    # The result is exactly invariant to the shift, so it carries no gradient.
+    merged_max = jax.lax.stop_gradient(jnp.maximum(maximum, partial_score))
+    buffer_scale = jnp.exp(maximum - merged_max)
+    partial_weight = jnp.exp(partial_score - merged_max)
+    combined = combined * buffer_scale[..., None] + partial_weight[..., None] * (
+        partial_sum.astype(jnp.float32)
+    )
+    denominator = normalizer * buffer_scale + partial_weight
+    return (combined / denominator[..., None]).astype(dtype)
 
   def read_with_scores(
       self,

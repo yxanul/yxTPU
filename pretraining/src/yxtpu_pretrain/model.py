@@ -16,7 +16,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils_nnx
 
 from yxtpu_pretrain.config import ResolvedConfig
-from yxtpu_pretrain.layers.attn_res import DepthAttnRead
+from yxtpu_pretrain.layers.attn_res import DepthAttnRead, hoisted_depth_read
 from yxtpu_pretrain.layers.kimi_delta_attention import KimiDeltaAttention
 from yxtpu_pretrain.layers.nope_gqa import NoPEGQA
 from yxtpu_pretrain.layers.roles import (
@@ -219,12 +219,9 @@ class HybridLayer(nnx.Module):
 
     def attnres_step(
         self,
-        blocks_buffer,
-        block_index,
         partial_sum,
-        mixer_raw_scores,
-        mlp_raw_scores,
-        buffer_sum_squares,
+        mixer_hoisted,
+        mlp_hoisted,
         *,
         first_in_block: bool,
         decoder_segment_ids=None,
@@ -235,16 +232,16 @@ class HybridLayer(nnx.Module):
         """One Block-AttnRes sub-layer pass: depth-read, mix, accumulate,
         depth-read, MLP, accumulate. Returns the updated intra-block sum.
 
-        ``mixer_raw_scores``/``mlp_raw_scores``/``buffer_sum_squares`` are this
-        layer's slices of the cycle-hoisted buffer scores (the buffer is
-        loop-invariant within a cycle, so HybridCycle computes them once)."""
-        read_input = self.mixer_read.read_with_scores(
-            blocks_buffer,
-            block_index,
+        ``mixer_hoisted``/``mlp_hoisted`` are this layer's two sites' slices
+        ``(numerator, normalizer, maximum, folded_query)`` of the cycle-hoisted buffer read
+        (``hoisted_depth_read``: the buffer is loop-invariant within a cycle,
+        so HybridCycle reads it once for every site); each site only merges
+        its own partial-sum term here."""
+        read_input = self.mixer_read.merge_hoisted(
+            *mixer_hoisted[:3],
             partial_sum,
-            mixer_raw_scores,
-            buffer_sum_squares,
             include_partial=not first_in_block,
+            folded_query=mixer_hoisted[3],
         )
         normalized = nn.with_logical_constraint(
             self.input_norm(read_input), ACTIVATION_LOGICAL_AXES
@@ -266,13 +263,8 @@ class HybridLayer(nnx.Module):
         partial_sum = partial_sum + nn.with_logical_constraint(
             mixed, ACTIVATION_LOGICAL_AXES
         )
-        mlp_read_input = self.mlp_read.read_with_scores(
-            blocks_buffer,
-            block_index,
-            partial_sum,
-            mlp_raw_scores,
-            buffer_sum_squares,
-            include_partial=True,
+        mlp_read_input = self.mlp_read.merge_hoisted(
+            *mlp_hoisted[:3], partial_sum, include_partial=True, folded_query=mlp_hoisted[3]
         )
         mlp_input = nn.with_logical_constraint(
             self.post_mixer_norm(mlp_read_input), ACTIVATION_LOGICAL_AXES
@@ -361,27 +353,25 @@ class HybridCycle(nnx.Module):
                     for read in (layer.mixer_read, layer.mlp_read)
                 ],
                 axis=-1,
-            ).astype(blocks_buffer.dtype)
-            raw_scores = jnp.einsum(
-                "sbtd,dr->sbtr",
+            )  # [D, 2 * cycle_length] fp32
+            # One buffer pass for every site's numerator/normalizer/maximum
+            # (and one hand-written pass in the backward); the sites below
+            # only merge their partial-sum term.
+            numerators, normalizers, maxima = hoisted_depth_read(
                 blocks_buffer,
+                block_index,
                 folded_queries,
-                preferred_element_type=jnp.float32,
+                layers[0].mixer_read.norm.epsilon,
             )
-            buffer_sum_squares = jnp.einsum(
-                "sbtd,sbtd->sbt",
-                blocks_buffer,
-                blocks_buffer,
-                preferred_element_type=jnp.float32,
-            )
+
+            def site(k):
+                return (numerators[k], normalizers[..., k], maxima[..., k], folded_queries[:, k])
+
             for index, layer in enumerate(layers):
                 partial_sum = layer.attnres_step(
-                    blocks_buffer,
-                    block_index,
                     partial_sum,
-                    raw_scores[..., 2 * index],
-                    raw_scores[..., 2 * index + 1],
-                    buffer_sum_squares,
+                    site(2 * index),
+                    site(2 * index + 1),
                     first_in_block=index == 0,
                     decoder_segment_ids=decoder_segment_ids,
                     decoder_positions=decoder_positions,
