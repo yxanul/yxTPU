@@ -18,7 +18,7 @@ from yxtpu_pretrain.runtime.mesh import create_mesh
 from yxtpu_pretrain.train import _make_train_step
 
 
-def _tiny_config(tmp_path, *, data="synthetic", dataset_path=None):
+def _tiny_config(tmp_path, *, data="synthetic", dataset_path=None, optimizer="adamw"):
     overrides = [
         "model.emb_dim=128",
         "model.mlp_dim=256",
@@ -42,7 +42,7 @@ def _tiny_config(tmp_path, *, data="synthetic", dataset_path=None):
         overrides.append(f"data.dataset_path={dataset_path}")
     return load_config(
         model="kda_hybrid_273m",
-        optimizer="adamw",
+        optimizer=optimizer,
         data=data,
         hardware="v6e-8",
         experiment="selected",
@@ -282,3 +282,34 @@ def test_unresumable_iterator_saves_stub_and_restores_weights_only(tmp_path):
     checkpoint.close()
     for path, variable in nnx.to_flat_state(nnx.state(model, nnx.Param)):
         assert jnp.array_equal(variable.get_value(), original[path])
+
+
+def test_restore_weights_ignores_a_changed_optimizer_pytree(tmp_path):
+    """Warm-start reads the model subtree only: a checkpoint written with one
+    optimizer (adamw) restores into a state built with another (muonclip,
+    a different optimizer pytree), which the full restore rejected with a
+    tree-structure mismatch."""
+    config = _tiny_config(tmp_path)
+    train_state = _train_state(config)
+    original = {
+        path: variable.get_value().copy()
+        for path, variable in nnx.to_flat_state(nnx.state(train_state.model, nnx.Param))
+    }
+    checkpoint = CheckpointIO(config, run_name="warm-start-source")
+    assert checkpoint.save(train_state, _UnresumableIterator(), 3, force=True)
+    checkpoint.manager.wait_until_finished()
+    checkpoint.close()
+
+    other = _tiny_config(tmp_path, optimizer="muonclip")
+    other_state = _train_state(other, seed=7)
+    changed = [
+        path
+        for path, variable in nnx.to_flat_state(nnx.state(other_state.model, nnx.Param))
+        if not jnp.array_equal(variable.get_value(), original[path])
+    ]
+    assert changed, "the fresh state must start from different weights"
+    loader = CheckpointIO(other, run_name="warm-start-source")
+    assert loader.restore_weights(other_state) == 3
+    loader.close()
+    for path, variable in nnx.to_flat_state(nnx.state(other_state.model, nnx.Param)):
+        assert jnp.array_equal(variable.get_value(), original[path]), path

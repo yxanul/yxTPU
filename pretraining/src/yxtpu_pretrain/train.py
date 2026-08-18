@@ -829,9 +829,10 @@ def run(
             # Warm-start: weights from another run's latest checkpoint, then
             # a FRESH optimizer so momentum, second moments, and the
             # schedule's step count all restart at zero - the
-            # continuation-after-anneal pattern. The foreign restore fills
-            # the whole TrainStateNNX (the model trees must match); the
-            # optimizer rebuild below discards its optimizer half.
+            # continuation-after-anneal pattern. Only the MODEL subtree is
+            # restored (the model trees must match); the foreign optimizer
+            # state is never read, so its pytree may differ (a changed
+            # optimizer flag or a different optimizer warm-starts fine).
             init_config = config.model_copy(deep=True)
             init_config.experiment.checkpoint.enabled = True
             init_config.experiment.acknowledge_no_checkpoint = False
@@ -842,7 +843,7 @@ def run(
             init_loader = CheckpointIO(
                 init_config, run_name=config.experiment.init_from_run
             )
-            init_step = init_loader.restore(state, data_iterator)
+            init_step = init_loader.restore_weights(state)
             init_loader.close()
             if init_step == 0:
                 raise RuntimeError(
@@ -850,10 +851,10 @@ def run(
                 )
             state.optimizer = nnx.Optimizer(model, transform, wrt=nnx.Param)
             # Rebind the construction-time local so the ORIGINAL optimizer
-            # module - now holding the restored foreign optimizer state -
-            # drops its last reference and frees. Leaving it alive kept
-            # ~4.2 GB of dead fp32 state resident and the first train step
-            # failed allocation (RESOURCE_EXHAUSTED at 1B on v4).
+            # module drops its last reference and frees (with the full
+            # restore it held ~4.2 GB of dead fp32 state and the first
+            # train step failed allocation - RESOURCE_EXHAUSTED at 1B on
+            # v4; kept as belt and braces with the weights-only restore).
             optimizer = state.optimizer
             del optimizer
             gc.collect()

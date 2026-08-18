@@ -49,6 +49,16 @@ def checkpoint_metadata(config: ResolvedConfig, *, tokenizer: str | None) -> dic
     }
 
 
+def _tree_children(tree) -> dict:
+    """Top-level children of a checkpoint metadata tree as a plain dict
+    (orbax returns a nested dict, or a TreeMetadata that exposes one)."""
+    if isinstance(tree, dict):
+        return tree
+    if hasattr(tree, "tree"):
+        return dict(tree.tree)
+    return dict(tree)
+
+
 def _persistent_state(module: nnx.Module):
     state = nnx.state(module)
     intermediates, persistent = nnx.split_state(state, nnx.Intermediate, ...)
@@ -183,6 +193,54 @@ class CheckpointIO:
             )
         else:
             data_iterator.set_state(iterator_state)
+        return int(step)
+
+    def restore_weights(self, train_state: nnx.Module) -> int:
+        """Warm-start restore: the MODEL subtree only, from the latest step.
+
+        The optimizer half of the checkpoint is neither read nor required
+        to match: a warm-start rebuilds a fresh optimizer anyway, and the
+        full restore used to fail whenever the optimizer pytree differed
+        (a flag such as optimizer.muon_ns_bf16, a different optimizer) and
+        to leave ~4 GB of dead restored optimizer state to free. The data
+        iterator position is not restored either (the stream restarts)."""
+        if self.manager is None:
+            return 0
+        step = self.manager.latest_step()
+        if step is None:
+            return 0
+        target = _persistent_state(train_state)
+        pure = target.to_pure_dict()
+        # The item must have the ON-DISK structure. The model subtree is
+        # the live one (restored sharded, in place); every other subtree
+        # (the foreign optimizer state) is described by the checkpoint's
+        # own metadata, so it is restored as plain host arrays with its own
+        # structure - never compared to the live optimizer's pytree - and
+        # dropped. (StandardCheckpointHandler has no leaf skipping.)
+        on_disk = _tree_children(self.manager.item_metadata(step).state)
+
+        def as_host_placeholder(meta):
+            # ShapeDtypeStruct leaves restore as host numpy arrays.
+            return jax.ShapeDtypeStruct(
+                tuple(getattr(meta, "shape", ()) or ()), getattr(meta, "dtype", None)
+            )
+
+        item = {
+            key: pure["model"] if key == "model" else jax.tree.map(as_host_placeholder, subtree)
+            for key, subtree in on_disk.items()
+        }
+        restored = self.manager.restore(
+            step,
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(item),
+                metadata=ocp.args.JsonRestore(),
+            ),
+        )
+        if restored.metadata.get("maxtext_pin") != self.metadata["maxtext_pin"]:
+            raise ValueError("checkpoint MaxText pin does not match this package")
+        pure["model"] = restored.state["model"]
+        nnx.replace_by_pure_dict(target, pure)
+        nnx.update(train_state, target)
         return int(step)
 
     def save(
