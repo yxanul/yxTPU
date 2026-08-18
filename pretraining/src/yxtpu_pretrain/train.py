@@ -884,6 +884,25 @@ def run(
     with logical_mesh_context(mesh, logical_axis_rules):
         compiled_train_step = train_step.lower(state, first_batch).compile()
         compiled_memory = _compiled_memory_summary(compiled_train_step)
+    # The trainer process holds a large, mostly static heap (streams,
+    # shuffle and fetch buffers, the compiled programs); a generation-2
+    # collection over it is a >1 s pause on the main thread that stalls the
+    # whole fleet. Freeze what exists now so later collections only scan
+    # the per-step churn, and record every collection in host_metrics.
+    gc.collect()
+    gc.freeze()
+    gc_stats = {"collections": 0, "gen2": 0, "ms": 0.0, "_started": 0.0}
+
+    def _gc_callback(phase, info):
+        if phase == "start":
+            gc_stats["_started"] = time.perf_counter()
+        else:
+            gc_stats["ms"] += (time.perf_counter() - gc_stats["_started"]) * 1_000
+            gc_stats["collections"] += 1
+            if info.get("generation") == 2:
+                gc_stats["gen2"] += 1
+
+    gc.callbacks.append(_gc_callback)
     parameter_count = count_parameters(state.model)
     tracker = WandbTracker(
         config,
@@ -1039,8 +1058,12 @@ def run(
                     "data_wait_ms": record["data_wait_ms"],
                     "host_to_device_ms": record["host_to_device_ms"],
                     "prefetch_queue_depth": float(getattr(data_iterator, "queue_depth", -1)),
+                    "gc_collections": gc_stats["collections"],
+                    "gc_gen2": gc_stats["gen2"],
+                    "gc_ms": round(gc_stats["ms"], 2),
                 }
             )
+            gc_stats.update(collections=0, gen2=0, ms=0.0)
             emit(record)
             if step % config.experiment.log_interval == 0:
                 log_groups = {

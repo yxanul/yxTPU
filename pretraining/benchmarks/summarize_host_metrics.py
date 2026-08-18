@@ -80,9 +80,16 @@ def main() -> int:
   for s in stalls:
     waits = {p: hosts[p][s]["data_wait_ms"] for p in hosts}
     depths = {p: hosts[p][s]["prefetch_queue_depth"] for p in hosts}
+    gcs = {p: hosts[p][s].get("gc_ms", 0.0) for p in hosts}
     culprit = max(waits, key=waits.get)
-    reason = (f"host {culprit} data_wait {waits[culprit]:.0f} ms (queue depth {depths[culprit]:.0f})"
-              if waits[culprit] > 5.0 else "no host reports data_wait > 5 ms (device/collective/other)")
+    gc_host = max(gcs, key=gcs.get)
+    if waits[culprit] > 5.0:
+      reason = f"host {culprit} data_wait {waits[culprit]:.0f} ms (queue depth {depths[culprit]:.0f})"
+    elif gcs[gc_host] > 50.0:
+      reason = (f"host {gc_host} garbage collection {gcs[gc_host]:.0f} ms "
+                f"(gen2 {hosts[gc_host][s].get('gc_gen2', 0)})")
+    else:
+      reason = "no host reports data_wait > 5 ms or gc > 50 ms (device/collective/other)"
     print(f"  step {s}: fleet {primary[s]['step_ms']:.0f} ms (+{primary[s]['step_ms'] - floor:.0f}); {reason}; "
           f"empty queues on hosts {[p for p, d in depths.items() if d == 0]}")
   return 0
