@@ -29,8 +29,6 @@ initial state) and times fwd+bwd of both.
 from __future__ import annotations
 
 import argparse
-import math
-import os
 import time
 
 import jax
@@ -81,44 +79,6 @@ def reference(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state):
   return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
 
 
-def reference_conv_cotangents(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state, cotangents):
-  """Debug reference for YXTPU_KDA_FOLD_DEBUG_G: the cotangents of the conv
-  OUTPUT (SiLU' folded) that stage B should emit, via autodiff through an
-  explicit conv intermediate."""
-  batch, sequence_length, heads, dim = raw_q.shape
-  width = conv_weight.shape[0]
-  qkv = jnp.stack((raw_q, raw_k, raw_v), axis=3).reshape(batch, sequence_length, -1)
-  kernel = conv_weight.reshape(width, 1, heads * 3 * dim).astype(jnp.bfloat16)
-  padded = jnp.pad(qkv, ((0, 0), (width - 1, 0), (0, 0)))
-  conv = lax.conv_general_dilated(
-      padded, kernel, window_strides=(1,), padding="VALID",
-      dimension_numbers=("NWC", "WIO", "NWC"), feature_group_count=heads * 3 * dim,
-      preferred_element_type=jnp.bfloat16,
-  )
-
-  def from_conv(conv):
-    act = jax.nn.silu(conv.astype(jnp.float32)).astype(jnp.bfloat16)
-    act = act.reshape(batch, sequence_length, heads, 3, dim)
-    q, k, v = (act[..., i, :] for i in range(3))
-    return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
-
-  def from_act(act):
-    act = act.reshape(batch, sequence_length, heads, 3, dim)
-    q, k, v = (act[..., i, :] for i in range(3))
-    return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
-
-  if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G") == "act":
-    act = jax.nn.silu(conv.astype(jnp.float32)).astype(jnp.bfloat16)
-    _, vjp = jax.vjp(from_act, act)
-    (g,) = vjp(cotangents)
-    g = g.reshape(batch, sequence_length, heads, 3, dim)
-    return tuple(g[..., i, :] for i in range(3))
-  _, vjp = jax.vjp(from_conv, conv)
-  (g,) = vjp(cotangents)
-  g = g.reshape(batch, sequence_length, heads, 3, dim)
-  return tuple(g[..., i, :] for i in range(3))
-
-
 def candidate(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state):
   return pallas_kda_fused_v4_conv(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state)
 
@@ -143,6 +103,14 @@ def main() -> int:
   parser.add_argument("--width", type=int, default=4)
   parser.add_argument("--seeds", type=int, default=2)
   parser.add_argument("--timing-iters", type=int, default=5)
+  parser.add_argument(
+      "--exact-tolerance", type=float, default=1e-6,
+      help="rel L2 bound for the outputs the fold reproduces bitwise",
+  )
+  parser.add_argument(
+      "--bf16-tolerance", type=float, default=1e-2,
+      help="rel L2 bound for the raw-input / conv-weight cotangents (bf16 rounding)",
+  )
   args = parser.parse_args()
 
   names = ["output", "final_state", "d_raw_q", "d_raw_k", "d_raw_v", "d_conv_weight",
@@ -150,6 +118,7 @@ def main() -> int:
   ref_fn = jax.jit(lambda p, c: _run(reference, p, c))
   cand_fn = jax.jit(lambda p, c: _run(candidate, p, c))
   worst = {name: 0.0 for name in names}
+  all_finite = True
   for seed in range(args.seeds):
     primals = _inputs(args.batch, args.seq, args.heads, args.width, seed)
     keys = jax.random.split(jax.random.key(1000 + seed), 2)
@@ -159,29 +128,14 @@ def main() -> int:
     )
     (ref_out, ref_state), ref_grads = ref_fn(primals, cotangents)
     (cand_out, cand_state), cand_grads = cand_fn(primals, cotangents)
-    if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G"):
-      g_ref = jax.jit(reference_conv_cotangents)(*primals, cotangents)
-      ref_grads = (*g_ref, jnp.zeros_like(primals[3]), *ref_grads[4:])
-      print("  (debug: comparing stage B conv-output cotangents against autodiff)")
     values = [(ref_out, cand_out), (ref_state, cand_state)] + list(zip(ref_grads, cand_grads))
     print(f"seed {seed}:")
-    if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G"):
-      r = np.asarray(ref_grads[0], np.float64).ravel(); c = np.asarray(cand_grads[0], np.float64).ravel()
-      mask = np.abs(r) > 1e-3
-      ratio = c[mask] / r[mask]
-      print(f"  debug d_raw_q: corr {np.corrcoef(c, r)[0,1]:.4f}  ratio median {np.median(ratio):.4f} "
-            f"p10 {np.percentile(ratio,10):.4f} p90 {np.percentile(ratio,90):.4f}  |c| {np.abs(c).mean():.3e} |r| {np.abs(r).mean():.3e}")
-      # per-position-in-chunk correlation: is it a shift?
-      T = ref_grads[0].shape[1]
-      rr = np.asarray(ref_grads[0], np.float64)[0, :, 0, :]; cc = np.asarray(cand_grads[0], np.float64)[0, :, 0, :]
-      for shift in (-3, -2, -1, 0, 1, 2, 3):
-        a = cc[max(0, shift): T + min(0, shift)]; b = rr[max(0, -shift): T - max(0, shift)]
-        print(f"    shift {shift:+d}: corr {np.corrcoef(a.ravel(), b.ravel())[0,1]:.4f}")
     for name, (r, c) in zip(names, values):
       rel = _rel_l2(c, r)
       worst[name] = max(worst[name], rel)
       max_abs = float(np.max(np.abs(np.asarray(c, np.float64) - np.asarray(r, np.float64))))
       finite = bool(np.all(np.isfinite(np.asarray(c, np.float64))))
+      all_finite = all_finite and finite
       print(f"  {name:16s} rel_l2 {rel:.3e}  max_abs {max_abs:.3e}  finite {finite}")
 
   # timing at the given shape (fwd + bwd)
@@ -200,6 +154,24 @@ def main() -> int:
     per = (time.perf_counter() - started) / args.timing_iters * 1e3
     print(f"{label:32s} fwd+bwd {per:8.2f} ms")
   print("worst rel_l2:", {k: f"{v:.2e}" for k, v in worst.items()})
+  # Gate. Forward, final state, d_log_decay, d_beta and d_initial_state are
+  # bitwise on device (the fold's chunk math is the base kernel's; measured
+  # 2026-08-18 at the production shape); the raw-input and conv-weight
+  # cotangents differ by the XLA path's bf16 rounding of its conv-transpose
+  # and dW (one bf16 ulp, rel L2 ~3e-3), so they get a bf16-ulp threshold.
+  failures = []
+  for name in ("output", "final_state", "d_log_decay", "d_beta", "d_initial_state"):
+    if worst[name] > args.exact_tolerance:
+      failures.append(f"{name} rel_l2 {worst[name]:.2e} > {args.exact_tolerance:.1e}")
+  for name in ("d_raw_q", "d_raw_k", "d_raw_v", "d_conv_weight"):
+    if worst[name] > args.bf16_tolerance:
+      failures.append(f"{name} rel_l2 {worst[name]:.2e} > {args.bf16_tolerance:.1e}")
+  if not all_finite:
+    failures.append("non-finite candidate output")
+  if failures:
+    print("GATE FAILED: " + "; ".join(failures))
+    return 1
+  print("GATE PASSED")
   return 0
 
 

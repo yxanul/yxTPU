@@ -51,22 +51,22 @@ def _local_tpu_is_v4() -> bool:
 
 _TRIANGULAR_SOLVE_BLOCK_SIZE = 16
 
-# Rewriting the short causal QKV mixer as shifted multiply-accumulates was
-# tried and is slower; this knob is off by default and kept as a control.
+# The causal depthwise QKV mixer on the XLA path (v4, where the conv is not
+# inside the fused kernel) has two forms, selected by ``kda.conv_impl``:
 #
-# The motivation was an XPlane profile of the 272.9M hybrid charging 62.080
-# ms/step (26.58%) to convolution fusion, nearly as much as both fused KDA
-# kernels together, for a depthwise convolution with one group per channel.
-# The rewrite is exactly equivalent, 2.4e-7 against the Flax causal
-# convolution, but measured 537,292 tok/s against 560,919, or 4.2% slower.
+#   xla      Flax's lax depthwise convolution (the historical default).
+#   shifted  the same operator as ``width`` shifted multiply-adds
+#            (``_causal_depthwise_conv``; 2.4e-7 against the Flax path).
 #
-# The profile category was misread. A convolution fusion node is not only the
-# convolution: XLA fuses the surrounding elementwise work, here the SiLU and
-# the reshapes, into it. The depthwise lowering itself is not pathological,
-# and replacing it costs four full passes over a [batch, sequence, 3 * heads *
-# head_dim] tensor plus a pad, which is more memory traffic than the
-# convolution it removes.
-_USE_SHIFTED_QKV_CONV = False
+# Which one wins depends on the shape. On the 272.9M hybrid at 4k (2026-07)
+# "shifted" was 4.2% SLOWER (537,292 vs 560,919 tok/s): XLA fuses the SiLU
+# and reshapes into the convolution fusion, and four full passes over
+# [batch, sequence, 3 * heads * head_dim] plus a pad cost more than the
+# convolution they replaced. On the 1B at 8k/PDB2 (2026-08-18) "shifted"
+# is 2.8% FASTER: the lax conv's weight-gradient lowering ran at 66 GB/s
+# (52 ms/step, an XLA reduce over batch x sequence into a [4, 1, 4608]
+# output), which the shifted form's einsum-shaped weight gradient avoids.
+# The 1B model config selects "shifted"; the 273M/308M configs keep "xla".
 
 
 def _causal_depthwise_conv(inputs: Array, kernel: Array) -> Array:
@@ -1400,7 +1400,7 @@ class KimiDeltaAttention(nnx.Module):
       query, key, value = (qkv[..., i, :] for i in range(3))
     else:
       qkv = qkv.reshape(batch, sequence_length, -1)
-      if _USE_SHIFTED_QKV_CONV or getattr(self.config, "kda_conv_impl", "xla") == "shifted":
+      if getattr(self.config, "kda_conv_impl", "xla") == "shifted":
         qkv = _causal_depthwise_conv(
             qkv,
             self.conv1d.kernel.value.astype(qkv.dtype),

@@ -148,6 +148,9 @@ assert _PAIRWISE_WORST_EXPONENT <= _PAIRWISE_MAX_SAFE_EXPONENT, (
 # dimension, so batch and head are merged into one stream axis rather than
 # kept as two leading block axes.
 _DEFAULT_STREAMS_PER_PROGRAM = 8
+# Streams per program for the conv fold's stage A (see
+# _pallas_kda_fused_v4_backward_split); the fold-free kernels keep 8.
+_FOLD_STAGE_A_STREAMS_PER_PROGRAM = 4
 
 # MXU precision for the in-kernel matmuls. FP32 operands on TPU are evaluated
 # by decomposing into BF16 passes: HIGHEST is six passes, HIGH is three (which
@@ -424,6 +427,27 @@ def _reverse_inclusive_cumsum(values: jax.Array) -> jax.Array:
 # SiLU' into the emitted cotangents, and _kda_conv_silu_vjp turns those into
 # raw-input cotangents and the conv weight gradient.
 _CONV_HALO_ROWS = 16
+
+
+def _check_conv_fold_inputs(query, key, value, conv_weight) -> None:
+  """The fold reproduces the layer's bf16 XLA path (bf16 weights, bf16 conv
+  output, bf16 activation) with those roundings hard-wired, and its halo
+  window covers ``_CONV_HALO_ROWS`` previous rows: refuse inputs outside
+  that contract instead of silently computing something else."""
+  for name, array in (("raw_query", query), ("raw_key", key), ("raw_value", value)):
+    if array.dtype != jnp.bfloat16:
+      raise ValueError(
+          f"the conv fold matches the bf16 XLA path; {name} is {array.dtype}"
+      )
+  if conv_weight.ndim != 4 or conv_weight.shape[1:] != (query.shape[2], 3, query.shape[3]):
+    raise ValueError(
+        "conv_weight must be [width, heads, 3, head_dim] = "
+        f"[width, {query.shape[2]}, 3, {query.shape[3]}], got {conv_weight.shape}"
+    )
+  if conv_weight.shape[0] - 1 > _CONV_HALO_ROWS:
+    raise ValueError(
+        f"conv width {conv_weight.shape[0]} exceeds the {_CONV_HALO_ROWS}-row halo"
+    )
 
 
 def _silu_grad(values: jax.Array) -> jax.Array:
@@ -1332,6 +1356,10 @@ def _kda_fused_forward_body(
     solve_method: str,
     profile_stage: str,
 ):
+  """The forward chunk math shared by the plain and conv-fold forward
+  kernels: takes the (already activated) chunk VALUES plus the refs the
+  chunk state machine needs; the kernels differ only in how they obtain
+  query/key/value (from refs, or from the raw refs through the fold)."""
   log_decay = log_decay_ref[0].astype(jnp.float32)
   beta = beta_ref[0][..., 0].astype(jnp.float32)
 
@@ -1834,6 +1862,9 @@ def _kda_backward_stage_a_body(
     use_qk_norm: bool,
     extras_mode: str,
 ):
+  """Stage A of the split backward, shared by the plain and conv-fold
+  kernels: the reverse recompute-and-solve pass on the activated chunk
+  values, exporting the per-chunk intermediates stage B consumes."""
   log_decay = log_decay_ref[0].astype(jnp.float32)
   beta = beta_ref[0][..., 0].astype(jnp.float32)
   output_cotangent = output_cotangent_ref[0].astype(jnp.float32)
@@ -2103,8 +2134,6 @@ def _kda_backward_stage_b_kernel_fold(
           (value_ref, value_prev_ref, value_weight_ref),
       )
   )
-  if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G") == "act":
-    scales = None  # debug: emit d(act) unscaled
   _kda_backward_stage_b_body(
       query,
       key,
@@ -2156,9 +2185,19 @@ def _kda_backward_stage_b_body(
     use_qk_norm: bool,
     inputs_mode: str,
 ):
+  """Stage B (the chunk-parallel pairwise VJP epilogue), shared by the
+  plain and conv-fold kernels. ``cotangent_scales`` are thunks applied to
+  the final query/key/value cotangent writes - the fold passes SiLU'
+  (turning activation cotangents into conv-output cotangents); the plain
+  kernel passes ``None`` (identity)."""
   if cotangent_scales is None:
-    cotangent_scales = (lambda: 1.0, lambda: 1.0, lambda: 1.0)
-  query_scale, key_scale, value_scale = cotangent_scales
+    # Plain kernel: no scaling at all (keeps the default path's kernel body
+    # identical to the pre-fold kernel, not merely bit-exact through x*1.0).
+    scale = lambda value, _thunk: value  # noqa: E731
+    query_scale = key_scale = value_scale = None
+  else:
+    scale = lambda value, thunk: value * thunk()  # noqa: E731
+    query_scale, key_scale, value_scale = cotangent_scales
   beta = beta_ref[0][..., 0].astype(jnp.float32)
   streams, chunk, _ = query_input.shape
   flags = set(inputs_mode.split("+"))
@@ -2258,9 +2297,9 @@ def _kda_backward_stage_b_body(
   )
 
   if "no_epilogue" in flags:
-    query_cotangent_ref[0] = (query_cotangent * query_scale()).astype(query_cotangent_ref.dtype)
-    key_cotangent_ref[0] = (key_cotangent * key_scale()).astype(key_cotangent_ref.dtype)
-    value_cotangent_ref[0] = (value_beta_cotangent_ref[0] * value_scale()).astype(
+    query_cotangent_ref[0] = scale(query_cotangent, query_scale).astype(query_cotangent_ref.dtype)
+    key_cotangent_ref[0] = scale(key_cotangent, key_scale).astype(key_cotangent_ref.dtype)
+    value_cotangent_ref[0] = scale(value_beta_cotangent_ref[0], value_scale).astype(
         value_cotangent_ref.dtype
     )
     log_decay_cotangent_ref[0] = cumulative_decay_cotangent
@@ -2289,9 +2328,9 @@ def _kda_backward_stage_b_body(
   else:
     query_cotangent = query_normalized_cotangent
 
-  query_cotangent_ref[0] = (query_cotangent * query_scale()).astype(query_cotangent_ref.dtype)
-  key_cotangent_ref[0] = (key_cotangent * key_scale()).astype(key_cotangent_ref.dtype)
-  value_cotangent_ref[0] = (value_cotangent * value_scale()).astype(value_cotangent_ref.dtype)
+  query_cotangent_ref[0] = scale(query_cotangent, query_scale).astype(query_cotangent_ref.dtype)
+  key_cotangent_ref[0] = scale(key_cotangent, key_scale).astype(key_cotangent_ref.dtype)
+  value_cotangent_ref[0] = scale(value_cotangent, value_scale).astype(value_cotangent_ref.dtype)
   log_decay_cotangent_ref[0] = log_decay_cotangent
   beta_cotangent_ref[0, ..., 0] = beta_cotangent
 
@@ -2407,6 +2446,8 @@ def _pallas_kda_fused_v4_forward(
     raise RuntimeError("pallas_kda_fused_v4_forward requires a TPU backend")
   if query.shape != key.shape or query.ndim != 4:
     raise ValueError(f"expected matching [B,T,H,K] Q/K, got {query.shape}, {key.shape}")
+  if conv_weight is not None:
+    _check_conv_fold_inputs(query, key, value, conv_weight)
   batch, sequence_length, heads, key_dim = query.shape
   value_dim = value.shape[-1]
   if value.shape[:3] != (batch, sequence_length, heads):
@@ -2910,8 +2951,9 @@ def _pallas_kda_fused_v4_backward_split(
   halo_blocks = chunk_size // _CONV_HALO_ROWS
 
   # The halo and weight windows are tiny and re-fetched every step; single
-  # buffering them keeps the fold's stage A inside v4's 16 MB VMEM at the
-  # production 8 streams per program.
+  # buffering them is what lets the fold's stage A fit v4's 16 MB VMEM when
+  # it is forced to the production 8 streams per program (it runs at 4 by
+  # default, double-buffered).
   def _buffering(single):
     return {"pipeline_mode": pl.Buffered(1)} if single else {}
 
@@ -2956,13 +2998,22 @@ def _pallas_kda_fused_v4_backward_split(
     ) * 3
 
   # The fold's stage A carries the conv recompute on top of the largest v4
-  # kernel; at 8 streams per program its register spills overflow the 16 MB
-  # VMEM by ~170 KB, so it runs at 4 (its outputs are per-stream, any
-  # grouping is valid; stage B and the VJP kernel keep 8).
+  # kernel; at the production 8 streams per program its register spills
+  # overflow the 16 MB VMEM by ~170 KB. It therefore runs at 4 streams per
+  # program (its outputs are per-stream, so any grouping is valid; stage B
+  # and the VJP kernel keep 8) - the configuration behind the measured
+  # numbers (mixer microbench 16.48 ms vs 18.10 XLA reference; -0.3% e2e).
+  # YXTPU_KDA_FOLD_STAGE_A_STREAMS overrides for experiments: at 8 the halo
+  # and weight windows are single-buffered so the kernel fits at all
+  # (measured 18.34 ms - slower than the reference; 19.38 with every
+  # window single-buffered).
   spp_a = streams_per_program
-  if fold and os.environ.get("YXTPU_KDA_FOLD_STAGE_A_STREAMS"):
-    spp_a = math.gcd(streams, int(os.environ["YXTPU_KDA_FOLD_STAGE_A_STREAMS"]))
+  if fold:
+    spp_a = math.gcd(streams, _FOLD_STAGE_A_STREAMS_PER_PROGRAM)
+    if os.environ.get("YXTPU_KDA_FOLD_STAGE_A_STREAMS"):
+      spp_a = math.gcd(streams, int(os.environ["YXTPU_KDA_FOLD_STAGE_A_STREAMS"]))
   stream_groups_a = streams // spp_a
+  single_buffer_stage_a_windows = fold and spp_a >= streams_per_program
 
   if fold:
     conv_width = conv_weight.shape[0]
@@ -3010,7 +3061,7 @@ def _pallas_kda_fused_v4_backward_split(
               previous_state_spec_for(spp_a),
               chunk_spec(value_dim, True, spp_a),
               state_spec_for(spp_a),
-              *fold_specs(True, spp_a, single=not os.environ.get("YXTPU_KDA_FOLD_STAGE_A_DOUBLE_BUFFER")),
+              *fold_specs(True, spp_a, single=single_buffer_stage_a_windows),
           ),
           out_specs=(
               chunk_spec(key_dim, True, spp_a),
@@ -3159,17 +3210,6 @@ def _pallas_kda_fused_v4_backward_split(
         state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
     )
 
-  if os.environ.get("YXTPU_KDA_FOLD_DEBUG_G"):
-    # Debug: return stage B's conv-output cotangents in place of the raw ones.
-    return (
-        unstream(query_cotangent_t, key_dim),
-        unstream(key_cotangent_t, key_dim),
-        unstream(value_cotangent_t, value_dim),
-        jnp.zeros_like(conv_weight),
-        unstream(log_decay_cotangent_t, key_dim),
-        unstream(beta_cotangent_t, 1)[..., 0],
-        state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
-    )
   # Conv + SiLU VJP: stage B emitted the cotangents of the conv OUTPUT;
   # turn them into raw-input cotangents and the depthwise weight gradient.
   weight_cotangent_spec = pl.BlockSpec(

@@ -98,3 +98,83 @@ def test_vjp_kernel_formulas_match_autodiff():
       dw = dw.at[k].add(jnp.sum(gc * padded[:, start : start + C], axis=1))
   np.testing.assert_allclose(np.asarray(dx), np.asarray(dx_ref), rtol=1e-5, atol=1e-5)
   np.testing.assert_allclose(np.asarray(dw), np.asarray(dw_ref), rtol=1e-5, atol=1e-5)
+
+
+def _xla_conv_reference(raw_q, raw_k, raw_v, conv_weight, log_decay, beta, initial_state):
+  """The layer's XLA path: bf16 causal depthwise conv on the head-major
+  projection, SiLU in fp32 -> bf16, then the base v4 kernel."""
+  from yxtpu_pretrain.kernels.kda_fused_pallas_v4 import pallas_kda_fused_v4
+
+  batch, sequence_length, heads, dim = raw_q.shape
+  width = conv_weight.shape[0]
+  qkv = jnp.stack((raw_q, raw_k, raw_v), axis=3).reshape(batch, sequence_length, -1)
+  kernel = conv_weight.reshape(width, 1, heads * 3 * dim).astype(jnp.bfloat16)
+  padded = jnp.pad(qkv, ((0, 0), (width - 1, 0), (0, 0)))
+  conv = lax.conv_general_dilated(
+      padded, kernel, window_strides=(1,), padding="VALID",
+      dimension_numbers=("NWC", "WIO", "NWC"), feature_group_count=heads * 3 * dim,
+      preferred_element_type=jnp.bfloat16,
+  )
+  act = jax.nn.silu(conv.astype(jnp.float32)).astype(jnp.bfloat16)
+  act = act.reshape(batch, sequence_length, heads, 3, dim)
+  q, k, v = (act[..., i, :] for i in range(3))
+  return pallas_kda_fused_v4(q, k, v, log_decay, beta, initial_state)
+
+
+def _rel_l2(a, b):
+  a = np.asarray(a, np.float64).ravel()
+  b = np.asarray(b, np.float64).ravel()
+  return float(np.linalg.norm(a - b) / max(np.linalg.norm(b), 1e-30))
+
+
+def test_conv_fold_custom_vjp_matches_the_xla_path_in_interpret_mode(monkeypatch):
+  """Runs the WHOLE folded kernel (forward, stage A, stage B, conv VJP) on
+  CPU through Pallas interpret mode against the XLA-conv + base-kernel
+  reference, with a nonzero initial state and a stream count that is not
+  a multiple of 8. Forward and state must agree to interpret-mode
+  reduction order; the seven cotangents to bf16 output rounding. This is
+  the CPU counterpart of benchmarks/verify_kda_v4_conv_fold.py."""
+  from jax.experimental import pallas as pl
+
+  from yxtpu_pretrain.kernels import kda_fused_pallas_v4 as module
+
+  monkeypatch.setenv("YXTPU_KDA_INTERPRET", "1")
+  real_pallas_call = pl.pallas_call
+  monkeypatch.setattr(
+      module.pl,
+      "pallas_call",
+      lambda *args, **kwargs: real_pallas_call(*args, **{**kwargs, "interpret": True}),
+  )
+
+  batch, sequence_length, heads, dim, width = 1, 192, 2, 128, 4
+  keys = jax.random.split(jax.random.key(3), 8)
+  shape = (batch, sequence_length, heads, dim)
+  raw = [jax.random.normal(keys[i], shape, jnp.bfloat16) for i in range(3)]
+  conv_weight = jax.random.normal(keys[3], (width, heads, 3, dim), jnp.float32) * 0.3
+  log_decay = -5.0 * jax.nn.sigmoid(jax.random.normal(keys[4], shape, jnp.float32) * 2.0)
+  beta = jax.nn.sigmoid(jax.random.normal(keys[5], (batch, sequence_length, heads), jnp.float32))
+  initial_state = jax.random.normal(keys[6], (batch, heads, dim, dim), jnp.float32) * 0.1
+  primals = (*raw, conv_weight, log_decay, beta, initial_state)
+  cotangents = (
+      jax.random.normal(keys[7], shape, jnp.bfloat16),
+      jnp.full((batch, heads, dim, dim), 0.01, jnp.float32),
+  )
+
+  def run(fn):
+    outputs, vjp = jax.vjp(fn, *primals)
+    return outputs, vjp(cotangents)
+
+  (ref_out, ref_state), ref_grads = run(_xla_conv_reference)
+  (out, state), grads = run(module.pallas_kda_fused_v4_conv)
+
+  assert _rel_l2(out, ref_out) < 1e-5
+  assert _rel_l2(state, ref_state) < 1e-5
+  assert len(grads) == 7
+  names = ("d_raw_q", "d_raw_k", "d_raw_v", "d_conv_weight", "d_log_decay", "d_beta", "d_state")
+  for name, got, want in zip(names, grads, ref_grads):
+    assert got.shape == want.shape, name
+    assert np.all(np.isfinite(np.asarray(got, np.float64))), name
+    # bf16 output rounding for the raw/weight cotangents; the decay/beta/
+    # state cotangents flow through the base kernel's math (interpret-mode
+    # reduction order differs from Mosaic's, hence not bitwise here).
+    assert _rel_l2(got, want) < 1e-2, (name, _rel_l2(got, want))
