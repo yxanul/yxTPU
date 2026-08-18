@@ -16,6 +16,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils_nnx
 
 from yxtpu_pretrain.config import ResolvedConfig
+from yxtpu_pretrain.kernels.attnres_pallas import pallas_hoisted_depth_read
 from yxtpu_pretrain.layers.attn_res import DepthAttnRead, hoisted_depth_read
 from yxtpu_pretrain.layers.kimi_delta_attention import KimiDeltaAttention
 from yxtpu_pretrain.layers.nope_gqa import NoPEGQA
@@ -315,6 +316,8 @@ class HybridCycle(nnx.Module):
 
     def __init__(self, *, config: ResolvedConfig, leaf_config, mesh, rngs: nnx.Rngs):
         self.cycle_length = len(config.model.cycle)
+        self.attnres_read = config.model.attnres_read
+        self.attnres_tiles = (config.model.attnres_forward_tile, config.model.attnres_backward_tile)
         for index, kind in enumerate(config.model.cycle):
             setattr(
                 self,
@@ -357,12 +360,21 @@ class HybridCycle(nnx.Module):
             # One buffer pass for every site's numerator/normalizer/maximum
             # (and one hand-written pass in the backward); the sites below
             # only merge their partial-sum term.
-            numerators, normalizers, maxima = hoisted_depth_read(
-                blocks_buffer,
-                block_index,
-                folded_queries,
-                layers[0].mixer_read.norm.epsilon,
-            )
+            epsilon = layers[0].mixer_read.norm.epsilon
+            if self.attnres_read == "pallas":
+                forward_tile, backward_tile = self.attnres_tiles
+                numerators, normalizers, maxima = pallas_hoisted_depth_read(
+                    blocks_buffer,
+                    block_index,
+                    folded_queries,
+                    epsilon,
+                    forward_tile=forward_tile,
+                    backward_tile=backward_tile,
+                )
+            else:
+                numerators, normalizers, maxima = hoisted_depth_read(
+                    blocks_buffer, block_index, folded_queries, epsilon
+                )
 
             def site(k):
                 return (numerators[k], normalizers[..., k], maxima[..., k], folded_queries[:, k])

@@ -309,6 +309,15 @@ class ModelConfig(StrictModel):
     # sequence length; disable for memory-tight long-sequence runs).
     remat_save_kda_residuals: bool = True
     residual_policy: Literal["standard", "block_attnres"] = "standard"
+    # Block AttnRes depth-read implementation: "xla" is the hoisted-numerator
+    # einsum form (exact, perf-neutral on v4 - XLA materializes fp32
+    # buffer-sized backward intermediates); "pallas" is the fused kernel
+    # (kernels/attnres_pallas.py) that keeps a token tile of the buffer in
+    # VMEM and writes each output once. Tiles are tokens per grid step
+    # (forward: scores + numerators; backward: the dB kernel).
+    attnres_read: Literal["xla", "pallas"] = "xla"
+    attnres_forward_tile: int = 64
+    attnres_backward_tile: int = 32
     logits_via_embedding: bool = False
     dropout_rate: float = 0.0
     kda: KDAConfig = Field(default_factory=KDAConfig)
@@ -336,6 +345,10 @@ class ModelConfig(StrictModel):
             )
         if self.residual_policy == "block_attnres" and not self.cycle:
             raise ValueError("block_attnres requires a hybrid cycle")
+        for name in ("attnres_forward_tile", "attnres_backward_tile"):
+            value = getattr(self, name)
+            if value < 8 or value % 8:
+                raise ValueError(f"{name} must be a positive multiple of 8")
         return self
 
 
