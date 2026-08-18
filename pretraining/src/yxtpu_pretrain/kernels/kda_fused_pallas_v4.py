@@ -2522,12 +2522,10 @@ def _pallas_kda_fused_v4_forward(
     prev_spec = pl.BlockSpec(
         block_shape=(1, streams_per_program, _CONV_HALO_ROWS, key_dim),
         index_map=lambda bg, hg, ci: (bg, hg, jnp.maximum(halo_blocks * ci - 1, 0), 0),
-        pipeline_mode=pl.Buffered(1),
     )
     weight_spec = pl.BlockSpec(
         block_shape=(streams_per_program, conv_width, key_dim),
         index_map=lambda bg, hg, ci: (hg, 0, 0),
-        pipeline_mode=pl.Buffered(1),
     )
     weights = _stream_conv_weights(conv_weight, batch)
     inputs += [query_t, key_t, value_t, *weights]
@@ -2914,7 +2912,10 @@ def _pallas_kda_fused_v4_backward_split(
   # The halo and weight windows are tiny and re-fetched every step; single
   # buffering them keeps the fold's stage A inside v4's 16 MB VMEM at the
   # production 8 streams per program.
-  def prev_spec(reverse, spp=None):
+  def _buffering(single):
+    return {"pipeline_mode": pl.Buffered(1)} if single else {}
+
+  def prev_spec(reverse, spp=None, single=False):
     spp = spp or streams_per_program
     return pl.BlockSpec(
         block_shape=(1, spp, _CONV_HALO_ROWS, key_dim),
@@ -2924,7 +2925,7 @@ def _pallas_kda_fused_v4_backward_split(
             jnp.maximum(halo_blocks * ((num_chunks - 1 - ci) if reverse else ci) - 1, 0),
             0,
         ),
-        pipeline_mode=pl.Buffered(1),
+        **_buffering(single),
     )
 
   def next_spec():
@@ -2936,22 +2937,23 @@ def _pallas_kda_fused_v4_backward_split(
             jnp.minimum(halo_blocks * (ci + 1), halo_blocks * num_chunks - 1),
             0,
         ),
-        pipeline_mode=pl.Buffered(1),
     )
 
-  def weight_spec_for(spp):
+  def weight_spec_for(spp, single=False):
     return pl.BlockSpec(
         block_shape=(spp, (conv_weight.shape[0] if fold else 1), key_dim),
         index_map=lambda bg, hg, ci: (hg, 0, 0),
-        pipeline_mode=pl.Buffered(1),
+        **_buffering(single),
     )
 
   weight_spec = weight_spec_for(streams_per_program)
 
-  def fold_specs(reverse, spp=None):
+  def fold_specs(reverse, spp=None, single=False):
     if not fold:
       return ()
-    return (prev_spec(reverse, spp),) * 3 + (weight_spec_for(spp or streams_per_program),) * 3
+    return (prev_spec(reverse, spp, single),) * 3 + (
+        weight_spec_for(spp or streams_per_program, single),
+    ) * 3
 
   # The fold's stage A carries the conv recompute on top of the largest v4
   # kernel; at 8 streams per program its register spills overflow the 16 MB
@@ -3008,7 +3010,7 @@ def _pallas_kda_fused_v4_backward_split(
               previous_state_spec_for(spp_a),
               chunk_spec(value_dim, True, spp_a),
               state_spec_for(spp_a),
-              *fold_specs(True, spp_a),
+              *fold_specs(True, spp_a, single=not os.environ.get("YXTPU_KDA_FOLD_STAGE_A_DOUBLE_BUFFER")),
           ),
           out_specs=(
               chunk_spec(key_dim, True, spp_a),
