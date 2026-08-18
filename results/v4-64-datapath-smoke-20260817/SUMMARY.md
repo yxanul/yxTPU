@@ -67,9 +67,12 @@ Holdout at the same checkpoint, first eval (step 100):
 A 0.41-nat format gap on the same ClimbMix validation split - the
 Part II holdout numbers measure an out-of-distribution packing.
 
-Attention maxima on the mixed batch (per-modality split, first sample):
-cycle 0 joint 60.4 = visual 60.4 / text 60.1 - the hot cycle-0 logits are
-NOT a visual-position effect (both modalities reach ~60); the
+Attention maxima on the mixed batch (per-modality split BY QUERY
+POSITION - "visual" is the maximum over visual queries against any key,
+"text" over text queries; first sample): cycle 0 joint 60.4 = visual
+60.4 / text 60.1 - the hot cycle-0 logits are not a visual-query effect
+(both modalities reach ~60; a hot visual KEY attended by text queries
+would count as text, which the text-only control below rules out); the
 diagnostics pass on the cached training batch pins them to cycle-0
 heads 10 (59.7), 9 (33.6), 8 (26.7), all other cycle-0 heads 12-17.
 Later cycles: text > visual (cycle 5: 35.9 vs 15.7). Same batch under
@@ -117,7 +120,14 @@ recurred.
 Device time +11.0% for 2x context (the GQA layers' O(T^2) term costs
 more on v4 than its ~5% FLOP share suggested; matches the earlier +9%
 device-only smoke), partly bought back by the +5% supervised-token
-yield of longer rows: net -6% loss-token throughput. Memory flat.
+yield of longer rows: net -6% loss-token throughput. Memory flat
+between the two smokes at 16 image slots per device (8 slots x PDB 2
+here, 4 x PDB 4 at 4k). The earlier device-only 8k memory smoke (4
+slots x PDB 2 = 8 images/device, four-source mix, 25 steps) measured
+31.0 GB peak / 22.5 GB temporaries at 1,643 ms/step: the ~3 GB between
+the two 8k points is the second 8 images per device (the ViT's
+materialised `[16, 6, 784, 784]` scores and its activations), not the
+sequence length.
 The mix moved with the longer rows exactly as the config comment warns
 (stack rows are now file-length, math rows longer): run
 `yx-pretrain calibrate-mix` before any campaign at this shape.
@@ -184,10 +194,12 @@ self-time by component (`benchmarks/summarize_xplane_step.py`):
 Reading: 44% is dense GEMMs (of which 8% is remat recompute the memory
 budget forces), 17% is the KDA kernels themselves, and **~16-17% is
 XLA glue around the pre-fold v4 KDA kernel** (depthwise conv 6.0%,
-casts 6.4%, pads/reshapes 4.2%) - the largest single lever left on the
-device: the folded kernel (conv + casts inside the kernel, as on
-v5e/v6e) or a cheaper conv formulation is worth ~150-250 ms/step
-(9-15%). Splash is 8.4% at 8k (4.7% of the FLOPs at 33-39% of peak);
+casts 6.4%, pads/reshapes 4.2%). At the time of the profile this read as
+the largest single lever left on the device (a folded kernel worth
+~150-250 ms/step, 9-15%); SUPERSEDED by the measurements below: the
+cheap `shifted` conv captured -2.8% and the fold itself is perf-neutral
+on v4 (stage A's register pressure), so the glue is not recoverable
+without a lower-pressure stage A. Splash is 8.4% at 8k (4.7% of the FLOPs at 33-39% of peak);
 collectives 3.7% cannot overlap on v4; the KDA forward recompute (4%)
 is the price of `remat_save_kda_residuals: false` at 99.3% HBM.
 
@@ -249,7 +261,10 @@ Levers, ranked by (ms saved / effort):
    replicated NS for a 1.8-3.6 GB update all-gather - expect a net
    -50..-100 ms; both need a 1B A/B, the 337M verdicts do not transfer.
 3. KDA glue fold (conv fwd/bwd, casts, pads into the v4 kernel, bf16
-   dQKV epilogue): up to ~200 ms (-12%) - kernel project.
+   dQKV epilogue): up to ~200 ms (-12%) - kernel project. MEASURED
+   (next section): built and correct, -0.3% end-to-end; the expected
+   saving does not materialise on v4 because stage A cannot absorb the
+   recompute without spilling. Superseded.
 4. Remat recompute (MLP 131 ms + KDA fwd 65 ms) and synchronous
    collectives (60 ms) are memory- and compiler-bound respectively; no
    cheap move at 99.3% HBM.
@@ -258,10 +273,10 @@ Levers, ranked by (ms saved / effort):
 
 | lever | p10 (ms) | delta | verdict |
 | --- | ---: | ---: | --- |
-| `kda.conv_impl=shifted` (conv as shifted multiply-adds in XLA) | 1,613.5 | **-2.9%** | adopt after the 200-step loss overlay (`vision-1b-conv-overlay`) |
+| `kda.conv_impl=shifted` (conv as shifted multiply-adds in XLA) | 1,613.5 | **-2.9%** | ADOPTED after the 200-step loss overlay (`vision-1b-conv-overlay`: -2.8%, the figure quoted for the adoption) |
 | `optimizer.muon_ns_bf16` (vs a matched from-scratch baseline 1,663.7) | 1,636.6 | -1.6% | needs a 1B numerics gate; the flag changes the optimizer pytree (no warm-start from existing checkpoints) |
 | `optimizer.muon_distributed_ns` | 1,688.6 | +1.7% | rejected at 1B too - the update all-gather costs more than the replicated NS |
-| `kda.conv_impl=fused` (conv + SiLU folded into the v4 kernel, stage A at 4 streams/program) | 1,655.2 | -0.3% | correct, flag-gated; does not pay (below) |
+| `kda.conv_impl=fused` (conv + SiLU folded into the v4 kernel, stage A at 4 streams/program - the flag's default since 2026-08-18) | 1,655.2 | -0.3% | correct, flag-gated; does not pay (below) |
 
 ### The conv + SiLU fold on v4 (`pallas_kda_fused_v4_conv`)
 
@@ -279,9 +294,10 @@ production 8 streams/program it already spills ~5.3 MB of registers;
 the fold's recompute pushes it 168 KB over v4's 16 MB VMEM. The three
 ways to fit each cost more than the fold saves (mixer-core fwd+bwd
 microbenchmark, reference = XLA conv + kernel 18.10 ms): stage A at 4
-streams/program 16.48 ms (-9%, but end-to-end -0.3%); stage A at 8 with
-all halo/weight windows single-buffered 19.38; single-buffered only in
-stage A 18.34. The cheap `shifted` XLA form captures most of what is
+streams/program 16.48 ms (-9%, but end-to-end -0.3%; this is the flag's
+default configuration); stage A at 8 with all halo/weight windows
+single-buffered 19.38; single-buffered only in stage A 18.34 (what
+`YXTPU_KDA_FOLD_STAGE_A_STREAMS=8` selects). The cheap `shifted` XLA form captures most of what is
 available; the fold would need a stage A rewrite that lowers its
 register pressure (or v5e/v6e, where the folded kernel already runs).
 

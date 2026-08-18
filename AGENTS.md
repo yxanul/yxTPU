@@ -149,10 +149,10 @@ State is dynamic; verify it before relying on this section.
   campaigns - at the continuation's final checkpoint concat 2.789 vs rows
   (training contract) 2.383, a 0.41-nat format gap; the Part II "anneal
   degrades holdout" reading is that artifact. Cycle-0 attention maxima
-  ~60 on training batches are NOT visual positions (visual 60.4 / text
-  60.1 by the new modality split; heads 10/9/8 of cycle 0 on the cached
-  training batch) - text-only concat batches show 7-20, so it is the
-  training packing/content. Operational lessons: (1) opening one Hub
+  ~60 on training batches are NOT a visual-query effect (visual 60.4 /
+  text 60.1 by the new modality split, which is by QUERY position; heads
+  10/9/8 of cycle 0 on the cached training batch) - text-only concat
+  batches show 7-20, so it is the training packing/content. Operational lessons: (1) opening one Hub
   streaming dataset costs ~10-15 `api` requests (paginated tree listing:
   FineVisionMax 14, ClimbMix 10, Nemotron 5) against the account's
   1,000-per-5-minutes quota; 8 hosts x 4 producers x 4 sources (~1,470)
@@ -189,26 +189,57 @@ State is dynamic; verify it before relying on this section.
   - recalibrate with `yx-pretrain calibrate-mix` before a campaign.
   scripts/fleet.sh is the control-plane helper (parallel per-worker ssh,
   keepalives, hard cap; verify idle with `procs`). Device levers at
-  8k (40-step p10 vs 1,660.8): kda.conv_impl=shifted -2.9% (adopted in
-  the 1B model config after a 200-step deterministic overlay within
-  +-2.6e-3), muon_ns_bf16 -1.6% (numerics gate pending; changes the
+  8k (40-step p10 vs 1,660.8): kda.conv_impl=shifted -2.9% (-2.8% in
+  the adoption run; adopted in the 1B model config after a 200-step
+  deterministic overlay within +-2.6e-3), muon_ns_bf16 -1.6% (numerics gate pending; changes the
   optimizer pytree), muon_distributed_ns +1.7% (rejected at 1B too),
   kda.conv_impl=fused (conv + SiLU folded into the v4 kernel,
   pallas_kda_fused_v4_conv, gate benchmarks/verify_kda_v4_conv_fold.py:
   forward/state/decay/beta bitwise, grads one bf16 ulp) -0.3% -
   correct but perf-neutral because stage A spills ~5.3 MB of registers
   at 8 streams/program and the fold's recompute pushes it past 16 MB
-  VMEM; running it at 4 streams or single-buffering the windows gives
-  back the saving. Lesson from the fold work: the v4 kernel file has
+  VMEM; running it at 4 streams (the flag's default) or single-buffering
+  the windows (YXTPU_KDA_FOLD_STAGE_A_STREAMS=8) gives back the saving.
+  Lesson from the fold work: the v4 kernel file has
   two backward kernels with IDENTICAL heads (integrated + stage A) - any
   text-anchored edit must be scoped to the function span. 8k profile (4 traced
   steps, benchmarks/summarize_xplane_step.py on xprof's converter -
   modern xprof has no xplane_pb2): duty 96.2%; dense GEMMs 44% (8% of
   it MLP remat recompute), KDA kernels 17%, KDA XLA glue ~17% (depthwise
-  conv 6.0% HBM-bound + casts 6.4% + pads/reshapes 4.2% - the biggest
-  device lever left: fold conv/casts into the v4 kernel), splash 8.4%,
+  conv 6.0% HBM-bound + casts 6.4% + pads/reshapes 4.2% - read at the
+  time as the biggest device lever left; SUPERSEDED by the fold
+  measurement above: the shifted conv took its -2.8% and the rest is not
+  recoverable on v4 without a lower-pressure stage A), splash 8.4%,
   collectives 3.7%, loss head 2.6%. MFU (model FLOPs) 25.7% at 4k /
   24.2% at 8k; parameter-only convention 24.5% / 22.1%.
+- Review fixes 2026-08-18 (same branch): the producer pool now detects a
+  child that dies WITHOUT a Python exception (OOM kill, segfault) - the
+  queue get polls every 5 s and checks is_alive; before, the prefetch
+  thread, then the main loop, then the whole fleet blocked forever - and
+  the thread pool ships producer exceptions through its queue instead of
+  silently ending. open_streaming_dataset retries only transient errors
+  (429/5xx/connection); gated/missing repos and bad subsets fail at
+  launch (12 attempts x 300 s would have stalled every producer ~40 min).
+  Producer stagger is by within-host worker index (a global-shard
+  stagger held host 7's first batch 45 s and step 1 waits on it before
+  compile). ResolvedConfig rejects row_tokens/eval_row_tokens >
+  sequence_length (the packer would stash the row forever and emit
+  all-pad batches), conv_impl=fused with fused_in_proj (wrong layout),
+  and host_stats_interval not a multiple of log_interval (the allgather
+  only runs on logged steps). train_fixed diagnostics use the first
+  MICROBATCH of the cached batch (the whole update batch would be
+  accum x the compiled memory). vision/hidden_{visual,text}_rms were
+  renamed residual_{visual,text}_rms - the historical keys were
+  post-norm (8.31/8.31, equal by construction), the new ones pre-norm
+  (6.8/5.8): not comparable, do not overlay them. diagnostics records
+  carry `batch` (holdout|train_fixed). fleet.sh: status/launch/
+  kill-orphans recognise any yxtpu process (train, profile, benchmark,
+  calibrate-mix, sft, eval), launch refuses when one is running (it
+  removes the libtpu lockfile), commands cross the ssh hop base64-encoded.
+  Fold: DEBUG_G hooks removed, stage A at 4 streams by default, the gate
+  script asserts thresholds (exit 1), input contract checked (bf16 raw,
+  [width,H,3,D] weight, width-1 <= halo), and a CPU interpret-mode test
+  runs the whole folded custom_vjp against the XLA path.
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array

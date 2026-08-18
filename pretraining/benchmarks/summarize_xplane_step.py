@@ -64,7 +64,7 @@ def _kind(r) -> str:
   if re.search(r"jvp\((bqhd|bhqk)", scope):
     return "ViT attention einsums"
   if "conv_general_dilated" in scope and re.search(r"= bf16\[4,1,", expr):
-    return "KDA depthwise conv: weight gradient (XLA reduce, 66 GB/s)"
+    return "KDA depthwise conv: weight gradient (XLA reduce)"
   if "splash" in low or "flash_attention" in low:
     return "GQA splash attention (pallas)"
   if "kda_" in low or "pallas_kda" in low:

@@ -1,7 +1,7 @@
-import sys, wandb, numpy as np, pandas as pd
+import os, sys, wandb, numpy as np, pandas as pd
 pd.set_option("display.width", 250)
 api = wandb.Api(timeout=300)
-proj = "davidfranco2300-other/yxtpu-pretrain"
+proj = os.environ.get("WANDB_PROJECT_PATH", "<entity>/yxtpu-pretrain")  # e.g. WANDB_PROJECT_PATH=myentity/yxtpu-pretrain
 name_regex = sys.argv[1] if len(sys.argv) > 1 else "vision_1b_smoke_4k"
 runs = list(api.runs(proj, filters={"display_name": {"$regex": name_regex}}, order="-created_at"))
 r = runs[0]
