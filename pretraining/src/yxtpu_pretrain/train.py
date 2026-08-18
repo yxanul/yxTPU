@@ -44,7 +44,12 @@ from yxtpu_pretrain.runtime.checkpoints import CheckpointIO
 from yxtpu_pretrain.runtime.data import create_data_iterator
 from yxtpu_pretrain.runtime.leaf_config import make_leaf_config
 from yxtpu_pretrain.runtime.mesh import create_mesh
-from yxtpu_pretrain.runtime.metrics import MetricsWriter, NullMetricsWriter, WandbTracker
+from yxtpu_pretrain.runtime.metrics import (
+    HostMetricsWriter,
+    MetricsWriter,
+    NullMetricsWriter,
+    WandbTracker,
+)
 from yxtpu_pretrain.runtime.sharding import logical_mesh_context
 
 
@@ -805,6 +810,7 @@ def run(
             encoding="utf-8",
         )
     metrics_writer = MetricsWriter(run_dir) if is_primary else NullMetricsWriter()
+    host_metrics_writer = HostMetricsWriter(run_dir, jax.process_index())
 
     def emit(payload) -> None:
         if is_primary:
@@ -1025,6 +1031,15 @@ def run(
             if vision_metrics is not None:
                 record["vision"] = vision_metrics
             metrics_writer.write(record)
+            host_metrics_writer.write(
+                {
+                    "step": step,
+                    "step_ms": record["step_ms"],
+                    "data_wait_ms": record["data_wait_ms"],
+                    "host_to_device_ms": record["host_to_device_ms"],
+                    "prefetch_queue_depth": float(getattr(data_iterator, "queue_depth", -1)),
+                }
+            )
             emit(record)
             if step % config.experiment.log_interval == 0:
                 log_groups = {
@@ -1274,6 +1289,7 @@ def run(
         "wandb_url": tracker.url,
     }
     metrics_writer.close(summary)
+    host_metrics_writer.close()
     tracker.finish(summary=summary)
     if is_primary:
         print(json.dumps(summary, indent=2, sort_keys=True))

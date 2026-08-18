@@ -30,6 +30,31 @@ class MetricsWriter:
         )
 
 
+class HostMetricsWriter:
+    """Per-PROCESS host-path record, written by every host (the primary
+    included) to ``host_metrics.<process>.jsonl`` in its own run dir.
+
+    A stall on any host stalls every chip, and the primary's record cannot
+    tell whose it was: its own data_wait/h2d read clean while step_ms
+    carries the remote wait. Each host writes its own step, step_ms,
+    data_wait_ms, host_to_device_ms and prefetch queue depth every step -
+    ~100 bytes, no synchronization - so a stall can be localized after the
+    fact (queue depth 0 on host k at that step = its producer fell behind).
+    Join the files with benchmarks/summarize_host_metrics.py."""
+
+    def __init__(self, run_dir: Path, process_index: int):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self.path = run_dir / f"host_metrics.{process_index}.jsonl"
+        self.handle = self.path.open("a", encoding="utf-8")
+
+    def write(self, record: dict[str, Any]) -> None:
+        self.handle.write(json.dumps(record, sort_keys=True) + "\n")
+        self.handle.flush()
+
+    def close(self) -> None:
+        self.handle.close()
+
+
 class NullMetricsWriter:
     """Metrics sink for non-primary processes: metrics are replicated, so one
     written copy is the record and the rest would be per-host duplicates."""
