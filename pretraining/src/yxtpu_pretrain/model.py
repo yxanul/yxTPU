@@ -16,6 +16,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils_nnx
 
 from yxtpu_pretrain.config import ResolvedConfig
+from maxtext.utils.sharding import logical_to_mesh_axes
 from yxtpu_pretrain.kernels.attnres_pallas import pallas_hoisted_depth_read
 from yxtpu_pretrain.layers.attn_res import DepthAttnRead, hoisted_depth_read
 from yxtpu_pretrain.layers.kimi_delta_attention import KimiDeltaAttention
@@ -318,6 +319,14 @@ class HybridCycle(nnx.Module):
         self.cycle_length = len(config.model.cycle)
         self.attnres_read = config.model.attnres_read
         self.attnres_tiles = (config.model.attnres_forward_tile, config.model.attnres_backward_tile)
+        self.mesh = mesh
+        # The blocks buffer is [slots, *ACTIVATION_LOGICAL_AXES]; the fused
+        # read's Mosaic kernels are shard_mapped over the mesh with this spec.
+        self.attnres_buffer_spec = logical_to_mesh_axes(
+            (None, *ACTIVATION_LOGICAL_AXES),
+            mesh=mesh,
+            rules=leaf_config.logical_axis_rules,
+        )
         for index, kind in enumerate(config.model.cycle):
             setattr(
                 self,
@@ -370,6 +379,8 @@ class HybridCycle(nnx.Module):
                     epsilon,
                     forward_tile=forward_tile,
                     backward_tile=backward_tile,
+                    mesh=self.mesh,
+                    buffer_spec=self.attnres_buffer_spec,
                 )
             else:
                 numerators, normalizers, maxima = hoisted_depth_read(

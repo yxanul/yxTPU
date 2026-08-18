@@ -276,14 +276,41 @@ def pallas_hoisted_depth_read(
     *,
     forward_tile: int = _DEFAULT_FORWARD_TILE,
     backward_tile: int = _DEFAULT_BACKWARD_TILE,
+    mesh=None,
+    buffer_spec=None,
 ):
   """Fused ``hoisted_depth_read`` (see layers/attn_res.py): same inputs,
   same outputs ``(numerators tuple, normalizers [B,T,K], maxima [B,T,K])``,
   same gradient (buffer and folded queries; the integer index has none).
-  ``forward_tile``/``backward_tile`` are the token tiles of the kernels."""
-  return _pallas_hoisted_depth_read(
-      blocks_buffer, block_index, folded_queries, epsilon, forward_tile, backward_tile
+  ``forward_tile``/``backward_tile`` are the token tiles of the kernels.
+
+  On a sharded mesh pass ``mesh`` and the buffer's ``PartitionSpec``
+  (``[S, B, T, D]``): Mosaic kernels cannot be auto-partitioned, so the
+  call is wrapped in ``jax.shard_map`` with the block index and the folded
+  queries replicated (their cotangent is summed over the mesh by the
+  shard_map transpose, which is exactly the data-parallel gradient)."""
+  if mesh is None:
+    return _pallas_hoisted_depth_read(
+        blocks_buffer, block_index, folded_queries, epsilon, forward_tile, backward_tile
+    )
+  if buffer_spec is None or len(buffer_spec) < 4:
+    raise ValueError("buffer_spec must be the [S, B, T, D] PartitionSpec of the buffer")
+  P = jax.sharding.PartitionSpec
+  numerator_spec = P(*buffer_spec[1:4])
+  stats_spec = P(buffer_spec[1], buffer_spec[2], None)
+  sites = folded_queries.shape[-1]
+
+  @functools.partial(
+      jax.shard_map,
+      mesh=mesh,
+      in_specs=(P(*buffer_spec), P(), P()),
+      out_specs=((numerator_spec,) * sites, stats_spec, stats_spec),
+      check_vma=False,
   )
+  def sharded(buffer, index, queries):
+    return _pallas_hoisted_depth_read(buffer, index, queries, epsilon, forward_tile, backward_tile)
+
+  return sharded(blocks_buffer, jnp.asarray(block_index, jnp.int32), folded_queries)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
