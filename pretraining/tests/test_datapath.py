@@ -411,3 +411,125 @@ def test_solve_weights_reproduces_targets():
     assert 0.0 < solution["p_text"] < 1.0
     with pytest.raises(ValueError):
         parse_targets("vision=0.5,climbmix=0.6")
+
+
+# --- review fixes 2026-08-18: failure surfaces that used to hang or mislead ---
+
+
+def test_process_pool_reports_a_child_that_died_without_an_error_payload():
+    """A producer killed by the OOM killer posts no error payload; __next__
+    must raise instead of blocking the prefetch thread (and the fleet)."""
+    import multiprocessing
+
+    from yxtpu_pretrain.runtime.vision_data import ProcessPooledMixedIterator
+
+    class DeadProcess:
+        name = "vision-producer-0"
+        exitcode = -9
+
+        @staticmethod
+        def is_alive():
+            return False
+
+    pool = ProcessPooledMixedIterator.__new__(ProcessPooledMixedIterator)
+    pool._queue = multiprocessing.get_context("spawn").Queue()
+    pool._processes = [DeadProcess()]
+    pool._latest = {}
+    pool._LIVENESS_POLL_SECONDS = 0.2
+    with pytest.raises(RuntimeError, match="died without reporting an error.*exit=-9"):
+        next(pool)
+
+
+def test_thread_pool_surfaces_a_producer_exception_on_the_consumer():
+    """A producer thread that raises (a dead fetch thread, a tokenizer
+    error) ships the exception through the queue; before, the consumer
+    blocked forever on the examples that never came."""
+    from yxtpu_pretrain.runtime.vision_data import PooledMixedIterator
+
+    class BrokenSource:
+        rows_consumed = 0
+        vision_rows = 0
+        text_rows = 0
+
+        def _next_example(self):
+            raise RuntimeError("stream vision: fetch thread died")
+
+    pool = PooledMixedIterator(lambda thread: BrokenSource(), threads=1, batch_size=2)
+    with pytest.raises(RuntimeError, match="producer thread died") as info:
+        next(pool)
+    assert "fetch thread died" in str(info.value.__cause__)
+
+
+def test_open_retry_classifies_transient_and_terminal_errors():
+    from yxtpu_pretrain.runtime.data import _is_transient_open_error
+
+    class Response:
+        def __init__(self, status):
+            self.status_code = status
+            self.headers = {}
+
+    class HfHubHTTPError(Exception):
+        def __init__(self, status):
+            super().__init__(f"http {status}")
+            self.response = Response(status)
+
+    class GatedRepoError(HfHubHTTPError):
+        pass
+
+    class DatasetNotFoundError(Exception):
+        pass
+
+    assert _is_transient_open_error(HfHubHTTPError(429))
+    assert _is_transient_open_error(HfHubHTTPError(503))
+    assert _is_transient_open_error(ConnectionError("reset by peer"))
+    assert _is_transient_open_error(TimeoutError())
+    assert not _is_transient_open_error(GatedRepoError(401))
+    assert not _is_transient_open_error(HfHubHTTPError(404))
+    assert not _is_transient_open_error(DatasetNotFoundError("nope"))
+    assert not _is_transient_open_error(ValueError("BuilderConfig 'x' not found"))
+    # a transient error wrapping a terminal cause is terminal
+    wrapped = RuntimeError("open failed")
+    wrapped.__cause__ = GatedRepoError(403)
+    assert not _is_transient_open_error(wrapped)
+
+
+@pytest.mark.parametrize(
+    "override, message",
+    [
+        ("data.eval_row_tokens=128", "eval_row_tokens must not exceed"),
+        ("model.vision.text_row_tokens=128", "text_row_tokens must not exceed"),
+        ("experiment.host_stats_interval=3", "host_stats_interval must be a multiple"),
+    ],
+)
+def test_resolved_config_rejects_rows_longer_than_the_sequence_and_odd_intervals(
+    override, message
+):
+    with pytest.raises(ValueError, match=message):
+        load_config(
+            model="kda_hybrid_273m",
+            optimizer="muonclip",
+            data="synthetic",
+            hardware="v6e-8",
+            experiment="selected",
+            overrides=[
+                "data.sequence_length=64",
+                "model.vision.enabled=true",
+                "model.vision.placeholder_token_id=250",
+                "model.vision.dataset_name=HuggingFaceM4/FineVisionMax",
+                "model.vision.text_row_tokens=32",
+                "experiment.log_interval=2",
+                override,
+            ],
+        )
+
+
+def test_resolved_config_rejects_the_conv_fold_with_the_fused_projection():
+    with pytest.raises(ValueError, match="conv_impl=fused"):
+        load_config(
+            model="kda_hybrid_273m",
+            optimizer="adamw",
+            data="synthetic",
+            hardware="v6e-8",
+            experiment="selected",
+            overrides=["model.kda.conv_impl=fused", "model.kda.fused_in_proj=true"],
+        )

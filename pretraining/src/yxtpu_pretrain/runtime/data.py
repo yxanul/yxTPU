@@ -415,6 +415,49 @@ def _retry_after_seconds(error: BaseException, default: float) -> float:
     return default
 
 
+# Open failures that no amount of waiting fixes: a gated or missing repo, a
+# bad subset/split name, a config error. Retrying them (12 attempts, ~40
+# minutes) would stall every producer on the fleet where failing at launch
+# is the useful behaviour - the Nemotron 4plus_MIND gate in the 1B configs
+# is exactly this case.
+_NON_TRANSIENT_OPEN_ERROR_NAMES = frozenset(
+    {
+        "GatedRepoError",
+        "RepositoryNotFoundError",
+        "RevisionNotFoundError",
+        "EntryNotFoundError",
+        "DatasetNotFoundError",
+        "DataFilesNotFoundError",
+        "DatasetGenerationError",
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "FileNotFoundError",
+        "ImportError",
+    }
+)
+
+
+def _is_transient_open_error(error: BaseException) -> bool:
+    """True for the failures worth waiting out at open (429, 5xx, connection
+    and timeout errors); False for auth/404/config errors, which are raised
+    immediately."""
+    for exc in (error, getattr(error, "__cause__", None), getattr(error, "__context__", None)):
+        if exc is None:
+            continue
+        if type(exc).__name__ in _NON_TRANSIENT_OPEN_ERROR_NAMES:
+            return False
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        if isinstance(status, int):
+            if status == 429 or status >= 500:
+                return True
+            if status in (401, 403, 404):
+                return False
+    return True
+
+
 def open_streaming_dataset(
     name: str,
     subset: str | None = None,
@@ -442,8 +485,8 @@ def open_streaming_dataset(
     for attempt in range(1, attempts + 1):
         try:
             return load_dataset(name, subset, split=split, streaming=True)
-        except Exception as error:  # noqa: BLE001 - every open failure is retried
-            if attempt >= attempts:
+        except Exception as error:  # noqa: BLE001 - transient open failures are retried
+            if attempt >= attempts or not _is_transient_open_error(error):
                 raise
             wait = _retry_after_seconds(error, delay)
             wait = min(wait, max_backoff_seconds)

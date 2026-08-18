@@ -753,6 +753,37 @@ class ResolvedConfig(StrictModel):
                 raise ValueError("diagnostics interval must be a multiple of data.eval_interval")
         if "rows" in self.data.eval_packings and not self.data.streaming:
             raise ValueError("the rows eval packing is implemented for streaming text data")
+        # A row longer than the sequence never fits: the packer would stash
+        # it forever and emit all-pad batches without an error.
+        sequence_length = self.data.sequence_length
+        if self.data.eval_row_tokens is not None and self.data.eval_row_tokens > sequence_length:
+            raise ValueError("data.eval_row_tokens must not exceed data.sequence_length")
+        vision = self.model.vision
+        if vision.enabled and vision.dataset_name:
+            if vision.text_row_tokens > sequence_length:
+                raise ValueError("vision.text_row_tokens must not exceed data.sequence_length")
+            for source in vision.text_datasets:
+                if source.row_tokens is not None and source.row_tokens > sequence_length:
+                    raise ValueError(
+                        f"vision.text_datasets[{source.name}].row_tokens must not "
+                        "exceed data.sequence_length"
+                    )
+        if self.model.kda.conv_impl == "fused" and self.model.kda.fused_in_proj:
+            raise ValueError(
+                "kda.conv_impl=fused feeds the head-major [B,T,H,3,D] projection "
+                "to the kernel; kda.fused_in_proj produces [B,T,3,H,D] and is not "
+                "supported with the fold"
+            )
+        experiment = self.experiment
+        if (
+            experiment.host_stats_interval
+            and experiment.log_interval
+            and experiment.host_stats_interval % experiment.log_interval
+        ):
+            raise ValueError(
+                "host_stats_interval must be a multiple of log_interval (the "
+                "cross-host allgather only runs on logged steps)"
+            )
         if self.experiment.token_budget is not None:
             tokens_available = (
                 self.experiment.steps

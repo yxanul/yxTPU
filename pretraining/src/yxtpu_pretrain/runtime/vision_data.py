@@ -369,7 +369,12 @@ class MixedVisionTextIterator:
                 try:
                     stream = stream.shard(num_shards=shard_count, index=shard_index)
                 except Exception:
+                    # Fewer files than shards: every shard reads the whole
+                    # stream, so shuffle it (same seed on every shard keeps
+                    # the modulo partition disjoint) and select by ordinal.
                     base = stream
+                    if shuffle_buffer:
+                        base = base.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
                     def modulo(source):
                         for ordinal, row in enumerate(source):
@@ -780,12 +785,19 @@ class PooledMixedIterator:
             self._threads.append(worker)
 
     def _produce(self, source) -> None:
-        while True:
-            try:
-                example = source._next_example()
-            except StopIteration:
-                return
-            self._queue.put(example)
+        try:
+            while True:
+                try:
+                    example = source._next_example()
+                except StopIteration:
+                    return
+                self._queue.put(example)
+        except BaseException as error:  # noqa: BLE001 - re-raised on the consumer
+            # A dead producer must surface on the consumer instead of leaving
+            # __next__ blocked on an empty queue forever (a fetch thread that
+            # died, a tokenizer error, ...): ship the exception through the
+            # queue, where the consumer's next get() re-raises it.
+            self._queue.put(_ProducerError(error))
 
     def rows_stats(self):
         return (
@@ -810,11 +822,25 @@ class PooledMixedIterator:
         return self
 
     def __next__(self):
-        examples = [self._queue.get() for _ in range(self.batch_size)]
+        examples = []
+        for _ in range(self.batch_size):
+            example = self._queue.get()
+            if isinstance(example, _ProducerError):
+                raise RuntimeError("mixed-stream producer thread died") from example.error
+            examples.append(example)
         return {
             key: np.stack([example[key] for example in examples])
             for key in examples[0]
         }
+
+
+class _ProducerError:
+    """Queue item carrying a producer thread's exception to the consumer."""
+
+    __slots__ = ("error",)
+
+    def __init__(self, error: BaseException):
+        self.error = error
 
 
 @dataclass
@@ -835,12 +861,16 @@ class ProducerSpec:
     shuffle_seed: int
     max_images_per_row: int
     row_buffer: int
-    # Producer processes open their streams ``stagger_seconds * shard_index``
-    # after start. Every open costs ~10-15 Hub ``api`` requests (paginated
-    # repo-tree listing; ~41 per producer over the four sources) against an
-    # account quota of 1000 per 5 minutes: 8 hosts x 4 producers exhausted
-    # it on 2026-08-17 (the second launch of the day died at its first
-    # open). Keep producer_processes <= 2 on 8 hosts and spread the opens.
+    # Producer processes open their streams ``stagger_seconds * worker``
+    # after start (``worker`` is the within-host producer index; the hosts
+    # themselves already start skewed by seconds, and a global-shard stagger
+    # would hold host 7's first batch - and so the fleet's step 1, which
+    # waits on ``next(data_iterator)`` before compile - for tens of seconds).
+    # Every open costs ~10-15 Hub ``api`` requests (paginated repo-tree
+    # listing; ~41 per producer over the four sources) against an account
+    # quota of 1000 per 5 minutes: 8 hosts x 4 producers exhausted it on
+    # 2026-08-17 (the second launch of the day died at its first open).
+    # Keep producer_processes <= 2 on 8 hosts and spread the opens.
     stagger_seconds: float = 3.0
 
 
@@ -910,8 +940,8 @@ def _producer_main(
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     try:
-        if spec.stagger_seconds > 0:
-            time.sleep(spec.stagger_seconds * shard_index)
+        if spec.stagger_seconds > 0 and worker > 0:
+            time.sleep(spec.stagger_seconds * worker)
         iterator = build_mixed_iterator(spec, shard_index=shard_index, shard_count=shard_count)
         while True:
             batch = next(iterator)
@@ -975,14 +1005,35 @@ class ProcessPooledMixedIterator:
     def __iter__(self):
         return self
 
+    # How long __next__ waits on the queue between liveness checks. A child
+    # that dies without a Python exception (OOM kill, segfault, SIGTERM from
+    # the parent watchdog) posts no error payload; without the check the
+    # prefetch thread, then the main loop, then every other host in the next
+    # collective would block forever.
+    _LIVENESS_POLL_SECONDS = 5.0
+
     def __next__(self):
-        payload = self._queue.get()
-        if "error" in payload:
-            raise RuntimeError(
-                f"producer process {payload['worker']} failed:\n{payload['error']}"
-            )
-        self._latest[payload["worker"]] = payload
-        return payload["batch"]
+        while True:
+            try:
+                payload = self._queue.get(timeout=self._LIVENESS_POLL_SECONDS)
+            except queue_module.Empty:
+                dead = [
+                    (process.name, process.exitcode)
+                    for process in self._processes
+                    if not process.is_alive()
+                ]
+                if dead:
+                    raise RuntimeError(
+                        "producer process(es) died without reporting an error: "
+                        + ", ".join(f"{name} exit={code}" for name, code in dead)
+                    )
+                continue
+            if "error" in payload:
+                raise RuntimeError(
+                    f"producer process {payload['worker']} failed:\n{payload['error']}"
+                )
+            self._latest[payload["worker"]] = payload
+            return payload["batch"]
 
     @property
     def stats(self) -> dict[str, float]:
