@@ -203,20 +203,27 @@ class DepthAttnRead(nnx.Module):
     (see ``hoisted_depth_read``): folds the intra-block partial sum in as
     one more softmax slot (online-softmax merge of the two maxima), then
     normalizes. Without the partial term it is ``N_k / Z_k``."""
+    # Written as out = alpha_t N_k + beta_t P with the two PER-TOKEN scalars
+    # formed first (tiny [B, T] work), so the only full-width work is one
+    # multiply-add over [B, T, D] that XLA can keep as a single fusion with
+    # bf16 in and out - the earlier form (fp32 combine, then a broadcast
+    # divide) left several fp32 [B, T, D] temporaries and converts per site.
     dtype = numerator.dtype
-    combined = numerator.astype(jnp.float32)
     if not include_partial:
-      return (combined / normalizer[..., None]).astype(dtype)
+      alpha = 1.0 / normalizer  # [B, T]
+      return (numerator.astype(jnp.float32) * alpha[..., None]).astype(dtype)
     partial_score = self._slot_scores(partial_sum, folded_query)  # [B, T] fp32
     # The result is exactly invariant to the shift, so it carries no gradient.
     merged_max = jax.lax.stop_gradient(jnp.maximum(maximum, partial_score))
     buffer_scale = jnp.exp(maximum - merged_max)
     partial_weight = jnp.exp(partial_score - merged_max)
-    combined = combined * buffer_scale[..., None] + partial_weight[..., None] * (
-        partial_sum.astype(jnp.float32)
-    )
-    denominator = normalizer * buffer_scale + partial_weight
-    return (combined / denominator[..., None]).astype(dtype)
+    inverse_denominator = 1.0 / (normalizer * buffer_scale + partial_weight)
+    alpha = buffer_scale * inverse_denominator  # [B, T]
+    beta = partial_weight * inverse_denominator  # [B, T]
+    return (
+        numerator.astype(jnp.float32) * alpha[..., None]
+        + partial_sum.astype(jnp.float32) * beta[..., None]
+    ).astype(dtype)
 
   def read_with_scores(
       self,
