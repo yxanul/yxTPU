@@ -1,0 +1,10 @@
+{
+  "max_images_per_sequence": 4,
+  "min_visual_dependency": 0,
+  "p_text": 0.45,
+  "pipeline": "mixed_vision_text",
+  "producer_threads": 1,
+  "text_dataset": "karpathy/climbmix-400b-shuffle",
+  "text_row_tokens": 1024,
+  "vision_dataset": "HuggingFaceM4/FineVisionMax"
+}

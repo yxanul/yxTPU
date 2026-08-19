@@ -22,3 +22,6 @@ results/**/maxtext-output/
 # Large upstream regression fixtures are not needed by these TPU experiments.
 maxtext/tests/assets/
 
+
+# Local checkpoint custody (byte-verified copies; the HF repos are the public record)
+ckpt/
