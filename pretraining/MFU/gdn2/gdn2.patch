@@ -1,0 +1,503 @@
+--- src/yxtpu_pretrain/kernels/kda_fused_pallas_v4.py	2026-08-18 20:12:03
++++ MFU/gdn2/gdn2_fused_pallas_v4.py	2026-08-20 00:43:10
+@@ -1361,7 +1361,9 @@
+   chunk state machine needs; the kernels differ only in how they obtain
+   query/key/value (from refs, or from the raw refs through the fold)."""
+   log_decay = log_decay_ref[0].astype(jnp.float32)
+-  beta = beta_ref[0][..., 0].astype(jnp.float32)
++  gates = beta_ref[0].astype(jnp.float32)
++  erase_gate = gates[..., :key_dim]   # b_t, key axis   (GDN-2 Eq 8)
++  write_gate = gates[..., key_dim:]   # w_t, value axis (GDN-2 Eq 8)
+ 
+   @pl.when(chunk_index == 0)
+   def _initialize_state():
+@@ -1381,16 +1383,16 @@
+     state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
+     return
+ 
+-  key_beta = key * beta[..., None]
++  key_beta = key * erase_gate
+   system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
+   if profile_stage == "pairwise":
+     output_ref[0] = jnp.concatenate((system, intra), axis=-1).astype(output_ref.dtype)
+     state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
+     return
+ 
+-  value_beta = value * beta[..., None]
+-  w_input = key_beta * jnp.exp(cumulative_decay)
+-  combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
++  value_beta = value * write_gate
++  erase_rhs = key_beta * jnp.exp(cumulative_decay)
++  combined_rhs = jnp.concatenate((value_beta, erase_rhs), axis=-1)
+   if solve_method == "blocked":
+     solved = _solve_unit_lower_triangular(system, combined_rhs)
+   elif solve_method == "doubling":
+@@ -1402,9 +1404,9 @@
+   else:
+     raise ValueError(f"unknown solve method: {solve_method}")
+   u = solved[..., :value_dim]
+-  w = solved[..., value_dim : value_dim + key_dim]
++  y_aux = solved[..., value_dim : value_dim + key_dim]
+   if profile_stage == "solve":
+-    output_ref[0] = (u + w).astype(output_ref.dtype)
++    output_ref[0] = (u + y_aux).astype(output_ref.dtype)
+     state_after_ref[0, :, 0] = state_scratch_ref[...].astype(jnp.float32)
+     return
+ 
+@@ -1414,7 +1416,7 @@
+   # independent dot products, so splitting the stacked result is bit-identical
+   # to the two separate half-height matmuls it replaces.
+   stacked_state_reads = _state_matmul(
+-      jnp.concatenate((query_with_decay, w), axis=-2),
++      jnp.concatenate((query_with_decay, y_aux), axis=-2),
+       state,
+   )
+   inter_output = stacked_state_reads[..., :chunk_size, :]
+@@ -1465,7 +1467,9 @@
+   key_input = key_ref[0]
+   value = value_ref[0].astype(jnp.float32)
+   log_decay = log_decay_ref[0].astype(jnp.float32)
+-  beta = beta_ref[0][..., 0].astype(jnp.float32)
++  gates = beta_ref[0].astype(jnp.float32)
++  erase_gate = gates[..., :key_dim]   # b_t, key axis   (GDN-2 Eq 8)
++  write_gate = gates[..., key_dim:]   # w_t, value axis (GDN-2 Eq 8)
+   output_cotangent = output_cotangent_ref[0].astype(jnp.float32)
+ 
+   @pl.when(reverse_chunk_index == 0)
+@@ -1491,11 +1495,11 @@
+ 
+   cumulative_decay = _inclusive_cumsum(log_decay)
+   cumulative_decay_exp = jnp.exp(cumulative_decay)
+-  key_beta = key * beta[..., None]
+-  value_beta = value * beta[..., None]
++  key_beta = key * erase_gate
++  value_beta = value * write_gate
+   system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
+-  w_input = key_beta * cumulative_decay_exp
+-  combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
++  erase_rhs = key_beta * cumulative_decay_exp
++  combined_rhs = jnp.concatenate((value_beta, erase_rhs), axis=-1)
+   if _SOLVE_METHOD == "inverse":
+     # One formation serves both the forward recompute here and the transposed
+     # solve below; the transpose of the inverse is free inside the matmul.
+@@ -1518,14 +1522,14 @@
+     system_inverse = None
+     solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
+   u = solved[..., :value_dim]
+-  w = solved[..., value_dim : value_dim + key_dim]
++  y_aux = solved[..., value_dim : value_dim + key_dim]
+ 
+   final_decay = cumulative_decay[..., -1, :]
+   final_decay_exp = jnp.exp(final_decay)
+   state_decay_exp = jnp.exp(final_decay[..., None, :] - cumulative_decay)
+   query_with_decay = query * cumulative_decay_exp
+   key_for_state = key * state_decay_exp
+-  corrected_value = u - _state_matmul(w, state)
++  corrected_value = u - _state_matmul(y_aux, state)
+ 
+   state_cotangent_next = state_cotangent_scratch_ref[...].astype(jnp.float32)
+   state_cotangent = state_cotangent_next * final_decay_exp[..., :, None]
+@@ -1543,9 +1547,9 @@
+       _transpose(query_with_decay), output_cotangent
+   )
+   u_cotangent = corrected_value_cotangent
+-  w_cotangent = -_state_matmul(corrected_value_cotangent, _transpose(state))
++  y_aux_cotangent = -_state_matmul(corrected_value_cotangent, _transpose(state))
+   state_cotangent = state_cotangent - _state_matmul(
+-      _transpose(w), corrected_value_cotangent
++      _transpose(y_aux), corrected_value_cotangent
+   )
+   state_cotangent_scratch_ref[...] = state_cotangent
+   state_before_cotangent_ref[0, :, 0] = state_cotangent
+@@ -1563,7 +1567,7 @@
+     key_cotangent_ref[0] = key_bar.astype(key_cotangent_ref.dtype)
+     value_cotangent_ref[0] = value_bar.astype(value_cotangent_ref.dtype)
+     log_decay_cotangent_ref[0] = decay_bar.astype(log_decay_cotangent_ref.dtype)
+-    beta_cotangent_ref[0, ..., 0] = beta_bar.astype(beta_cotangent_ref.dtype)
++    beta_cotangent_ref[0] = beta_bar.astype(beta_cotangent_ref.dtype)
+ 
+   if profile_stage == "reverse_state":
+     write_profile_outputs(
+@@ -1571,11 +1575,11 @@
+         key_cotangent,
+         u_cotangent,
+         cumulative_decay_cotangent,
+-        jnp.zeros_like(beta),
++        jnp.zeros_like(gates),
+     )
+     return
+ 
+-  solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
++  solved_cotangent = jnp.concatenate((u_cotangent, y_aux_cotangent), axis=-1)
+   if _SOLVE_METHOD == "inverse":
+     # The MXU consumes the transposed inverse directly through the contraction
+     # dimension numbers; materializing the [64, 64] transpose first is a
+@@ -1609,16 +1613,16 @@
+       k=-1,
+   )
+   value_beta_cotangent = combined_rhs_cotangent[..., :value_dim]
+-  w_input_cotangent = combined_rhs_cotangent[..., value_dim : value_dim + key_dim]
+-  key_beta_cotangent = w_input_cotangent * cumulative_decay_exp
+-  cumulative_decay_cotangent = cumulative_decay_cotangent + w_input_cotangent * w_input
++  erase_rhs_cotangent = combined_rhs_cotangent[..., value_dim : value_dim + key_dim]
++  key_beta_cotangent = erase_rhs_cotangent * cumulative_decay_exp
++  cumulative_decay_cotangent = cumulative_decay_cotangent + erase_rhs_cotangent * erase_rhs
+   if profile_stage == "solve_vjp":
+     write_profile_outputs(
+         query_cotangent,
+         key_beta_cotangent,
+         value_beta_cotangent,
+         cumulative_decay_cotangent,
+-        jnp.zeros_like(beta),
++        jnp.zeros_like(gates),
+     )
+     return
+ 
+@@ -1656,14 +1660,17 @@
+         key_cotangent,
+         value_beta_cotangent,
+         cumulative_decay_cotangent,
+-        jnp.zeros_like(beta),
++        jnp.zeros_like(gates),
+     )
+     return
+ 
+-  value_cotangent = value_beta_cotangent * beta[..., None]
+-  beta_cotangent = jnp.sum(value_beta_cotangent * value, axis=-1)
+-  key_cotangent = key_cotangent + key_beta_cotangent * beta[..., None]
+-  beta_cotangent = beta_cotangent + jnp.sum(key_beta_cotangent * key, axis=-1)
++  value_cotangent = value_beta_cotangent * write_gate      # dV = dZ (.) W   Eq 73
++  write_gate_cotangent = value_beta_cotangent * value      # dW = dZ (.) V   Eq 73
++  key_cotangent = key_cotangent + key_beta_cotangent * erase_gate  # dK += dE'(.)B  Eq 75
++  erase_gate_cotangent = key_beta_cotangent * key          # dB = dE' (.) K  Eq 74
++  beta_cotangent = jnp.concatenate(
++      (erase_gate_cotangent, write_gate_cotangent), axis=-1
++  )
+   log_decay_cotangent = _reverse_inclusive_cumsum(cumulative_decay_cotangent)
+ 
+   query_normalized_cotangent = query_cotangent * (1.0 / math.sqrt(key_dim))
+@@ -1685,7 +1692,7 @@
+   key_cotangent_ref[0] = key_cotangent.astype(key_cotangent_ref.dtype)
+   value_cotangent_ref[0] = value_cotangent.astype(value_cotangent_ref.dtype)
+   log_decay_cotangent_ref[0] = log_decay_cotangent
+-  beta_cotangent_ref[0, ..., 0] = beta_cotangent
++  beta_cotangent_ref[0] = beta_cotangent
+ 
+ 
+ def _kda_backward_stage_a_kernel(
+@@ -1866,7 +1873,9 @@
+   kernels: the reverse recompute-and-solve pass on the activated chunk
+   values, exporting the per-chunk intermediates stage B consumes."""
+   log_decay = log_decay_ref[0].astype(jnp.float32)
+-  beta = beta_ref[0][..., 0].astype(jnp.float32)
++  gates = beta_ref[0].astype(jnp.float32)
++  erase_gate = gates[..., :key_dim]   # b_t, key axis   (GDN-2 Eq 8)
++  write_gate = gates[..., key_dim:]   # w_t, value axis (GDN-2 Eq 8)
+   output_cotangent = output_cotangent_ref[0].astype(jnp.float32)
+ 
+   @pl.when(reverse_chunk_index == 0)
+@@ -1889,11 +1898,11 @@
+ 
+   cumulative_decay = _inclusive_cumsum(log_decay)
+   cumulative_decay_exp = jnp.exp(cumulative_decay)
+-  key_beta = key * beta[..., None]
+-  value_beta = value * beta[..., None]
++  key_beta = key * erase_gate
++  value_beta = value * write_gate
+   system, intra = _decayed_pairwise_pair(key_beta, query, key, cumulative_decay)
+-  w_input = key_beta * cumulative_decay_exp
+-  combined_rhs = jnp.concatenate((value_beta, w_input), axis=-1)
++  erase_rhs = key_beta * cumulative_decay_exp
++  combined_rhs = jnp.concatenate((value_beta, erase_rhs), axis=-1)
+   if _SOLVE_METHOD == "inverse":
+     system_inverse = _unit_lower_inverse(system)
+     if _SOLVE_INVERSE_PASSES == 3:
+@@ -1914,14 +1923,14 @@
+     system_inverse = None
+     solved = _solve_unit_lower_triangular_doubling(system, combined_rhs)
+   u = solved[..., :value_dim]
+-  w = solved[..., value_dim : value_dim + key_dim]
++  y_aux = solved[..., value_dim : value_dim + key_dim]
+ 
+   final_decay = cumulative_decay[..., -1, :]
+   final_decay_exp = jnp.exp(final_decay)
+   state_decay_exp = jnp.exp(final_decay[..., None, :] - cumulative_decay)
+   query_with_decay = query * cumulative_decay_exp
+   key_for_state = key * state_decay_exp
+-  corrected_value = u - _state_matmul(w, state)
++  corrected_value = u - _state_matmul(y_aux, state)
+ 
+   state_cotangent_next = state_cotangent_scratch_ref[...].astype(jnp.float32)
+   state_cotangent = state_cotangent_next * final_decay_exp[..., :, None]
+@@ -1945,9 +1954,9 @@
+       _transpose(query_with_decay), output_cotangent
+   )
+   u_cotangent = corrected_value_cotangent
+-  w_cotangent = -_state_matmul(corrected_value_cotangent, _transpose(state))
++  y_aux_cotangent = -_state_matmul(corrected_value_cotangent, _transpose(state))
+   state_cotangent = state_cotangent - _state_matmul(
+-      _transpose(w), corrected_value_cotangent
++      _transpose(y_aux), corrected_value_cotangent
+   )
+   state_cotangent_scratch_ref[...] = state_cotangent
+   state_before_cotangent_ref[0, :, 0] = state_cotangent
+@@ -1960,7 +1969,7 @@
+   final_decay_cotangent = jnp.sum(state_decay_cotangent, axis=-2)
+   final_decay_cotangent = final_decay_cotangent + final_decay_exp_cotangent * final_decay_exp
+ 
+-  solved_cotangent = jnp.concatenate((u_cotangent, w_cotangent), axis=-1)
++  solved_cotangent = jnp.concatenate((u_cotangent, y_aux_cotangent), axis=-1)
+   if _SOLVE_METHOD == "inverse":
+     # The MXU consumes the transposed inverse directly through the contraction
+     # dimension numbers; materializing the [64, 64] transpose first is a
+@@ -1994,9 +2003,9 @@
+       k=-1,
+   )
+   value_beta_cotangent = combined_rhs_cotangent[..., :value_dim]
+-  w_input_cotangent = combined_rhs_cotangent[..., value_dim : value_dim + key_dim]
+-  key_beta_cotangent = w_input_cotangent * cumulative_decay_exp
+-  cumulative_decay_cotangent = cumulative_decay_cotangent + w_input_cotangent * w_input
++  erase_rhs_cotangent = combined_rhs_cotangent[..., value_dim : value_dim + key_dim]
++  key_beta_cotangent = erase_rhs_cotangent * cumulative_decay_exp
++  cumulative_decay_cotangent = cumulative_decay_cotangent + erase_rhs_cotangent * erase_rhs
+ 
+   query_partial_ref[0] = query_cotangent
+   key_partial_ref[0] = key_cotangent
+@@ -2198,7 +2207,9 @@
+   else:
+     scale = lambda value, thunk: value * thunk()  # noqa: E731
+     query_scale, key_scale, value_scale = cotangent_scales
+-  beta = beta_ref[0][..., 0].astype(jnp.float32)
++  gates = beta_ref[0].astype(jnp.float32)
++  erase_gate = gates[..., :key_dim]   # b_t, key axis   (GDN-2 Eq 8)
++  write_gate = gates[..., key_dim:]   # w_t, value axis (GDN-2 Eq 8)
+   streams, chunk, _ = query_input.shape
+   flags = set(inputs_mode.split("+"))
+   if "zeros_all" in flags:
+@@ -2228,7 +2239,7 @@
+     query_inverse_norm = jnp.ones_like(query_normalized[..., :1])
+     key_inverse_norm = jnp.ones_like(key[..., :1])
+     query = query_normalized * (1.0 / math.sqrt(key_dim))
+-  key_beta = key * beta[..., None]
++  key_beta = key * erase_gate
+ 
+   if "no_system" not in flags and "no_intra" not in flags:
+     # The production path: both VJPs share the right operand, the decay, and
+@@ -2303,14 +2314,17 @@
+         value_cotangent_ref.dtype
+     )
+     log_decay_cotangent_ref[0] = cumulative_decay_cotangent
+-    beta_cotangent_ref[0, ..., 0] = jnp.zeros((streams, chunk), jnp.float32)
++    beta_cotangent_ref[0] = jnp.zeros_like(gates)
+     return
+ 
+   value_beta_cotangent = value_beta_cotangent_ref[0]
+-  value_cotangent = value_beta_cotangent * beta[..., None]
+-  beta_cotangent = jnp.sum(value_beta_cotangent * value, axis=-1)
+-  key_cotangent = key_cotangent + key_beta_cotangent * beta[..., None]
+-  beta_cotangent = beta_cotangent + jnp.sum(key_beta_cotangent * key, axis=-1)
++  value_cotangent = value_beta_cotangent * write_gate      # dV = dZ (.) W   Eq 73
++  write_gate_cotangent = value_beta_cotangent * value      # dW = dZ (.) V   Eq 73
++  key_cotangent = key_cotangent + key_beta_cotangent * erase_gate  # dK += dE'(.)B  Eq 75
++  erase_gate_cotangent = key_beta_cotangent * key          # dB = dE' (.) K  Eq 74
++  beta_cotangent = jnp.concatenate(
++      (erase_gate_cotangent, write_gate_cotangent), axis=-1
++  )
+   log_decay_cotangent = _reverse_inclusive_cumsum(cumulative_decay_cotangent)
+ 
+   query_normalized_cotangent = query_cotangent * (1.0 / math.sqrt(key_dim))
+@@ -2332,7 +2346,7 @@
+   key_cotangent_ref[0] = scale(key_cotangent, key_scale).astype(key_cotangent_ref.dtype)
+   value_cotangent_ref[0] = scale(value_cotangent, value_scale).astype(value_cotangent_ref.dtype)
+   log_decay_cotangent_ref[0] = log_decay_cotangent
+-  beta_cotangent_ref[0, ..., 0] = beta_cotangent
++  beta_cotangent_ref[0] = beta_cotangent
+ 
+ 
+ def _kda_conv_silu_vjp_kernel(
+@@ -2341,7 +2355,7 @@
+     raw_ref,
+     raw_prev_ref,
+     weight_ref,
+-    raw_cotangent_ref,
++    ray_aux_cotangent_ref,
+     weight_cotangent_ref,
+     *,
+     conv_width: int,
+@@ -2372,12 +2386,12 @@
+   if match_xla_rounding:
+     weight = weight.astype(jnp.bfloat16).astype(jnp.float32)
+   g_ext = jnp.concatenate((g, g_next), axis=1)
+-  raw_cotangent = None
++  ray_aux_cotangent = None
+   for tap in range(conv_width):
+     start = (conv_width - 1) - tap
+     term = g_ext[:, start : start + chunk, :] * weight[:, tap][:, None, :]
+-    raw_cotangent = term if raw_cotangent is None else raw_cotangent + term
+-  raw_cotangent_ref[0] = raw_cotangent.astype(raw_cotangent_ref.dtype)
++    ray_aux_cotangent = term if ray_aux_cotangent is None else ray_aux_cotangent + term
++  ray_aux_cotangent_ref[0] = ray_aux_cotangent.astype(ray_aux_cotangent_ref.dtype)
+ 
+   @pl.when(chunk_index == 0)
+   def _initialize_weight_cotangent():
+@@ -2454,8 +2468,11 @@
+     raise ValueError(f"incompatible value shape: {value.shape}")
+   if log_decay.shape != query.shape:
+     raise ValueError(f"incompatible log-decay shape: {log_decay.shape}")
+-  if beta.shape != (batch, sequence_length, heads):
+-    raise ValueError(f"incompatible beta shape: {beta.shape}")
++  if beta.shape != (batch, sequence_length, heads, key_dim + value_dim):
++    raise ValueError(
++        f"incompatible gate shape: {beta.shape}; Gated Delta Rule-2 expects the "
++        f"concatenated [b | w] gates as [B,T,H,K+V]"
++    )
+   if initial_state.shape != (batch, heads, key_dim, value_dim):
+     raise ValueError(f"incompatible initial state shape: {initial_state.shape}")
+   if sequence_length % chunk_size:
+@@ -2497,7 +2514,7 @@
+       ),
+   )
+   beta_spec = pl.BlockSpec(
+-      block_shape=(1, streams_per_program, chunk_size, 1),
++      block_shape=(1, streams_per_program, chunk_size, key_dim + value_dim),
+       index_map=lambda batch_group, head_group, chunk_index: (
+           batch_group,
+           head_group,
+@@ -2542,7 +2559,9 @@
+       log_decay.astype(jnp.float32)
+       .transpose(0, 2, 1, 3)
+       .reshape(1, streams, sequence_length, key_dim),
+-      beta.astype(jnp.float32).transpose(0, 2, 1).reshape(1, streams, sequence_length, 1),
++      beta.astype(jnp.float32)
++      .transpose(0, 2, 1, 3)
++      .reshape(1, streams, sequence_length, key_dim + value_dim),
+       initial_state.astype(jnp.float32).reshape(1, streams, key_dim, value_dim),
+   ]
+   in_specs = [qkv_spec, qkv_spec, value_spec, qkv_spec, beta_spec, initial_state_spec]
+@@ -2658,7 +2677,7 @@
+       ),
+   )
+   reverse_beta_spec = pl.BlockSpec(
+-      block_shape=(1, streams_per_program, chunk_size, 1),
++      block_shape=(1, streams_per_program, chunk_size, key_dim + value_dim),
+       index_map=lambda batch_group, head_group, reverse_chunk_index: (
+           batch_group,
+           head_group,
+@@ -2703,7 +2722,9 @@
+   log_decay_t = (
+       log_decay.astype(jnp.float32).transpose(0, 2, 1, 3).reshape(*stream_shape, key_dim)
+   )
+-  beta_t = beta.astype(jnp.float32).transpose(0, 2, 1).reshape(*stream_shape, 1)
++  beta_t = beta.astype(jnp.float32).transpose(0, 2, 1, 3).reshape(
++      *stream_shape, key_dim + value_dim
++  )
+   state_history_t = state_history.transpose(0, 2, 1, 3, 4).reshape(
+       1, streams, num_chunks, key_dim, value_dim
+   )
+@@ -2803,7 +2824,7 @@
+       unstream(key_cotangent_t, key_dim),
+       unstream(value_cotangent_t, value_dim),
+       unstream(log_decay_cotangent_t, key_dim),
+-      unstream(beta_cotangent_t, 1)[..., 0],
++      unstream(beta_cotangent_t, key_dim + value_dim),
+       state_before_cotangent_t.reshape(batch, heads, num_chunks, key_dim, value_dim)[
+           :, :, 0
+       ],
+@@ -2928,7 +2949,9 @@
+   log_decay_t = (
+       log_decay.astype(jnp.float32).transpose(0, 2, 1, 3).reshape(*stream_shape, key_dim)
+   )
+-  beta_t = beta.astype(jnp.float32).transpose(0, 2, 1).reshape(*stream_shape, 1)
++  beta_t = beta.astype(jnp.float32).transpose(0, 2, 1, 3).reshape(
++      *stream_shape, key_dim + value_dim
++  )
+   state_history_t = state_history.transpose(0, 2, 1, 3, 4).reshape(
+       1, streams, num_chunks, key_dim, value_dim
+   )
+@@ -3056,7 +3079,7 @@
+               chunk_spec(key_dim, True, spp_a),
+               chunk_spec(value_dim, True, spp_a),
+               chunk_spec(key_dim, True, spp_a),
+-              chunk_spec(1, True, spp_a),
++              chunk_spec(key_dim + value_dim, True, spp_a),
+               state_spec_for(spp_a),
+               previous_state_spec_for(spp_a),
+               chunk_spec(value_dim, True, spp_a),
+@@ -3147,7 +3170,7 @@
+               chunk_spec(key_dim, False),
+               chunk_spec(key_dim, False),
+               chunk_spec(value_dim, False),
+-              chunk_spec(1, False),
++              chunk_spec(key_dim + value_dim, False),
+               chunk_spec(key_dim, False),
+               chunk_spec(key_dim, False),
+               chunk_spec(key_dim, False),
+@@ -3164,7 +3187,7 @@
+               chunk_spec(key_dim, False),
+               chunk_spec(value_dim, False),
+               chunk_spec(key_dim, False),
+-              chunk_spec(1, False),
++              chunk_spec(key_dim + value_dim, False),
+           ),
+           scratch_shapes=(),
+       ),
+@@ -3173,7 +3196,7 @@
+           jax.ShapeDtypeStruct(chunk_qkv_shape, key.dtype),
+           jax.ShapeDtypeStruct(chunk_value_shape, value.dtype),
+           jax.ShapeDtypeStruct(chunk_qkv_shape, log_decay.dtype),
+-          jax.ShapeDtypeStruct((*stream_shape, 1), beta.dtype),
++          jax.ShapeDtypeStruct((*stream_shape, key_dim + value_dim), beta.dtype),
+       ),
+       compiler_params=pltpu.CompilerParams(
+           dimension_semantics=("parallel", "parallel", "arbitrary"),
+@@ -3206,7 +3229,7 @@
+         unstream(key_cotangent_t, key_dim),
+         unstream(value_cotangent_t, value_dim),
+         unstream(log_decay_cotangent_t, key_dim),
+-        unstream(beta_cotangent_t, 1)[..., 0],
++        unstream(beta_cotangent_t, key_dim + value_dim),
+         state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
+     )
+ 
+@@ -3216,14 +3239,14 @@
+       block_shape=(1, streams_per_program, conv_width, key_dim),
+       index_map=lambda bg, hg, ci: (0, hg, 0, 0),
+   )
+-  raw_cotangents = []
++  ray_aux_cotangents = []
+   weight_cotangents = []
+   for conv_cotangent_t, raw_t, stream_weight in zip(
+       (query_cotangent_t, key_cotangent_t, value_cotangent_t),
+       (query_t, key_t, value_t),
+       stream_weights,
+   ):
+-    raw_cotangent_t, weight_cotangent_t = pl.pallas_call(
++    ray_aux_cotangent_t, weight_cotangent_t = pl.pallas_call(
+         functools.partial(
+             _kda_conv_silu_vjp_kernel,
+             conv_width=conv_width,
+@@ -3253,19 +3276,19 @@
+         ),
+         name="kda_conv_silu_vjp",
+     )(conv_cotangent_t, conv_cotangent_t, raw_t, raw_t, stream_weight)
+-    raw_cotangents.append(unstream(raw_cotangent_t, key_dim))
++    ray_aux_cotangents.append(unstream(ray_aux_cotangent_t, key_dim))
+     weight_cotangents.append(
+         weight_cotangent_t.reshape(batch, heads, conv_width, key_dim).sum(axis=0)
+     )
+   # [3][H, width, D] -> [width, H, 3, D]
+   conv_weight_cotangent = jnp.stack(weight_cotangents, axis=0).transpose(2, 1, 0, 3)
+   return (
+-      raw_cotangents[0],
+-      raw_cotangents[1],
+-      raw_cotangents[2],
++      ray_aux_cotangents[0],
++      ray_aux_cotangents[1],
++      ray_aux_cotangents[2],
+       conv_weight_cotangent.astype(conv_weight.dtype),
+       unstream(log_decay_cotangent_t, key_dim),
+-      unstream(beta_cotangent_t, 1)[..., 0],
++      unstream(beta_cotangent_t, key_dim + value_dim),
+       state_before_cotangent_t.reshape(batch, heads, key_dim, value_dim),
+   )
+ 
