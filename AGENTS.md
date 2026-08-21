@@ -58,8 +58,10 @@ State is dynamic; verify it before relying on this section.
   this is the grant's only on-demand row.
 - Runtime: `tpu-ubuntu2204-base`
 - Created: 2026-07-22
-- Last verified: 2026-07-22 — queued resource `ACTIVE`; node `READY` and
-  `HEALTHY`. `guaranteed: {}` (the on-demand tier) confirmed on the resource.
+- Last verified: 2026-08-21 — queued resource `ACTIVE`; node `READY` and
+  `HEALTHY`; `acceleratorConfig` topology `2x4x4`, type `V4`, 8 network
+  endpoints (a 4x4x4 would be 64 chips = v4-128, not this slice).
+  `guaranteed: {}` (the on-demand tier) confirmed on the resource.
   On-demand provisioned on the first attempt, unlike the four reclaimed v6e
   Spot attempts the same day.
 - Benchmarks 2026-07-22 (synthetic, selected profile, pure data parallel
@@ -287,6 +289,38 @@ State is dynamic; verify it before relying on this section.
   with `pgrep -f "yx-pretrain train"` matched the ssh command itself and
   cut the session (255 retries) - ALWAYS bracket the pattern
   (`"[y]x-pretrain train"`), as the AGENTS rule says.
+- Fleet control-plane latency fixed 2026-08-21 (scripts/fleet.sh): routine
+  fleet checks took MINUTES for commands that should be instant, from two
+  causes. (1) `_one`'s watchdog subshell inherited the command
+  substitution's stdout; `kill $wd` killed the subshell but ORPHANED its
+  `sleep $SSH_TIMEOUT`, which held the pipe open, so `out=$( )` blocked for
+  the FULL timeout however fast ssh returned - i.e. FLEET_SSH_TIMEOUT was a
+  hard FLOOR, not a cap, and raising it to 280 s for a `du` bought a
+  guaranteed 280 s wait on every call. Fixed by redirecting the watchdog to
+  /dev/null and `pkill -P $wd` before killing it. (2) `gcloud compute tpus
+  tpu-vm ssh` costs ~6 s per worker even for `echo hi` (CLI start + a TPU
+  API describe round trip + handshake). fleet.sh now defaults to a
+  MULTIPLEXED DIRECT SSH to the worker external IPs
+  (ControlMaster/ControlPersist 10m, key ~/.ssh/google_compute_engine, IP
+  list cached under ~/.cache/yxtpu/): 1.99 s first call, 0.30 s after.
+  Measured all-8-workers wall time 0.45-0.65 s vs ~250 s before; `launch`
+  returns cleanly in 3.7 s instead of being cut at its 25 s cap. After a
+  reset/reprovision the external IPs change - re-read them with
+  `FLEET_REFRESH_IPS=1`; `FLEET_FAST=0` forces the old gcloud path. NOTE
+  macOS ships bash 3.2: no `mapfile`/`readarray` in this script.
+- Worker checkpoint storage reclaimed 2026-08-21: `~/yxtpu_ckpts` (41 GB,
+  26 GB on w3) and `~/yxtpu_sft_ckpts` (16 GB, 24 GB on w3) deleted on all 8
+  workers; disks went 7-9 GB free (91-93% full) -> 57-76 GB free (23-43%).
+  Safe because training is pure DATA PARALLEL, so weights are replicated and
+  each host's orbax checkpoint is a COMPLETE self-sufficient train state, not
+  a shard: local ckpt/vision-1b-cont30b/57220 verified to carry the full
+  pytree (646 entries, model + optimizer, all 4 cycle layers) in one
+  ocdbt.process_0 store. The 8 worker copies were redundant replicas. A
+  64 GB tmpfs is now mounted at /mnt/ram on every worker WITH an /etc/fstab
+  entry (it was silently absent since the 2026-08-17 reset reboot, so
+  anything writing there - GOLD.md's data plane, the vision post-train
+  manifest - was landing on the root disk instead of RAM). Workers have
+  400 GiB RAM with ~3 GiB used and no swap.
 - Batch prefetch 2026-07-23 (commit 0b3ba3d): the loop now stages batch i+1
   between dispatching step i and blocking on it, hiding the ~70 ms/step
   host-to-device path (data_wait is ~0.3 ms; the cost is global-array
@@ -346,10 +380,12 @@ State is dynamic; verify it before relying on this section.
   2026-07-29: the authoritative copies are LOCAL - ckpt/95500 (full orbax
   train state, byte-verified against the host copy and load-validated on
   CPU 2026-07-23) and ckpt/sft/1392 (the SFT run's final pickle, likewise
-  byte-verified). /home/a1111/yxtpu_ckpts and yxtpu_sft_ckpts no longer
-  exist on the workers (~81 GB free per host, 60 GB on the worker-3
-  logger); intermediate rotations (19073..76427) were already gone before
-  the export.
+  byte-verified). /home/a1111/yxtpu_ckpts and yxtpu_sft_ckpts were emptied
+  THEN (~81 GB free per host, 60 GB on the worker-3 logger); intermediate
+  rotations (19073..76427) were already gone before the export. SUPERSEDED:
+  the vision-1b campaign refilled both directories in August and they were
+  deleted again on 2026-08-21 - see the storage entry above for the
+  current state.
 - SFT stage bootstrapped 2026-07-23/24 (commits 3163483..6a4a457, module
   pretraining/src/yxtpu_pretrain/sft/): 12 chat specials on the free padded
   ids 128001-128012 (K2.5-style roles + im_middle/im_end + single-token
@@ -527,8 +563,11 @@ gcloud compute tpus tpu-vm describe yxtpu-v4-64-train \
   --zone=us-central2-b
 ```
 
-Connect (multi-host slice: plain ssh lands on worker 0; use `--worker=all
---command="..."` to run on every host):
+Connect. For anything scripted use `pretraining/scripts/fleet.sh` instead
+of raw gcloud: it fans out over a multiplexed direct ssh and answers all 8
+workers in ~0.5 s, where `gcloud ... ssh` costs ~6 s per worker. Raw gcloud
+(plain ssh lands on worker 0; `--worker=all --command="..."` runs on every
+host):
 
 ```bash
 gcloud compute tpus tpu-vm ssh yxtpu-v4-64-train \
