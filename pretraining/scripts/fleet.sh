@@ -23,6 +23,13 @@
 #   scripts/fleet.sh kill-orphans                # spawned producers whose trainer is gone
 #   scripts/fleet.sh health                      # healthagent RSS + kernel OOM-log growth
 #   FLEET_WORKERS="0 3" scripts/fleet.sh status  # subset
+#
+# Speed: commands go over a MULTIPLEXED DIRECT SSH to the worker's external
+# IP, not through `gcloud compute tpus tpu-vm ssh`. All 8 workers answer a
+# trivial command in ~0.5 s; the gcloud wrapper costs ~6 s PER worker before
+# the command even starts. After a reset/reprovision the IPs change:
+#   FLEET_REFRESH_IPS=1 scripts/fleet.sh status
+# FLEET_FAST=0 forces the gcloud path if the direct route is ever blocked.
 set -uo pipefail
 
 TPU_NAME="${TPU_NAME:-yxtpu-v4-64-train}"
@@ -36,13 +43,60 @@ SSH_OPTS=(-o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=
 # trick keeps grep from matching itself).
 TRAINER_PATTERN='[y]x-pretrain|[y]xtpu_pretrain'
 
+# FAST PATH. `gcloud compute tpus tpu-vm ssh` costs ~6 s per call even for
+# `echo hi` (CLI start + a TPU API describe round trip + the handshake). A
+# direct ssh to the worker's external IP with connection multiplexing is
+# ~2 s for the first call and ~0.3 s for every one after, because the master
+# connection is reused. The IP list is cached; gcloud is used only to refresh
+# it, and only when the cache is missing or FLEET_REFRESH_IPS is set.
+#   FLEET_FAST=0          force the gcloud path
+#   FLEET_REFRESH_IPS=1   re-read the IPs (needed after a reset/reprovision)
+FLEET_FAST="${FLEET_FAST:-1}"
+SSH_KEY="${FLEET_SSH_KEY:-$HOME/.ssh/google_compute_engine}"
+SSH_USER="${FLEET_SSH_USER:-$(id -un)}"
+IP_CACHE="${FLEET_IP_CACHE:-$HOME/.cache/yxtpu/fleet-ips-$TPU_NAME}"
+CM_DIR="$HOME/.ssh/cm"
+FAST_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+           -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10
+           -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+           -o ControlMaster=auto -o ControlPath="$CM_DIR/%r@%h:%p" -o ControlPersist=10m)
+
+_ips() {  # cached worker -> external IP map, one per line in worker order
+  if [ ! -s "$IP_CACHE" ] || [ -n "${FLEET_REFRESH_IPS:-}" ]; then
+    mkdir -p "$(dirname "$IP_CACHE")" "$CM_DIR" 2>/dev/null
+    gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone="$TPU_ZONE" \
+        --format="value(networkEndpoints[].accessConfig.externalIp)" 2>/dev/null \
+      | tr ';,' '\n\n' | grep -E '^[0-9]+\.' > "$IP_CACHE"
+  fi
+  cat "$IP_CACHE" 2>/dev/null
+}
+
 _one() {  # _one <worker> <cmd> - hard wall-clock cap without GNU timeout (macOS)
-  local w="$1" cmd="$2" out rc
-  out=$( gcloud compute tpus tpu-vm ssh "$TPU_NAME" --zone="$TPU_ZONE" --worker="$w" \
-      --command="$cmd" -- "${SSH_OPTS[@]}" 2>&1 & pid=$!
-    ( sleep "$SSH_TIMEOUT"; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 2; pkill -KILL -P "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null ) 2>/dev/null & wd=$!
+  local w="$1" cmd="$2" out rc ip=""
+  local -a transport
+  # Prefer a multiplexed direct ssh; fall back to gcloud if the key, the IP
+  # cache or FLEET_FAST say otherwise. (No mapfile/readarray here: macOS
+  # still ships bash 3.2.)
+  if [ "$FLEET_FAST" = 1 ] && [ -r "$SSH_KEY" ]; then
+    ip=$(_ips | sed -n "$((w + 1))p")
+  fi
+  if [ -n "$ip" ]; then
+    mkdir -p "$CM_DIR" 2>/dev/null
+    transport=(ssh "${FAST_OPTS[@]}" "$SSH_USER@$ip")
+  else
+    transport=(gcloud compute tpus tpu-vm ssh "$TPU_NAME" --zone="$TPU_ZONE"
+               --worker="$w" --command="$cmd" -- "${SSH_OPTS[@]}")
+    cmd=""  # gcloud carries the command in --command
+  fi
+  out=$( if [ -n "$cmd" ]; then "${transport[@]}" "$cmd" 2>&1 & else "${transport[@]}" 2>&1 & fi
+    pid=$!
+    # The watchdog MUST NOT inherit this command substitution's stdout: killing
+    # the subshell orphans its `sleep`, which then holds the pipe open and makes
+    # $( ) block for the FULL timeout even when ssh returned in milliseconds.
+    # That bug turned FLEET_SSH_TIMEOUT into a hard floor on every call.
+    ( sleep "$SSH_TIMEOUT"; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 2; pkill -KILL -P "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
     wait "$pid" 2>/dev/null; rc=$?
-    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+    pkill -P "$wd" 2>/dev/null; kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
     if [ $rc -ge 128 ]; then
       if [ "${FLEET_EXPECT_HANG:-0}" = 1 ]; then echo "(session cut after ${SSH_TIMEOUT}s - expected for a detached launch; verify with 'procs')"
       else echo "!! worker $w: TIMEOUT after ${SSH_TIMEOUT}s (host wedged or unreachable)"; fi
